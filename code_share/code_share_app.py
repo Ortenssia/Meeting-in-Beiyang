@@ -1,0 +1,882 @@
+"""
+相识北洋 - 校园社交应用主 App 控制器 (Challenge 3)
+"""
+import os
+import sys
+import threading
+from kivy.app import App
+from kivy.uix.screenmanager import ScreenManager
+from kivy.clock import Clock, mainthread
+
+# 确保能导入同包下的模块
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from screens.discover_screen import DiscoverScreen
+from screens.friends_screen import FriendsScreen
+from screens.chat_screen import ChatScreen
+from screens.profile_screen import ProfileScreen
+from screens.settings_screen import SettingsScreen
+
+from services.udp_service import UDPService
+from services.connection_manager import ConnectionManager
+from services.friend_db import FriendDB
+from services.message_service import MessageService
+
+from utils.helpers import Helpers
+from utils.protocol import Protocol
+from kivy.core.text import LabelBase
+
+
+def register_chinese_font():
+    """动态搜索系统中的中文字体并注册为 Kivy 默认字体，防止中文乱码显示为豆腐块"""
+    import os
+    local_font = os.path.join(os.path.dirname(__file__), 'fonts', 'simhei.ttf')
+    candidates = [
+        # Windows (Preferred Modern Font)
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        # macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        # Android
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/NotoSansSC-Regular.ttf",
+        # Fallbacks
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        "/system/fonts/DroidSansFallback.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        local_font,
+    ]
+    selected_font = None
+    for path in candidates:
+        if os.path.exists(path):
+            selected_font = path
+            break
+    if selected_font:
+        LabelBase.register(
+            name='app_chinese_font',
+            fn_regular=selected_font,
+            fn_bold=selected_font,
+            fn_italic=selected_font,
+            fn_bolditalic=selected_font
+        )
+        # Apply font globally to all text widgets using Builder
+        from kivy.lang import Builder
+        Builder.load_string('''
+<Label>:
+    font_name: 'app_chinese_font'
+<Button>:
+    font_name: 'app_chinese_font'
+<TextInput>:
+    font_name: 'app_chinese_font'
+
+<ModernLabel@Label>:
+    font_name: 'app_chinese_font'
+    color: 0.95, 0.95, 0.95, 1
+
+<ModernButton@Button>:
+    font_name: 'app_chinese_font'
+    background_normal: ''
+    background_down: ''
+    background_color: 0, 0, 0, 0
+    color: 0.9, 0.9, 0.9, 1
+    font_size: '14sp'
+    canvas.before:
+        Color:
+            rgba: (0.17, 0.17, 0.18, 1) if not self.disabled else (0.1, 0.1, 0.1, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+
+<ModernButtonAccent@Button>:
+    font_name: 'app_chinese_font'
+    background_normal: ''
+    background_down: ''
+    background_color: 0, 0, 0, 0
+    color: 1, 1, 1, 1
+    font_size: '14sp'
+    canvas.before:
+        Color:
+            rgba: (0.0, 0.6, 1.0, 1) if self.state == 'normal' else (0.0, 0.5, 0.8, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+
+<ModernButtonDanger@Button>:
+    font_name: 'app_chinese_font'
+    background_normal: ''
+    background_down: ''
+    background_color: 0, 0, 0, 0
+    color: 1, 1, 1, 1
+    font_size: '14sp'
+    canvas.before:
+        Color:
+            rgba: (0.9, 0.25, 0.3, 1) if self.state == 'normal' else (0.7, 0.15, 0.2, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+
+<ModernButtonSecondary@Button>:
+    font_name: 'app_chinese_font'
+    background_normal: ''
+    background_down: ''
+    background_color: 0, 0, 0, 0
+    color: 0.6, 0.6, 0.65, 1
+    font_size: '14sp'
+    canvas.before:
+        Color:
+            rgba: (0.12, 0.12, 0.13, 1) if self.state == 'normal' else (0.08, 0.08, 0.09, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+
+<ModernTextInput@TextInput>:
+    font_name: 'app_chinese_font'
+    foreground_color: 0.95, 0.95, 0.95, 1
+    background_color: 0, 0, 0, 0
+    cursor_color: 0.0, 0.6, 1.0, 1
+    padding: [dp(12), dp(10), dp(12), dp(10)]
+    use_bubble: True
+    canvas.before:
+        Color:
+            rgba: (0.17, 0.17, 0.18, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+        Color:
+            rgba: (0.0, 0.6, 1.0, 1) if self.focus else (0, 0, 0, 0)
+        Line:
+            rounded_rectangle: (self.x, self.y, self.width, self.height, dp(8))
+            width: dp(1)
+''')
+        print(f"[FontManager] 已成功注册中文字体: {selected_font}")
+    else:
+        print("[FontManager] 警告: 未在系统中找到合适的中文默认字体，中文可能显示为乱码！")
+
+
+# 立即执行中文字体注册
+register_chinese_font()
+
+
+# ================================================================== #
+#  UI 重构全局组件：动态多彩头像与矢量图标导航键
+# ================================================================== #
+import hashlib
+import math
+from kivy.properties import StringProperty, BooleanProperty, NumericProperty
+from kivy.uix.widget import Widget
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.metrics import dp
+from kivy.graphics import Color, Ellipse, Line, RoundedRectangle, Rectangle
+from kivy.factory import Factory
+from kivy.clock import Clock
+
+
+class SolidColorBackground(Widget):
+    """纯色平铺背景 (支持自定义本地背景图)"""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.bind(pos=self._redraw, size=self._redraw)
+        Clock.schedule_once(self._bind_to_app, 0)
+        
+    def _bind_to_app(self, dt):
+        from kivy.app import App
+        app = App.get_running_app()
+        if app and hasattr(app, "custom_background"):
+            app.bind(custom_background=self._redraw)
+            self._redraw()
+
+    def _redraw(self, *args):
+        self.canvas.clear()
+        if self.width <= 1 or self.height <= 1:
+            return
+            
+        from kivy.app import App
+        import os
+        app = App.get_running_app()
+        bg_source = getattr(app, "custom_background", "") if app else ""
+
+        with self.canvas:
+            if bg_source and os.path.exists(bg_source):
+                Color(1, 1, 1, 1.0)
+                Rectangle(pos=self.pos, size=self.size, source=bg_source)
+            else:
+                Color(0.07, 0.07, 0.07, 1.0) # Solid dark `#121212` background
+                Rectangle(pos=self.pos, size=self.size)
+
+Factory.register('SolidColorBackground', cls=SolidColorBackground)
+
+
+class LetterAvatar(Widget):
+    """动态哈希多彩圆形文字头像组件，右上角可选在线状态点，支持自定义头像"""
+    text = StringProperty("")
+    name_key = StringProperty("")
+    is_online = BooleanProperty(False)
+    avatar_size = NumericProperty(dp(40))
+    avatar_source = StringProperty("")
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.size_hint = (None, None)
+        self.size = (self.avatar_size, self.avatar_size)
+        
+        self.lbl = Label(
+            text="",
+            font_size="15sp",
+            bold=True,
+            color=(1, 1, 1, 1),
+            font_name='app_chinese_font',
+            halign="center",
+            valign="middle"
+        )
+        self.add_widget(self.lbl)
+        
+        self.bind(pos=self._redraw, size=self._redraw, name_key=self._redraw, is_online=self._redraw, text=self._redraw)
+
+    def _redraw(self, *args):
+        self.size = (self.avatar_size, self.avatar_size)
+        self.lbl.size = self.size
+        self.lbl.pos = self.pos
+        self.lbl.font_size = f"{max(9, int(self.avatar_size * 0.42))}sp"
+        
+        display_char = self.text.strip()
+        if display_char:
+            self.lbl.text = display_char[0].upper()
+        else:
+            self.lbl.text = "?"
+
+        self.canvas.before.clear()
+        self.canvas.after.clear()
+        
+        from kivy.app import App
+        import os
+        app = App.get_running_app()
+
+        custom_avatar = self.avatar_source
+        if not custom_avatar and app and self.name_key == getattr(app, 'device_name', ''):
+            custom_avatar = getattr(app, 'custom_avatar', '')
+
+        with self.canvas.before:
+            if custom_avatar and os.path.exists(custom_avatar):
+                Color(1, 1, 1, 1)
+                Ellipse(pos=self.pos, size=self.size, source=custom_avatar)
+                self.lbl.text = "" # Hide the letter if avatar is shown
+            else:
+                bg_rgba = self._get_color_by_name(self.name_key)
+                Color(*bg_rgba)
+                Ellipse(pos=self.pos, size=self.size)
+
+        if self.is_online:
+            with self.canvas.after:
+                Color(0.04, 0.04, 0.06, 1)
+                Ellipse(pos=(self.x + self.width - dp(12), self.y), size=(dp(12), dp(12)))
+                Color(0.0, 0.9, 0.46, 1)
+                Ellipse(pos=(self.x + self.width - dp(10), self.y + dp(2)), size=(dp(8), dp(8)))
+
+    def _get_color_by_name(self, name):
+        if not name:
+            return (0.44, 0.32, 1.0, 1)
+        colors = [
+            (0.53, 0.33, 0.82, 1),  # Purple
+            (0.04, 0.24, 0.38, 1),  # Cyan
+            (0.13, 0.75, 0.42, 1),  # Green
+            (0.92, 0.23, 0.35, 1),  # Red
+            (0.98, 0.51, 0.19, 1),  # Orange
+            (0.18, 0.60, 0.85, 1)   # Blue
+        ]
+        try:
+            h = hashlib.md5(name.encode('utf-8', errors='ignore')).hexdigest()
+            val = int(h, 16)
+            return colors[val % len(colors)]
+        except Exception:
+            return (0.44, 0.32, 1.0, 1)
+
+
+class IconTabButton(Button):
+    """手绘矢量图标底栏导航按键 (Minimalist)"""
+    tab_name = StringProperty("")
+    is_active = BooleanProperty(False)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.background_normal = ''
+        self.background_down = ''
+        self.background_color = (0, 0, 0, 0)
+        self.color = (0, 0, 0, 0)
+        
+        self.text_label = Label(
+            text="",
+            font_name="app_chinese_font",
+            font_size="10sp",
+            color=(0.5, 0.55, 0.65, 1),
+            halign="center",
+            valign="middle"
+        )
+        self.add_widget(self.text_label)
+        self.bind(pos=self.redraw, size=self.redraw, is_active=self.redraw, text=self.redraw)
+
+    def redraw(self, *args):
+        self.canvas.before.clear()
+        self.canvas.after.clear()
+        
+        # Color palette for active / inactive
+        active_color = (0.0, 0.6, 1.0, 1) # QQ Blue
+        inactive_color = (0.6, 0.6, 0.65, 1)
+        
+        self.text_label.text = self.text
+        self.text_label.color = active_color if self.is_active else inactive_color
+        self.text_label.bold = False
+        self.text_label.size = (self.width, dp(18))
+        self.text_label.pos = (self.x, self.y + dp(4))
+        self.text_label.text_size = (self.width, None)
+
+        cx = self.x + self.width / 2
+        cy = self.y + self.height - dp(21)
+        size = dp(20)
+
+        with self.canvas.before:
+            pass # No glowing dots
+
+        with self.canvas.after:
+            Color(*(active_color if self.is_active else inactive_color))
+
+            # Refined minimalist vector icons
+            if self.tab_name == "discover":
+                Line(ellipse=(cx - size/2, cy - size/2, size, size), width=dp(1.2))
+                Line(points=[cx - size/4, cy + size/4, cx + size/4, cy - size/4], width=dp(1.2))
+                Ellipse(pos=(cx - dp(2), cy - dp(2)), size=(dp(4), dp(4)))
+                
+            elif self.tab_name == "friends":
+                Ellipse(pos=(cx - dp(4), cy), size=(dp(8), dp(8)))
+                Line(bezier=[cx - dp(8), cy - dp(6), cx - dp(7), cy - dp(2), cx + dp(7), cy - dp(2), cx + dp(8), cy - dp(6)], width=dp(1.2))
+                
+            elif self.tab_name == "chat":
+                Line(rounded_rectangle=(cx - dp(8), cy - dp(5), dp(16), dp(12), dp(4)), width=dp(1.2))
+                Line(points=[cx - dp(4), cy - dp(5), cx - dp(7), cy - dp(9), cx - dp(6), cy - dp(5)], width=dp(1.2))
+                Line(points=[cx - dp(3), cy + dp(1), cx + dp(3), cy + dp(1)], width=dp(1))
+                
+            elif self.tab_name == "profile":
+                Line(circle=(cx, cy, dp(7)), width=dp(1.2))
+                Ellipse(pos=(cx - dp(2.5), cy + dp(1)), size=(dp(5), dp(5)))
+                Line(bezier=[cx - dp(5), cy - dp(5), cx - dp(3), cy - dp(2), cx + dp(3), cy - dp(2), cx + dp(5), cy - dp(5)], width=dp(1.2))
+
+            elif self.tab_name == "settings":
+                Line(circle=(cx, cy, dp(4)), width=dp(1.2))
+                import math
+                for angle in range(0, 360, 60):
+                    rad = math.radians(angle)
+                    x1 = cx + math.cos(rad) * dp(4)
+                    y1 = cy + math.sin(rad) * dp(4)
+                    x2 = cx + math.cos(rad) * dp(7)
+                    y2 = cy + math.sin(rad) * dp(7)
+                    Line(points=[x1, y1, x2, y2], width=dp(1.2))
+
+
+Factory.register('LetterAvatar', cls=LetterAvatar)
+Factory.register('IconTabButton', cls=IconTabButton)
+
+
+class CodeShareApp(App):
+    """相识北洋主应用"""
+    custom_background = StringProperty("")
+    custom_avatar = StringProperty("")
+
+    def __init__(self, tcp_port=Protocol.DEFAULT_TCP_PORT, udp_port=Protocol.DEFAULT_UDP_PORT, db_path="friends.db", name_override="", **kwargs):
+        super().__init__(**kwargs)
+        self.tcp_port = tcp_port
+        self.udp_port = udp_port
+        self.db_path = db_path
+        self.device_name = name_override or Helpers.get_hostname()
+
+        self.friend_db = None
+        self.connection_manager = None
+        self.udp_service = None
+        self.message_service = None
+
+    def build(self):
+        self.title = "相识北洋"
+        self._init_services()
+
+        from kivy.uix.screenmanager import SlideTransition
+        sm = ScreenManager(transition=SlideTransition(duration=0.2))
+        sm.add_widget(DiscoverScreen(name='discover'))
+        sm.add_widget(FriendsScreen(name='friends'))
+        sm.add_widget(ChatScreen(name='chat'))
+        sm.add_widget(ProfileScreen(name='profile'))
+        sm.add_widget(SettingsScreen(name='settings'))
+        
+        # 默认跳到发现页面
+        sm.current = 'discover'
+        return sm
+
+    def _init_services(self):
+        # 1. 初始化数据库
+        self.friend_db = FriendDB(self.db_path)
+
+        # 从数据库加载上次保存的昵称和个性化设置
+        my_profile = self.friend_db.get_my_profile()
+        if my_profile:
+            # 如果命令行没有强行指定名字，才用数据库里的
+            if self.device_name == Helpers.get_hostname() or not self.device_name:
+                if my_profile.get("name"):
+                    self.device_name = my_profile["name"]
+            self.custom_background = my_profile.get("background", "")
+            self.custom_avatar = my_profile.get("avatar", "")
+
+        # 2. 初始化连接池管理器
+        self.connection_manager = ConnectionManager(
+            my_name=self.device_name,
+            tcp_port=self.tcp_port
+        )
+
+        # 3. 初始化 UDP 广播发现服务
+        self.udp_service = UDPService(
+            port=self.udp_port,
+            device_name=self.device_name,
+            tcp_port=self.tcp_port
+        )
+
+        # 4. 初始化消息中继服务
+        self.message_service = MessageService(
+            connection_manager=self.connection_manager,
+            friend_db=self.friend_db
+        )
+
+        # 5. 绑定回调
+        self.udp_service.on_device_found = self._on_device_found
+        self.udp_service.on_device_offline = self._on_device_offline
+
+        self.connection_manager.on_friend_connected = self._on_friend_connected
+        self.connection_manager.on_friend_disconnected = self._on_friend_disconnected
+        self.connection_manager.on_message_received = self._on_message_received
+        self.connection_manager.on_error = self._on_error
+
+        self.message_service.on_message_received = self._on_service_message_received
+        self.message_service.on_friend_request = self._on_service_friend_request
+        self.message_service.on_friend_accepted = self._on_service_friend_accepted
+
+    def on_start(self):
+        # 启动所有后台线程与网络监听
+        if self.udp_service:
+            self.udp_service.start()
+        if self.connection_manager:
+            self.connection_manager.start_server()
+        if self.message_service:
+            self.message_service.start()
+
+    def on_stop(self):
+        # 停止所有服务与线程释放资源
+        if self.udp_service:
+            self.udp_service.stop()
+        if self.connection_manager:
+            self.connection_manager.stop()
+        if self.message_service:
+            self.message_service.stop()
+        if self.friend_db:
+            self.friend_db.close()
+
+    # ================================================================== #
+    #  服务层回调处理
+    # ================================================================== #
+
+    @mainthread
+    def _on_device_found(self, device_info):
+        discover = self.root.get_screen('discover')
+        if discover:
+            discover._refresh_discovered()
+
+        # 支持移动性：如果发现的设备是已存好友且 IP 变更，则更新地址簿并重连
+        name = device_info.device_name
+        ip = device_info.ip
+        port = device_info.tcp_port
+        friend = self.friend_db.get_friend(name)
+        if friend:
+            old_ip = friend.get("ip", "")
+            if old_ip != ip:
+                self.friend_db.update_friend_ip(name, ip)
+                print(f"[App] 检测到好友 {name} IP 地址变更: {old_ip} -> {ip}")
+            # 如果未连接，在后台发起 TCP 连接
+            if not self.connection_manager.is_connected(ip):
+                threading.Thread(
+                    target=self.connection_manager.connect_to_friend,
+                    args=(ip, port, name),
+                    daemon=True
+                ).start()
+
+    @mainthread
+    def _on_device_offline(self, ip):
+        discover = self.root.get_screen('discover')
+        if discover:
+            discover._refresh_discovered()
+
+    @mainthread
+    def _on_friend_connected(self, name, ip):
+        discover = self.root.get_screen('discover')
+        if discover:
+            discover._refresh_online_friends()
+        friends = self.root.get_screen('friends')
+        if friends:
+            friends.refresh()
+
+        # 触发离线消息同步
+        if self.message_service:
+            threading.Thread(
+                target=self.message_service.flush_pending_messages,
+                args=(name,),
+                daemon=True
+            ).start()
+
+    @mainthread
+    def _on_friend_disconnected(self, ip):
+        discover = self.root.get_screen('discover')
+        if discover:
+            discover._refresh_online_friends()
+        friends = self.root.get_screen('friends')
+        if friends:
+            friends.refresh()
+
+    def _on_message_received(self, ip, data):
+        # 将接收到的原始网络包传递给消息服务进一步解析
+        if self.message_service:
+            self.message_service.handle_message(ip, data)
+
+    def _on_error(self, msg):
+        print(f"[BeiyangSocialApp Error] {msg}")
+
+    @mainthread
+    def _on_service_message_received(self, friend_name, content, timestamp):
+        chat = self.root.get_screen('chat')
+        if chat:
+            chat.on_new_message(friend_name, content, timestamp)
+
+    @mainthread
+    def _on_service_friend_request(self, profile, is_match):
+        # 用户手动审核好友申请的弹窗 (高拟真卡片式重构)
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.label import Label
+        from kivy.metrics import dp
+        from kivy.factory import Factory
+
+        sender_name = profile.get("name", "Unknown")
+        bio = profile.get("bio", "这个用户很懒，什么都没写")
+        tags = profile.get("tags", [])
+        sender_ip = profile.get("ip", "0.0.0.0")
+
+        # 容器布局
+        # 容器布局
+        layout = BoxLayout(orientation='vertical', padding=[dp(16), dp(16), dp(16), dp(10)], spacing=dp(12))
+        with layout.canvas.before:
+            # Frosted glass background
+            Color(0.1, 0.1, 0.15, 0.72)
+            layout_bg = RoundedRectangle(pos=layout.pos, size=layout.size, radius=[dp(20)])
+            # Specular outline border
+            Color(1, 1, 1, 0.15)
+            layout_border = Line(rounded_rectangle=(layout.x, layout.y, layout.width, layout.height, dp(20)), width=dp(1))
+            
+        def update_layout_canvas(w, v):
+            layout_bg.pos = w.pos
+            layout_bg.size = w.size
+            layout_border.rounded_rectangle = (w.x, w.y, w.width, w.height, dp(20))
+            
+        layout.bind(pos=update_layout_canvas, size=update_layout_canvas)
+        
+        # 1. 顶部：大字标题及头像预览行
+        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(50), spacing=dp(10))
+        avatar = Factory.LetterAvatar(avatar_size=dp(46), text=sender_name, name_key=sender_name)
+        
+        title_box = BoxLayout(orientation='vertical', size_hint_x=0.8)
+        title_lbl = Label(
+            text="收到好友申请",
+            font_size='16sp',
+            bold=True,
+            color=(1, 1, 1, 1),
+            halign="left"
+        )
+        title_lbl.bind(size=title_lbl.setter("text_size"))
+        sub_title_lbl = Label(
+            text=f"来自 IP: {sender_ip}",
+            font_size='12sp',
+            color=(0.55, 0.57, 0.68, 1),
+            halign="left"
+        )
+        sub_title_lbl.bind(size=sub_title_lbl.setter("text_size"))
+        title_box.add_widget(title_lbl)
+        title_box.add_widget(sub_title_lbl)
+        
+        header.add_widget(avatar)
+        header.add_widget(title_box)
+        layout.add_widget(header)
+
+        # 2. 中间：简介和标签信息卡片
+        info_card = BoxLayout(orientation='vertical', spacing=dp(6), padding=dp(10))
+        with info_card.canvas.before:
+            from kivy.graphics import Color, RoundedRectangle
+            Color(1, 1, 1, 0.04) # Frosted card background
+            info_bg = RoundedRectangle(pos=info_card.pos, size=info_card.size, radius=[dp(8)])
+            Color(1, 1, 1, 0.08) # Card border
+            info_border = Line(rounded_rectangle=(info_card.x, info_card.y, info_card.width, info_card.height, dp(8)), width=dp(1))
+        
+        def update_info_bg(w, v):
+            info_bg.pos = w.pos
+            info_bg.size = w.size
+            info_border.rounded_rectangle = (w.x, w.y, w.width, w.height, dp(8))
+        info_card.bind(pos=update_info_bg, size=update_info_bg)
+
+        bio_lbl = Label(
+            text=f"个人简介:\n{bio}",
+            font_size='13sp',
+            color=(0.85, 0.85, 0.9, 1),
+            halign="left",
+            valign="top"
+        )
+        bio_lbl.bind(size=bio_lbl.setter("text_size"))
+        
+        tags_lbl = Label(
+            text=f"兴趣标签: {', '.join(tags) if tags else '无'}",
+            font_size='13sp',
+            color=(0.44, 0.32, 1.0, 1), # 主色紫高亮显示标签
+            halign="left"
+        )
+        tags_lbl.bind(size=tags_lbl.setter("text_size"))
+        
+        info_card.add_widget(bio_lbl)
+        info_card.add_widget(tags_lbl)
+        layout.add_widget(info_card)
+
+        # 3. 底部：接受 / 忽略 按钮
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(10))
+        
+        accept_btn = Factory.ModernButtonAccent(
+            text="同意并添加",
+            font_size='14sp'
+        )
+        ignore_btn = Factory.ModernButtonSecondary(
+            text="忽略",
+            font_size='14sp'
+        )
+        
+        btn_row.add_widget(accept_btn)
+        btn_row.add_widget(ignore_btn)
+        layout.add_widget(btn_row)
+
+        popup = Popup(
+            title="",
+            title_size=0, # 隐藏默认的 Popup 标题栏
+            content=layout,
+            size_hint=(0.84, 0.46),
+            background_color=(0, 0, 0, 0), # 完全透明，使用自制磨砂玻璃面板
+            background="", # 去除默认灰色边框背景
+        )
+        
+        def on_accept(_btn):
+            # 添加好友到数据库
+            self.friend_db.add_friend(
+                name=sender_name,
+                ip=sender_ip,
+                port=Protocol.DEFAULT_TCP_PORT,
+                tags=tags,
+                bio=bio,
+                category="朋友"
+            )
+            # 发送同意应答
+            self.message_service.send_friend_accept(sender_name)
+            # 刷新 UI
+            friends = self.root.get_screen('friends')
+            if friends:
+                friends.refresh()
+            discover = self.root.get_screen('discover')
+            if discover:
+                discover._refresh_online_friends()
+            popup.dismiss()
+
+        accept_btn.bind(on_press=on_accept)
+        ignore_btn.bind(on_press=popup.dismiss)
+        popup.open()
+
+    @mainthread
+    def _on_service_friend_accepted(self, friend_name, friend_ip):
+        discover = self.root.get_screen('discover')
+        if discover:
+            discover._refresh_online_friends()
+        friends = self.root.get_screen('friends')
+        if friends:
+            friends.refresh()
+
+    # ================================================================== #
+    #  UI 层调用 API 接口
+    # ================================================================== #
+
+    def get_local_device_info(self):
+        return {
+            'name': self.device_name,
+            'ip': Helpers.get_default_ip()
+        }
+
+    def set_tcp_port(self, port):
+        self.tcp_port = port
+        if self.connection_manager:
+            self.connection_manager.tcp_port = port
+        if self.udp_service:
+            self.udp_service.tcp_port = port
+
+    def get_my_profile(self):
+        p = self.friend_db.get_my_profile()
+        p["ip"] = Helpers.get_default_ip()
+        if self.device_name:
+            p["name"] = self.device_name
+        return p
+
+    def save_profile(self, profile):
+        self.friend_db.save_profile(profile)
+        self.device_name = profile.get("name", self.device_name)
+        if "background" in profile:
+            self.custom_background = profile["background"]
+        if "avatar" in profile:
+            self.custom_avatar = profile["avatar"]
+        if self.udp_service:
+            self.udp_service.device_name = self.device_name
+        if self.connection_manager:
+            self.connection_manager.my_name = self.device_name
+
+    def scan_for_people(self):
+        if self.udp_service:
+            self.udp_service.manual_scan()
+
+    def get_discovered_people(self):
+        if self.udp_service:
+            with self.udp_service._devices_lock:
+                return [
+                    {"name": dev.device_name, "ip": dev.ip}
+                    for dev in self.udp_service.devices.values()
+                    if dev.is_online()
+                ]
+        return []
+
+    def send_friend_request(self, name, ip):
+        if self.message_service:
+            return self.message_service.send_friend_request(name, ip)
+        return False
+
+    def get_all_friends(self):
+        if self.friend_db:
+            friends = self.friend_db.get_friends()
+            for f in friends:
+                f["online"] = self.connection_manager.is_friend_online(f["name"])
+            return friends
+        return []
+
+    def get_online_friends(self):
+        if self.connection_manager:
+            return self.connection_manager.get_online_friends()
+        return []
+
+    def delete_friend(self, name):
+        friend = self.friend_db.get_friend(name)
+        if friend:
+            ip = friend.get("ip")
+            if ip and self.connection_manager:
+                self.connection_manager.disconnect_friend(ip)
+            self.friend_db.remove_friend(name)
+            # 刷新 UI
+            friends = self.root.get_screen('friends')
+            if friends:
+                friends.refresh()
+            discover = self.root.get_screen('discover')
+            if discover:
+                discover._refresh_online_friends()
+
+    def set_friend_category(self, name, category):
+        if self.friend_db:
+            self.friend_db.set_friend_category(name, category)
+            # 刷新 UI
+            friends = self.root.get_screen('friends')
+            if friends:
+                friends.refresh()
+
+    def open_chat_with(self, name):
+        self.root.current = 'chat'
+        chat_screen = self.root.get_screen('chat')
+        if chat_screen:
+            chat_screen.show_window_view(name)
+
+    def send_chat_message(self, friend_name, *args):
+        # 支持 (friend_name, text) 和 (friend_name, friend_ip, text)
+        if len(args) == 1:
+            text = args[0]
+        elif len(args) == 2:
+            text = args[1]
+        else:
+            return False
+
+        if self.message_service:
+            return self.message_service.send_message(friend_name, text)
+        return False
+
+    def get_chat_history(self, friend_name):
+        if self.friend_db:
+            return self.friend_db.get_chat_history(friend_name, limit=100)
+        return []
+
+    def clear_chat_history(self, friend_name):
+        if self.friend_db:
+            self.friend_db.clear_chat_history(friend_name)
+            # 刷新聊天窗口
+            chat_screen = self.root.get_screen('chat')
+            if chat_screen and chat_screen._current_view == 'window':
+                chat_screen.chat_window_view.clear_messages()
+
+    def get_chat_list(self):
+        try:
+            cursor = self.friend_db.conn.cursor()
+            cursor.execute("""
+                SELECT friend_name, content, timestamp 
+                FROM chat_history 
+                WHERE id IN (
+                    SELECT MAX(id) 
+                    FROM chat_history 
+                    GROUP BY friend_name
+                )
+                ORDER BY timestamp DESC
+            """)
+            rows = cursor.fetchall()
+            
+            chat_list = []
+            for row in rows:
+                friend_name = row["friend_name"]
+                content = row["content"]
+                timestamp = row["timestamp"]
+                unread = self.get_pending_message_count(friend_name)
+                
+                chat_list.append({
+                    "name": friend_name,
+                    "last_message": content,
+                    "time": timestamp[-8:] if len(timestamp) >= 8 else timestamp,
+                    "unread": unread
+                })
+            return chat_list
+        except Exception as e:
+            print(f"获取聊天列表失败: {e}")
+            return []
+
+    def clear_pending_messages(self, friend_name):
+        if self.friend_db:
+            self.friend_db.clear_pending_messages(friend_name)
+
+    def get_pending_message_count(self, for_friend=None):
+        try:
+            cursor = self.friend_db.conn.cursor()
+            if for_friend:
+                cursor.execute("SELECT COUNT(*) FROM pending_messages WHERE to_name = ?", (for_friend,))
+            else:
+                cursor.execute("SELECT COUNT(*) FROM pending_messages")
+            row = cursor.fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0

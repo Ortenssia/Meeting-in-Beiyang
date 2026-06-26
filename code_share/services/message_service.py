@@ -1,0 +1,689 @@
+"""
+消息中继服务模块 (Challenge 3 - 相识北洋)
+
+负责在 P2P 社交网络中协调好友之间的消息收发与中继：
+  - 直连发送：若目标好友在线（在连接池中），直接通过 TCP 发送。
+  - 洪泛中继：若目标好友离线，将消息作为 RELAY_MESSAGE 转发给所有在线互友。
+  - 去重机制：通过 msg_id 避免洪泛中继产生重复投递。
+  - 离线缓存：离线消息存入 pending 队列，好友上线后批量推送。
+
+消息类型（由 Protocol 定义）：
+  - CHAT_MESSAGE   : 聊天消息（含 to_name / from_name / content / timestamp）
+  - RELAY_MESSAGE  : 中继消息（外层包裹，内含原始消息 + relay_hops）
+  - FRIEND_REQUEST : 好友请求（附带发送方 profile + conditions）
+  - FRIEND_ACCEPT  : 接受好友请求（附带接受方 profile + IP）
+  - HEARTBEAT      : 心跳包（用于维护在线状态与 IP 更新）
+
+依赖：
+  - connection_manager: 连接池管理器（TCP 连接管理）
+  - friend_db:        好友 / 消息 / 聊天记录 SQLite 存储
+"""
+
+import json
+import time
+import uuid
+import threading
+import logging
+from typing import Any, Callable, Dict, List, Optional
+
+try:
+    from ..utils.protocol import Protocol
+except ImportError:
+    from utils.protocol import Protocol
+
+logger = logging.getLogger(__name__)
+
+
+class MessageService:
+    """相识北洋 - 消息中继服务
+
+    在 P2P 网络中为好友之间提供可靠的消息投递，支持直连、洪泛中继和离线缓存。
+    """
+
+    # ================================================================== #
+    #  消息类型常量（与 Protocol 保持同步，本地缓存避免循环依赖）
+    # ================================================================== #
+    CHAT_MESSAGE = "CHAT_MESSAGE"
+    RELAY_MESSAGE = "RELAY_MESSAGE"
+    FRIEND_REQUEST = "FRIEND_REQUEST"
+    FRIEND_ACCEPT = "FRIEND_ACCEPT"
+    HEARTBEAT = "HEARTBEAT"
+
+    # 洪泛中继最大跳数，防止无限传播
+    MAX_RELAY_HOPS = 3
+
+    # 心跳间隔（秒）
+    HEARTBEAT_INTERVAL = 15
+
+    def __init__(self, connection_manager, friend_db):
+        """
+        初始化消息服务。
+
+        Args:
+            connection_manager: 连接池管理器实例，提供以下接口：
+                - is_friend_online(name: str) -> bool
+                - send_to_friend(name: str, data: bytes) -> bool
+                - get_online_friends() -> list[str]
+                - get_friend_ip(name: str) -> str
+            friend_db: 好友数据库实例，提供以下接口：
+                - get_my_profile() -> dict
+                - get_friend(name) -> dict | None
+                - get_all_friends() -> list[dict]
+                - add_friend(name, ip, tags, category, ...) -> None
+                - update_friend_ip(name, ip) -> None
+                - save_chat_message(from_name, to_name, content, timestamp, msg_id) -> None
+                - get_chat_history(friend_name, limit) -> list[dict]
+                - check_msg_id(msg_id) -> bool  (True=已存在)
+                - record_msg_id(msg_id) -> None
+                - get_pending_messages(for_name) -> list[dict]
+                - add_pending_message(to_name, data_json) -> None
+                - clear_pending_messages(for_name) -> None
+                - get_friend_conditions() -> dict
+                - check_conditions_match(profile) -> bool
+        """
+        self.connection_manager = connection_manager
+        self.friend_db = friend_db
+
+        # 回调函数（由上层 App 或 Screen 绑定）
+        self.on_message_received: Optional[Callable[[str, str, str], None]] = None
+        self.on_friend_request: Optional[Callable[[dict, bool], None]] = None
+        self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
+
+        # 心跳定时器
+        self._heartbeat_timer: Optional[threading.Timer] = None
+        self._running = False
+
+        # 已处理的中继消息 ID 集合（内存级去重，限制大小）
+        self._processed_relay_ids: set = set()
+        self._relay_id_lock = threading.Lock()
+        self._MAX_RELAY_CACHE = 5000
+
+    # ================================================================== #
+    #  生命周期管理
+    # ================================================================== #
+
+    def start(self):
+        """启动消息服务，开始周期性心跳。"""
+        self._running = True
+        self._start_heartbeat()
+        logger.info("[MessageService] 已启动")
+
+    def stop(self):
+        """停止消息服务与心跳。"""
+        self._running = False
+        if self._heartbeat_timer:
+            self._heartbeat_timer.cancel()
+            self._heartbeat_timer = None
+        logger.info("[MessageService] 已停止")
+
+    # ================================================================== #
+    #  发送消息
+    # ================================================================== #
+
+    def send_message(self, to_name: str, content: str) -> bool:
+        """
+        向指定好友发送聊天消息。
+
+        投递策略：
+          1. 若目标好友在线（在连接池中），直接发送 CHAT_MESSAGE。
+          2. 若目标好友离线，将消息作为 RELAY_MESSAGE 转发给所有在线好友，
+             由在线好友代为中继（洪泛）。
+          3. 同时将消息存入 chat_history 与 pending 队列。
+
+        Args:
+            to_name: 目标好友名称。
+            content: 消息文本内容。
+
+        Returns:
+            True 表示消息已成功投递（直连或进入中继），False 表示投递失败。
+        """
+        my_profile = self.friend_db.get_my_profile()
+        my_name = my_profile.get("name", "Unknown")
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        msg_id = str(uuid.uuid4())
+
+        # 构造 CHAT_MESSAGE
+        chat_msg = {
+            "type": self.CHAT_MESSAGE,
+            "msg_id": msg_id,
+            "from_name": my_name,
+            "to_name": to_name,
+            "content": content,
+            "timestamp": timestamp,
+        }
+
+        # 保存到本地聊天记录
+        self.friend_db.save_chat_message(
+            from_name=my_name,
+            to_name=to_name,
+            content=content,
+            timestamp=timestamp,
+            msg_id=msg_id,
+        )
+
+        # 尝试直连发送
+        if self.connection_manager.is_friend_online(to_name):
+            success = self._send_data_to_friend(to_name, chat_msg)
+            if success:
+                logger.info(f"[MessageService] 直连发送 -> {to_name}: {content[:50]}")
+                return True
+            logger.warning(f"[MessageService] 直连发送失败 -> {to_name}，降级为中继")
+
+        # 离线：存入 pending 队列
+        self.friend_db.add_pending_message(
+            to_name=to_name,
+            data_json=json.dumps(chat_msg, ensure_ascii=False),
+        )
+
+        # 洪泛中继：发送给所有在线好友
+        relay_msg = {
+            "type": self.RELAY_MESSAGE,
+            "relay_hops": 0,
+            "original_message": chat_msg,
+        }
+        relayed = self._flood_relay(relay_msg, exclude_name=to_name)
+
+        logger.info(
+            f"[MessageService] 消息已缓存 + 中继给 {relayed} 个在线好友"
+            f" (目标 {to_name} 离线)"
+        )
+        return True
+
+    def send_friend_request(self, target_name: str, target_ip: str) -> bool:
+        """
+        向发现的用户发送好友请求。
+
+        Args:
+            target_name: 目标用户名称。
+            target_ip:   目标用户 IP 地址。
+
+        Returns:
+            True 表示请求已发送。
+        """
+        my_profile = self.friend_db.get_my_profile()
+        conditions = self.friend_db.get_friend_conditions()
+
+        request_msg = {
+            "type": self.FRIEND_REQUEST,
+            "msg_id": str(uuid.uuid4()),
+            "profile": my_profile,
+            "conditions": conditions,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+
+        # 尝试通过连接管理器直接发送
+        if self.connection_manager.is_friend_online(target_name):
+            return self._send_data_to_friend(target_name, request_msg)
+
+        # 如果尚未建立连接，尝试先连接再发送
+        try:
+            self.connection_manager.connect_to_friend(target_ip, name=target_name)
+            return self._send_data_to_friend(target_name, request_msg)
+        except Exception as e:
+            logger.error(f"[MessageService] 发送好友请求失败: {e}")
+            return False
+
+    def send_friend_accept(self, friend_name: str) -> bool:
+        """
+        接受好友请求后，向对方发送 FRIEND_ACCEPT 消息。
+
+        Args:
+            friend_name: 已接受的好友名称。
+
+        Returns:
+            True 表示接受消息已发送。
+        """
+        my_profile = self.friend_db.get_my_profile()
+        friend = self.friend_db.get_friend(friend_name)
+        if not friend:
+            logger.warning(f"[MessageService] 好友 {friend_name} 不存在")
+            return False
+
+        accept_msg = {
+            "type": self.FRIEND_ACCEPT,
+            "msg_id": str(uuid.uuid4()),
+            "profile": my_profile,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+
+        return self._send_data_to_friend(friend_name, accept_msg)
+
+    # ================================================================== #
+    #  接收消息处理
+    # ================================================================== #
+
+    def handle_message(self, from_ip: str, data: Dict[str, Any]):
+        """
+        处理从 TCP 连接收到的消息（核心调度器）。
+
+        根据消息类型分发到不同的处理函数：
+          - CHAT_MESSAGE:   若是给我的，显示并保存；若是给别人的，中继转发。
+          - RELAY_MESSAGE:  检查去重后，解包原始消息并按 CHAT_MESSAGE 逻辑处理。
+          - FRIEND_REQUEST:  检查匹配条件，自动接受或排队等待人工审核。
+          - FRIEND_ACCEPT:  添加好友、交换 profile。
+          - HEARTBEAT:      更新好友 IP 地址簿。
+
+        Args:
+            from_ip: 消息来源 IP 地址。
+            data:    解析后的消息字典（必须包含 "type" 字段）。
+        """
+        msg_type = data.get("type", "")
+
+        if msg_type == self.CHAT_MESSAGE:
+            self._handle_chat_message(from_ip, data)
+        elif msg_type == self.RELAY_MESSAGE:
+            self._handle_relay_message(from_ip, data)
+        elif msg_type == self.FRIEND_REQUEST:
+            self._handle_friend_request(from_ip, data)
+        elif msg_type == self.FRIEND_ACCEPT:
+            self._handle_friend_accept(from_ip, data)
+        elif msg_type == self.HEARTBEAT:
+            self._handle_heartbeat(from_ip, data)
+        else:
+            logger.warning(f"[MessageService] 未知消息类型: {msg_type}")
+
+    # ------------------------------------------------------------------ #
+    #  CHAT_MESSAGE 处理
+    # ------------------------------------------------------------------ #
+
+    def _handle_chat_message(self, from_ip: str, data: Dict[str, Any]):
+        """处理聊天消息。
+
+        若消息是发给我的：保存到 chat_history 并触发回调。
+        若消息是发给别人的：中继给其他在线好友（排除来源方向）。
+        """
+        my_profile = self.friend_db.get_my_profile()
+        my_name = my_profile.get("name", "")
+        to_name = data.get("to_name", "")
+        from_name = data.get("from_name", "")
+        content = data.get("content", "")
+        timestamp = data.get("timestamp", "")
+        msg_id = data.get("msg_id", "")
+
+        # 去重检查
+        if msg_id and self.friend_db.check_msg_id(msg_id):
+            logger.debug(f"[MessageService] 重复消息 {msg_id}，忽略")
+            return
+        if msg_id:
+            self.friend_db.record_msg_id(msg_id)
+
+        if to_name == my_name:
+            # ---- 消息是给我的 ----
+            self.friend_db.save_chat_message(
+                from_name=from_name,
+                to_name=my_name,
+                content=content,
+                timestamp=timestamp,
+                msg_id=msg_id,
+            )
+            logger.info(f"[MessageService] 收到消息 {from_name}: {content[:50]}")
+
+            # 触发 UI 回调
+            if self.on_message_received:
+                try:
+                    self.on_message_received(from_name, content, timestamp)
+                except Exception as e:
+                    logger.error(f"[MessageService] on_message_received 回调异常: {e}")
+        else:
+            # ---- 消息不是给我的，中继转发 ----
+            logger.info(
+                f"[MessageService] 中继消息 {from_name} -> {to_name}（经过本机）"
+            )
+            if self.connection_manager.is_friend_online(to_name):
+                self._relay_chat_to_others(data, exclude_ip=from_ip, exclude_name=from_name)
+            else:
+                # 目标离线，由本机暂存，等目标上线后中继给它
+                self.friend_db.add_pending_message(
+                    to_name=to_name,
+                    data_json=json.dumps(data, ensure_ascii=False),
+                )
+                self._relay_chat_to_others(data, exclude_ip=from_ip, exclude_name=from_name)
+
+    # ------------------------------------------------------------------ #
+    #  RELAY_MESSAGE 处理
+    # ------------------------------------------------------------------ #
+
+    def _handle_relay_message(self, from_ip: str, data: Dict[str, Any]):
+        """处理洪泛中继消息。
+
+        1. 检查 msg_id 去重（避免洪泛环路）。
+        2. 检查 relay_hops 是否超过最大跳数。
+        3. 解包 original_message，按 CHAT_MESSAGE 逻辑处理。
+        4. 若目标不是本机，继续洪泛（hops + 1）。
+        """
+        original_message = data.get("original_message", {})
+        relay_hops = data.get("relay_hops", 0)
+        msg_id = original_message.get("msg_id", data.get("msg_id", ""))
+
+        # 去重
+        with self._relay_id_lock:
+            if msg_id in self._processed_relay_ids:
+                logger.debug(f"[MessageService] 重复中继 {msg_id}，忽略")
+                return
+            self._processed_relay_ids.add(msg_id)
+            # 控制缓存大小
+            if len(self._processed_relay_ids) > self._MAX_RELAY_CACHE:
+                excess = len(self._processed_relay_ids) - self._MAX_RELAY_CACHE
+                for _ in range(excess):
+                    self._processed_relay_ids.pop()
+
+        # 跳数检查
+        if relay_hops >= self.MAX_RELAY_HOPS:
+            logger.info(f"[MessageService] 中继跳数超限 ({relay_hops})，丢弃 {msg_id}")
+            return
+
+        my_profile = self.friend_db.get_my_profile()
+        my_name = my_profile.get("name", "")
+        to_name = original_message.get("to_name", "")
+
+        if to_name == my_name:
+            # 目标是本机，按普通聊天消息处理
+            self._handle_chat_message(from_ip, original_message)
+        else:
+            # 继续洪泛：hops + 1，排除来源
+            forwarded_relay = {
+                "type": self.RELAY_MESSAGE,
+                "relay_hops": relay_hops + 1,
+                "original_message": original_message,
+            }
+            if self.connection_manager.is_friend_online(to_name):
+                self._flood_relay(
+                    forwarded_relay,
+                    exclude_ip=from_ip,
+                    exclude_name=original_message.get("from_name", ""),
+                )
+            else:
+                # 目标离线，由本机暂存，等目标上线后中继给它
+                self.friend_db.add_pending_message(
+                    to_name=to_name,
+                    data_json=json.dumps(forwarded_relay, ensure_ascii=False),
+                )
+                self._flood_relay(
+                    forwarded_relay,
+                    exclude_ip=from_ip,
+                    exclude_name=original_message.get("from_name", ""),
+                )
+
+    # ------------------------------------------------------------------ #
+    #  FRIEND_REQUEST 处理
+    # ------------------------------------------------------------------ #
+
+    def _handle_friend_request(self, from_ip: str, data: Dict[str, Any]):
+        """处理好友请求。
+
+        1. 检查对方 profile 是否满足本机设定的好友条件。
+        2. 若满足且 auto_accept 已开启，自动接受并发送 FRIEND_ACCEPT。
+        3. 否则触发 on_friend_request 回调，等待用户手动决定。
+        """
+        profile = data.get("profile", {})
+        conditions = data.get("conditions", {})
+        sender_name = profile.get("name", "Unknown")
+        msg_id = data.get("msg_id", "")
+
+        # 去重
+        if msg_id and self.friend_db.check_msg_id(msg_id):
+            return
+        if msg_id:
+            self.friend_db.record_msg_id(msg_id)
+
+        # 检查是否已经是好友
+        existing = self.friend_db.get_friend(sender_name)
+        if existing:
+            logger.info(f"[MessageService] {sender_name} 已是好友，忽略请求")
+            return
+
+        # 检查条件匹配
+        conditions_matched = self.friend_db.check_conditions_match(profile)
+
+        friend_conditions = self.friend_db.get_friend_conditions()
+        auto_accept = friend_conditions.get("auto_accept", False)
+
+        if auto_accept and conditions_matched:
+            # 自动接受
+            tags = profile.get("tags", [])
+            self.friend_db.add_friend(
+                name=sender_name,
+                ip=from_ip,
+                tags=tags,
+                category="朋友",
+                bio=profile.get("bio", ""),
+            )
+            # 发送 ACCEPT 回执
+            self.send_friend_accept(sender_name)
+            logger.info(f"[MessageService] 自动接受好友请求: {sender_name}")
+
+            if self.on_friend_accepted:
+                try:
+                    self.on_friend_accepted(sender_name, from_ip)
+                except Exception as e:
+                    logger.error(f"[MessageService] on_friend_accepted 回调异常: {e}")
+        else:
+            # 需要人工审核
+            logger.info(
+                f"[MessageService] 好友请求待审核: {sender_name} "
+                f"(条件匹配={conditions_matched})"
+            )
+            if self.on_friend_request:
+                try:
+                    self.on_friend_request(profile, conditions_matched)
+                except Exception as e:
+                    logger.error(f"[MessageService] on_friend_request 回调异常: {e}")
+
+    # ------------------------------------------------------------------ #
+    #  FRIEND_ACCEPT 处理
+    # ------------------------------------------------------------------ #
+
+    def _handle_friend_accept(self, from_ip: str, data: Dict[str, Any]):
+        """处理好友接受回复。
+
+        将对方加入好友列表，更新 IP，并触发回调。
+        """
+        profile = data.get("profile", {})
+        friend_name = profile.get("name", "Unknown")
+        msg_id = data.get("msg_id", "")
+
+        # 去重
+        if msg_id and self.friend_db.check_msg_id(msg_id):
+            return
+        if msg_id:
+            self.friend_db.record_msg_id(msg_id)
+
+        tags = profile.get("tags", [])
+        bio = profile.get("bio", "")
+
+        # 检查是否已经是好友
+        existing = self.friend_db.get_friend(friend_name)
+        if existing:
+            # 更新 profile 信息
+            self.friend_db.update_friend_ip(friend_name, from_ip)
+            logger.info(f"[MessageService] 好友 {friend_name} 已存在，更新 IP")
+        else:
+            self.friend_db.add_friend(
+                name=friend_name,
+                ip=from_ip,
+                tags=tags,
+                category="朋友",
+                bio=bio,
+            )
+            logger.info(f"[MessageService] 好友已添加: {friend_name} ({from_ip})")
+
+        # 触发回调
+        if self.on_friend_accepted:
+            try:
+                self.on_friend_accepted(friend_name, from_ip)
+            except Exception as e:
+                logger.error(f"[MessageService] on_friend_accepted 回调异常: {e}")
+
+    # ------------------------------------------------------------------ #
+    #  HEARTBEAT 处理
+    # ------------------------------------------------------------------ #
+
+    def _handle_heartbeat(self, from_ip: str, data: Dict[str, Any]):
+        """处理心跳消息，更新好友 IP 地址。"""
+        friend_name = data.get("name", "")
+        if not friend_name:
+            return
+
+        friend = self.friend_db.get_friend(friend_name)
+        if friend:
+            old_ip = friend.get("ip", "")
+            if old_ip != from_ip:
+                self.friend_db.update_friend_ip(friend_name, from_ip)
+                logger.info(
+                    f"[MessageService] 心跳更新 {friend_name} IP: "
+                    f"{old_ip} -> {from_ip}"
+                )
+
+    # ================================================================== #
+    #  离线消息刷新
+    # ================================================================== #
+
+    def flush_pending_messages(self, friend_name: str):
+        """
+        当好友上线时，将所有 pending 消息批量发送。
+
+        典型调用场景：connection_manager 检测到新连接建立后调用此方法。
+
+        Args:
+            friend_name: 刚上线的好友名称。
+        """
+        pending = self.friend_db.get_pending_messages(friend_name)
+        if not pending:
+            return
+
+        sent_count = 0
+        for record in pending:
+            try:
+                # 重新构建 CHAT_MESSAGE 字典，因为 pending_messages 存储了消息字段
+                data = {
+                    "type": self.CHAT_MESSAGE,
+                    "msg_id": record.get("msg_id", ""),
+                    "from_name": record.get("from_name", ""),
+                    "to_name": record.get("to_name", ""),
+                    "content": record.get("content", ""),
+                    "timestamp": record.get("timestamp", ""),
+                }
+                if self._send_data_to_friend(friend_name, data):
+                    sent_count += 1
+            except Exception as e:
+                logger.error(f"[MessageService] 发送 pending 消息失败: {e}")
+
+        # 清空已发送的 pending 消息
+        self.friend_db.clear_pending_messages(friend_name)
+        logger.info(
+            f"[MessageService] 已向 {friend_name} 补发 {sent_count}/{len(pending)} "
+            f"条离线消息"
+        )
+
+    # ================================================================== #
+    #  心跳机制
+    # ================================================================== #
+
+    def _start_heartbeat(self):
+        """启动周期性心跳广播。"""
+        if not self._running:
+            return
+
+        self._send_heartbeat_to_all()
+
+        self._heartbeat_timer = threading.Timer(
+            self.HEARTBEAT_INTERVAL, self._start_heartbeat
+        )
+        self._heartbeat_timer.daemon = True
+        self._heartbeat_timer.start()
+
+    def _send_heartbeat_to_all(self):
+        """向所有在线好友发送心跳包。"""
+        my_profile = self.friend_db.get_my_profile()
+        heartbeat_msg = {
+            "type": self.HEARTBEAT,
+            "name": my_profile.get("name", "Unknown"),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        }
+
+        online_friends = self.connection_manager.get_online_friends()
+        for friend in online_friends:
+            friend_name = friend["name"] if isinstance(friend, dict) else friend
+            try:
+                self._send_data_to_friend(friend_name, heartbeat_msg)
+            except Exception as e:
+                logger.debug(f"[MessageService] 心跳发送失败 -> {friend_name}: {e}")
+
+    # ================================================================== #
+    #  内部工具方法
+    # ================================================================== #
+
+    def _send_data_to_friend(self, friend_name: str, data: Dict[str, Any]) -> bool:
+        """
+        通过 connection_manager 将字典数据序列化为 JSON 字节并发送给指定好友。
+
+        Args:
+            friend_name: 目标好友名称。
+            data:        要发送的消息字典。
+
+        Returns:
+            True 表示发送成功。
+        """
+        try:
+            json_bytes = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            packed_bytes = Protocol.pack_with_header(json_bytes)
+            return self.connection_manager.send_to_friend(friend_name, packed_bytes)
+        except Exception as e:
+            logger.error(f"[MessageService] 发送给 {friend_name} 失败: {e}")
+            return False
+
+    def _flood_relay(
+        self,
+        relay_msg: Dict[str, Any],
+        exclude_name: str = "",
+        exclude_ip: str = "",
+    ) -> int:
+        """
+        将中继消息洪泛发送给所有在线好友（排除指定名称/IP）。
+
+        Args:
+            relay_msg:    RELAY_MESSAGE 格式的消息字典。
+            exclude_name: 需要排除的好友名称（通常是消息的最终目标或原始发送者）。
+            exclude_ip:   需要排除的来源 IP。
+
+        Returns:
+            实际发送的好友数量。
+        """
+        online_friends = self.connection_manager.get_online_friends()
+        count = 0
+        for friend in online_friends:
+            friend_name = friend["name"] if isinstance(friend, dict) else friend
+            if friend_name == exclude_name:
+                continue
+            friend_record = self.friend_db.get_friend(friend_name)
+            if friend_record and exclude_ip and friend_record.get("ip", "") == exclude_ip:
+                continue
+            if self._send_data_to_friend(friend_name, relay_msg):
+                count += 1
+    def _relay_chat_to_others(
+        self,
+        chat_msg: Dict[str, Any],
+        exclude_ip: str = "",
+        exclude_name: str = "",
+    ) -> int:
+        """
+        将聊天消息包装为 RELAY_MESSAGE 后洪泛给其他在线好友。
+
+        Args:
+            chat_msg:     原始 CHAT_MESSAGE 字典.
+            exclude_ip:   排除的来源 IP.
+            exclude_name: 排除的名称.
+
+        Returns:
+            实际中继的好友数量.
+        """
+        relay_msg = {
+            "type": self.RELAY_MESSAGE,
+            "relay_hops": 1,
+            "original_message": chat_msg,
+        }
+        return self._flood_relay(
+            relay_msg,
+            exclude_name=exclude_name,
+            exclude_ip=exclude_ip,
+        )
