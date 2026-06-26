@@ -153,7 +153,7 @@ class TestSocialFlow:
     def test_send_friend_request_uses_discovered_port(self, social_env):
         db, conn_mgr, msg_service = social_env
 
-        success = msg_service.send_friend_request("Alice", "172.30.0.1", 7780)
+        success = msg_service.send_friend_request("Alice", "172.30.0.1", 7780, "user_alice")
 
         assert success is True
         assert conn_mgr.connect_calls == [("172.30.0.1", 7780, "Alice")]
@@ -161,6 +161,8 @@ class TestSocialFlow:
         assert target == "Alice"
         assert data["type"] == MessageService.FRIEND_REQUEST
         assert data["profile"]["tcp_port"] == 7788
+        assert data["profile"]["user_id"].startswith("user_")
+        assert db.get_relationship_status(user_id="user_alice") == "pending_sent"
 
     def test_send_friend_request_skips_existing_friend(self, social_env):
         db, conn_mgr, msg_service = social_env
@@ -209,6 +211,7 @@ class TestSocialFlow:
             "type": MessageService.FRIEND_REQUEST,
             "msg_id": "req_existing_1",
             "profile": {
+                "user_id": "user_dave",
                 "name": "Dave",
                 "tags": ["kivy"],
                 "bio": "Dave Bio",
@@ -221,6 +224,7 @@ class TestSocialFlow:
 
         friend = db.get_friend("Dave")
         assert friend["port"] == 7780
+        assert friend["user_id"] == "user_dave"
         assert friend["bio"] == "Dave Bio"
         assert len(conn_mgr.sent_messages) == 1
         target, data = conn_mgr.sent_messages[0]

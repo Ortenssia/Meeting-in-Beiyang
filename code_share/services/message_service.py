@@ -195,6 +195,7 @@ class MessageService:
         target_name: str,
         target_ip: str,
         target_port: int = Protocol.DEFAULT_TCP_PORT,
+        target_user_id: str = "",
     ) -> bool:
         """
         向发现的用户发送好友请求。
@@ -212,11 +213,26 @@ class MessageService:
             self.connection_manager, "tcp_port", Protocol.DEFAULT_TCP_PORT
         )
         my_name = my_profile.get("name", "")
-        if target_name == my_name and target_port == my_profile["tcp_port"]:
+        my_user_id = my_profile.get("user_id", "")
+        if (
+            target_user_id
+            and my_user_id
+            and target_user_id == my_user_id
+        ) or (target_name == my_name and target_port == my_profile["tcp_port"]):
             logger.info("[MessageService] 跳过向自己发送好友请求: %s", target_name)
             return False
-        if self.friend_db.get_friend(target_name):
-            logger.info("[MessageService] %s 已是好友，跳过重复好友请求", target_name)
+        relationship = self.friend_db.get_relationship_status(
+            user_id=target_user_id,
+            name=target_name,
+            ip=target_ip,
+            port=target_port,
+        )
+        if relationship in ("pending_sent", "pending_received", "accepted"):
+            logger.info(
+                "[MessageService] %s 关系状态为 %s，跳过重复好友请求",
+                target_name,
+                relationship,
+            )
             return False
         conditions = self.friend_db.get_friend_conditions()
 
@@ -230,12 +246,34 @@ class MessageService:
 
         # 尝试通过连接管理器直接发送
         if self.connection_manager.is_friend_online(target_name):
-            return self._send_data_to_friend(target_name, request_msg)
+            sent = self._send_data_to_friend(target_name, request_msg)
+            if sent:
+                self.friend_db.upsert_friend_request(
+                    name=target_name,
+                    ip=target_ip,
+                    port=target_port,
+                    direction="outgoing",
+                    status="pending",
+                    user_id=target_user_id,
+                    msg_id=request_msg["msg_id"],
+                )
+            return sent
 
         # 如果尚未建立连接，尝试先连接再发送
         try:
             self.connection_manager.connect_to_friend(target_ip, target_port, target_name)
-            return self._send_data_to_friend(target_name, request_msg)
+            sent = self._send_data_to_friend(target_name, request_msg)
+            if sent:
+                self.friend_db.upsert_friend_request(
+                    name=target_name,
+                    ip=target_ip,
+                    port=target_port,
+                    direction="outgoing",
+                    status="pending",
+                    user_id=target_user_id,
+                    msg_id=request_msg["msg_id"],
+                )
+            return sent
         except Exception as e:
             logger.error(f"[MessageService] 发送好友请求失败: {e}")
             return False
@@ -445,6 +483,7 @@ class MessageService:
         profile = data.get("profile", {})
         conditions = data.get("conditions", {})
         sender_name = profile.get("name", "Unknown")
+        sender_user_id = profile.get("user_id", "")
         msg_id = data.get("msg_id", "")
         sender_port = int(
             profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
@@ -458,7 +497,10 @@ class MessageService:
             self.friend_db.record_msg_id(msg_id)
 
         # 检查是否已经是好友
-        existing = self.friend_db.get_friend(sender_name)
+        existing = (
+            self.friend_db.get_friend_by_user_id(sender_user_id)
+            or self.friend_db.get_friend(sender_name)
+        )
         if existing:
             self.friend_db.add_friend(
                 name=sender_name,
@@ -467,6 +509,8 @@ class MessageService:
                 tags=profile.get("tags", existing.get("tags", [])),
                 category=existing.get("category", "朋友"),
                 bio=profile.get("bio", existing.get("bio", "")),
+                user_id=sender_user_id or existing.get("user_id", ""),
+                status="accepted",
             )
             self.send_friend_accept(sender_name, from_ip)
             logger.info(
@@ -490,6 +534,8 @@ class MessageService:
                 tags=tags,
                 category="朋友",
                 bio=profile.get("bio", ""),
+                user_id=sender_user_id,
+                status="accepted",
             )
             # 发送 ACCEPT 回执
             self.send_friend_accept(sender_name, from_ip)
@@ -501,6 +547,17 @@ class MessageService:
                 except Exception as e:
                     logger.error(f"[MessageService] on_friend_accepted 回调异常: {e}")
         else:
+            self.friend_db.upsert_friend_request(
+                name=sender_name,
+                ip=from_ip,
+                port=sender_port,
+                tags=profile.get("tags", []),
+                bio=profile.get("bio", ""),
+                direction="incoming",
+                status="pending",
+                user_id=sender_user_id,
+                msg_id=msg_id,
+            )
             # 需要人工审核
             logger.info(
                 f"[MessageService] 好友请求待审核: {sender_name} "
@@ -532,6 +589,7 @@ class MessageService:
         """
         profile = data.get("profile", {})
         friend_name = profile.get("name", "Unknown")
+        friend_user_id = profile.get("user_id", "")
         msg_id = data.get("msg_id", "")
 
         # 去重
@@ -545,7 +603,10 @@ class MessageService:
         port = int(profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
 
         # 检查是否已经是好友
-        existing = self.friend_db.get_friend(friend_name)
+        existing = (
+            self.friend_db.get_friend_by_user_id(friend_user_id)
+            or self.friend_db.get_friend(friend_name)
+        )
         if existing:
             # 更新 profile 信息
             self.friend_db.add_friend(
@@ -555,6 +616,8 @@ class MessageService:
                 tags=tags,
                 category=existing.get("category", "朋友"),
                 bio=bio,
+                user_id=friend_user_id or existing.get("user_id", ""),
+                status="accepted",
             )
             logger.info(f"[MessageService] 好友 {friend_name} 已存在，更新 IP")
         else:
@@ -565,8 +628,18 @@ class MessageService:
                 tags=tags,
                 category="朋友",
                 bio=bio,
+                user_id=friend_user_id,
+                status="accepted",
             )
             logger.info(f"[MessageService] 好友已添加: {friend_name} ({from_ip})")
+
+        self.friend_db.set_friend_request_status(
+            "accepted",
+            user_id=friend_user_id,
+            name=friend_name,
+            ip=from_ip,
+            port=port,
+        )
 
         # 触发回调
         if self.on_friend_accepted:
@@ -598,6 +671,8 @@ class MessageService:
                     tags=friend.get("tags", []),
                     category=friend.get("category", "朋友"),
                     bio=friend.get("bio", ""),
+                    user_id=friend.get("user_id", ""),
+                    status=friend.get("status", "accepted"),
                 )
                 logger.info(
                     f"[MessageService] 心跳更新 {friend_name} 地址: "

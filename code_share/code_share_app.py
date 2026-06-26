@@ -433,18 +433,24 @@ class CodeShareApp(App):
                     self.device_name = my_profile["name"]
             self.custom_background = my_profile.get("background", "")
             self.custom_avatar = my_profile.get("avatar", "")
+        self.user_id = my_profile.get("user_id", "")
+        self.device_id = my_profile.get("device_id", "")
 
         # 2. 初始化连接池管理器
         self.connection_manager = ConnectionManager(
             my_name=self.device_name,
-            tcp_port=self.tcp_port
+            tcp_port=self.tcp_port,
+            my_user_id=self.user_id,
+            my_device_id=self.device_id,
         )
 
         # 3. 初始化 UDP 广播发现服务
         self.udp_service = UDPService(
             port=self.udp_port,
             device_name=self.device_name,
-            tcp_port=self.tcp_port
+            tcp_port=self.tcp_port,
+            user_id=self.user_id,
+            device_id=self.device_id,
         )
 
         # 4. 初始化消息中继服务
@@ -500,17 +506,30 @@ class CodeShareApp(App):
         name = device_info.device_name
         ip = device_info.ip
         port = device_info.tcp_port
-        friend = self.friend_db.get_friend(name)
+        friend = (
+            self.friend_db.get_friend_by_user_id(getattr(device_info, "user_id", ""))
+            or self.friend_db.get_friend(name)
+        )
         if friend:
             old_ip = friend.get("ip", "")
-            if old_ip != ip:
-                self.friend_db.update_friend_ip(name, ip)
-                print(f"[App] 检测到好友 {name} IP 地址变更: {old_ip} -> {ip}")
+            old_port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
+            if old_ip != ip or old_port != port:
+                self.friend_db.add_friend(
+                    name=friend.get("name", name),
+                    ip=ip,
+                    port=port,
+                    tags=friend.get("tags", []),
+                    bio=friend.get("bio", ""),
+                    category=friend.get("category", "朋友"),
+                    user_id=friend.get("user_id", ""),
+                    status=friend.get("status", "accepted"),
+                )
+                print(f"[App] 检测到好友 {name} 地址变更: {old_ip}:{old_port} -> {ip}:{port}")
             # 如果未连接，在后台发起 TCP 连接
             if not self.connection_manager.is_connected(ip, port):
                 threading.Thread(
                     target=self.connection_manager.connect_to_friend,
-                    args=(ip, port, name),
+                    args=(ip, port, friend.get("name", name)),
                     daemon=True
                 ).start()
 
@@ -634,7 +653,16 @@ class CodeShareApp(App):
                     port=int(profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT),
                     tags=tags,
                     bio=bio,
-                    category="朋友"
+                    category="朋友",
+                    user_id=profile.get("user_id", ""),
+                    status="accepted",
+                )
+                self.friend_db.set_friend_request_status(
+                    "accepted",
+                    user_id=profile.get("user_id", ""),
+                    name=sender_name,
+                    ip=sender_ip,
+                    port=int(profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT),
                 )
                 threading.Thread(
                     target=self.message_service.send_friend_accept,
@@ -650,7 +678,17 @@ class CodeShareApp(App):
                 popup.dismiss()
 
             accept_btn.bind(on_press=on_accept)
-            ignore_btn.bind(on_press=lambda _btn: popup.dismiss())
+            def on_ignore(_btn):
+                self.friend_db.set_friend_request_status(
+                    "rejected",
+                    user_id=profile.get("user_id", ""),
+                    name=sender_name,
+                    ip=sender_ip,
+                    port=int(profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT),
+                )
+                popup.dismiss()
+
+            ignore_btn.bind(on_press=on_ignore)
             popup.open()
         except Exception as e:
             print(f"[BeiyangSocialApp Error] Failed to show friend request popup: {e}")
@@ -690,15 +728,22 @@ class CodeShareApp(App):
 
     def save_profile(self, profile):
         self.friend_db.save_profile(profile)
+        saved = self.friend_db.get_my_profile()
         self.device_name = profile.get("name", self.device_name)
+        self.user_id = saved.get("user_id", "")
+        self.device_id = saved.get("device_id", "")
         if "background" in profile:
             self.custom_background = profile["background"]
         if "avatar" in profile:
             self.custom_avatar = profile["avatar"]
         if self.udp_service:
             self.udp_service.device_name = self.device_name
+            self.udp_service.user_id = self.user_id
+            self.udp_service.device_id = self.device_id
         if self.connection_manager:
             self.connection_manager.my_name = self.device_name
+            self.connection_manager.my_user_id = self.user_id
+            self.connection_manager.my_device_id = self.device_id
 
     def scan_for_people(self):
         if self.udp_service:
@@ -707,42 +752,68 @@ class CodeShareApp(App):
     def get_discovered_people(self):
         if self.udp_service:
             friend_names = set()
+            friend_user_ids = set()
             friend_endpoints = set()
             if self.friend_db:
                 for friend in self.friend_db.get_friends():
                     friend_names.add(friend.get("name", ""))
+                    if friend.get("user_id"):
+                        friend_user_ids.add(friend.get("user_id", ""))
                     friend_endpoints.add(
                         f"{friend.get('ip', '')}:{int(friend.get('port', 0) or 0)}"
                     )
             my_name = self.device_name
             with self.udp_service._devices_lock:
                 return [
-                    {"name": dev.device_name, "ip": dev.ip, "tcp_port": dev.tcp_port}
+                    {
+                        "user_id": getattr(dev, "user_id", ""),
+                        "device_id": getattr(dev, "device_id", ""),
+                        "name": dev.device_name,
+                        "ip": dev.ip,
+                        "tcp_port": dev.tcp_port,
+                    }
                     for dev in self.udp_service.devices.values()
                     if dev.is_online()
                     and dev.device_name != my_name
-                    and dev.device_name not in friend_names
-                    and f"{dev.ip}:{int(dev.tcp_port or 0)}" not in friend_endpoints
+                    and getattr(dev, "user_id", "") != self.user_id
+                    and getattr(dev, "user_id", "") not in friend_user_ids
+                    and (
+                        getattr(dev, "user_id", "")
+                        or dev.device_name not in friend_names
+                    )
+                    and (
+                        getattr(dev, "user_id", "")
+                        or f"{dev.ip}:{int(dev.tcp_port or 0)}" not in friend_endpoints
+                    )
                 ]
         return []
 
-    def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT):
-        if self.is_existing_friend(name, ip, port):
+    def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT, user_id=""):
+        if self.is_existing_friend(name, ip, port, user_id):
             return False
         if self.message_service:
-            return self.message_service.send_friend_request(name, ip, port)
+            return self.message_service.send_friend_request(name, ip, port, user_id)
         return False
 
-    def is_existing_friend(self, name="", ip="", port=0):
+    def is_existing_friend(self, name="", ip="", port=0, user_id=""):
         if not self.friend_db:
             return False
-        if name and self.friend_db.get_friend(name):
-            return True
-        endpoint = f"{ip}:{int(port or 0)}"
-        for friend in self.friend_db.get_friends():
-            if f"{friend.get('ip', '')}:{int(friend.get('port', 0) or 0)}" == endpoint:
-                return True
-        return False
+        return self.friend_db.get_relationship_status(
+            user_id=user_id,
+            name=name,
+            ip=ip,
+            port=port,
+        ) in ("pending_sent", "pending_received", "accepted")
+
+    def get_relationship_status(self, name="", ip="", port=0, user_id=""):
+        if not self.friend_db:
+            return "none"
+        return self.friend_db.get_relationship_status(
+            user_id=user_id,
+            name=name,
+            ip=ip,
+            port=port,
+        )
 
     def get_all_friends(self):
         if self.friend_db:

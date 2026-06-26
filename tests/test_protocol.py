@@ -32,24 +32,27 @@ class TestProtocol:
     def test_create_and_parse_ping(self):
         device_name = "UserA"
         tcp_port = 7779
-        packet = Protocol.create_ping_packet(device_name, tcp_port)
+        packet = Protocol.create_ping_packet(device_name, tcp_port, "user_a", "device_a")
         assert isinstance(packet, bytes)
 
         data = Protocol.parse_udp_packet(packet)
         assert data["type"] == Protocol.UDP_PING
         assert data["device_name"] == device_name
         assert data["tcp_port"] == tcp_port
+        assert data["user_id"] == "user_a"
+        assert data["device_id"] == "device_a"
 
     def test_create_and_parse_pong(self):
         device_name = "UserB"
         ip = "192.168.1.100"
-        packet = Protocol.create_pong_packet(device_name, ip, 7779)
+        packet = Protocol.create_pong_packet(device_name, ip, 7779, "user_b", "device_b")
         assert isinstance(packet, bytes)
 
         data = Protocol.parse_udp_packet(packet)
         assert data["type"] == Protocol.UDP_PONG
         assert data["device_name"] == device_name
         assert data["ip"] == ip
+        assert data["user_id"] == "user_b"
 
     def test_pack_and_unpack_header(self):
         body = b"hello world"
@@ -69,7 +72,7 @@ class TestProtocol:
 
     def test_create_profile_exchange(self):
         packet = Protocol.create_profile_exchange(
-            "UserA", ["tag1", "tag2"], "hello", 7780
+            "UserA", ["tag1", "tag2"], "hello", 7780, "user_a", "device_a"
         )
         data = Protocol.parse_message(packet[4:])
         assert data["type"] == Protocol.PROFILE_EXCHANGE
@@ -77,23 +80,30 @@ class TestProtocol:
         assert data["tags"] == ["tag1", "tag2"]
         assert data["bio"] == "hello"
         assert data["tcp_port"] == 7780
+        assert data["user_id"] == "user_a"
 
     def test_create_friend_request(self):
         my_profile = {"name": "UserA", "tags": ["tag1"], "bio": "hi"}
         my_conditions = {"required_tags": ["tag2"], "min_match_count": 1}
-        packet = Protocol.create_friend_request("UserA", ["tag1"], "hi", my_conditions)
+        packet = Protocol.create_friend_request(
+            "UserA", ["tag1"], "hi", my_conditions, "user_a", "device_a", 7780
+        )
         
         data = Protocol.parse_message(packet[4:])
         assert data["type"] == Protocol.FRIEND_REQUEST
         assert data["profile"]["name"] == "UserA"
+        assert data["profile"]["user_id"] == "user_a"
+        assert data["profile"]["tcp_port"] == 7780
         assert data["conditions"] == my_conditions
 
     def test_create_friend_accept(self):
-        packet = Protocol.create_friend_accept("UserB", ["tag2"], "hello")
+        packet = Protocol.create_friend_accept("UserB", ["tag2"], "hello", "user_b", "device_b", 7781)
         data = Protocol.parse_message(packet[4:])
         assert data["type"] == Protocol.FRIEND_ACCEPT
         assert data["name"] == "UserB"
         assert data["profile"]["name"] == "UserB"
+        assert data["profile"]["user_id"] == "user_b"
+        assert data["profile"]["tcp_port"] == 7781
 
     def test_create_friend_reject(self):
         packet = Protocol.create_friend_reject("UserB", "mismatch")

@@ -17,6 +17,7 @@ import logging
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -52,12 +53,14 @@ class FriendDB:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS friends (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     TEXT    DEFAULT '',
                     name        TEXT    NOT NULL,
                     ip          TEXT    NOT NULL,
                     port        INTEGER DEFAULT 7779,
                     tags        TEXT    DEFAULT '[]',     -- JSON 数组
                     bio         TEXT    DEFAULT '',
                     category    TEXT    DEFAULT '朋友',
+                    status      TEXT    DEFAULT 'accepted',
                     added_at    TEXT    NOT NULL,
                     last_seen   TEXT    NOT NULL
                 )
@@ -104,6 +107,8 @@ class FriendDB:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS my_profile (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     TEXT    DEFAULT '',
+                    device_id   TEXT    DEFAULT '',
                     name        TEXT    NOT NULL,
                     tags        TEXT    DEFAULT '[]',     -- JSON 数组
                     bio         TEXT    DEFAULT ''
@@ -119,6 +124,39 @@ class FriendDB:
                 cursor.execute("ALTER TABLE my_profile ADD COLUMN background TEXT DEFAULT ''")
             except Exception:
                 pass
+            try:
+                cursor.execute("ALTER TABLE my_profile ADD COLUMN user_id TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE my_profile ADD COLUMN device_id TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE friends ADD COLUMN user_id TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE friends ADD COLUMN status TEXT DEFAULT 'accepted'")
+            except Exception:
+                pass
+
+            # ---- 好友请求状态表 ---- #
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS friend_requests (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     TEXT    DEFAULT '',
+                    name        TEXT    NOT NULL,
+                    ip          TEXT    NOT NULL,
+                    port        INTEGER DEFAULT 7779,
+                    tags        TEXT    DEFAULT '[]',
+                    bio         TEXT    DEFAULT '',
+                    direction   TEXT    NOT NULL,          -- incoming / outgoing
+                    status      TEXT    NOT NULL,          -- pending / accepted / rejected
+                    msg_id      TEXT    DEFAULT '',
+                    updated_at  TEXT    NOT NULL
+                )
+            """)
 
             # ---- 中继消息去重表 ---- #
             cursor.execute("""
@@ -149,7 +187,8 @@ class FriendDB:
 
     def add_friend(self, name: str, ip: str, port: int = 7779,
                    tags: List[str] = None, bio: str = "",
-                   category: str = "朋友") -> bool:
+                   category: str = "朋友", user_id: str = "",
+                   status: str = "accepted") -> bool:
         """
         添加好友到地址簿。
 
@@ -170,30 +209,50 @@ class FriendDB:
             with self._lock:
                 cursor = self.conn.cursor()
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                tags_json = json.dumps(tags, ensure_ascii=False)
+                tags_json = json.dumps(tags or [], ensure_ascii=False)
 
-                # 检查是否已存在同名好友
-                cursor.execute(
-                    "SELECT id FROM friends WHERE name = ?", (name,)
-                )
+                # 优先按稳定 user_id 更新；兼容旧数据时回退到 name。
+                if user_id:
+                    cursor.execute(
+                        "SELECT id, user_id FROM friends WHERE user_id = ? OR name = ?",
+                        (user_id, name),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, user_id FROM friends WHERE name = ?", (name,)
+                    )
                 existing = cursor.fetchone()
 
                 if existing:
+                    stored_user_id = user_id or existing["user_id"] or ""
                     # 更新已有好友信息
                     cursor.execute("""
                         UPDATE friends
-                        SET ip = ?, port = ?, tags = ?, bio = ?,
-                            category = ?, last_seen = ?
-                        WHERE name = ?
-                    """, (ip, port, tags_json, bio, category, now, name))
+                        SET user_id = ?, name = ?, ip = ?, port = ?, tags = ?,
+                            bio = ?, category = ?, status = ?, last_seen = ?
+                        WHERE id = ?
+                    """, (
+                        stored_user_id, name, ip, port, tags_json, bio, category,
+                        status, now, existing["id"],
+                    ))
                 else:
                     # 插入新好友
                     cursor.execute("""
                         INSERT INTO friends
-                        (name, ip, port, tags, bio, category, added_at, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (name, ip, port, tags_json, bio, category, now, now))
+                        (user_id, name, ip, port, tags, bio, category, status,
+                         added_at, last_seen)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        user_id, name, ip, port, tags_json, bio, category,
+                        status, now, now,
+                    ))
 
+                if user_id:
+                    cursor.execute("""
+                        UPDATE friend_requests
+                        SET status = 'accepted', updated_at = ?
+                        WHERE user_id = ? OR name = ?
+                    """, (now, user_id, name))
                 self.conn.commit()
             return True
 
@@ -283,6 +342,35 @@ class FriendDB:
 
         except Exception as e:
             logger.error("按 IP 查找好友失败 [%s]: %s", ip, e)
+            return None
+
+    def get_friend_by_user_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """根据稳定 user_id 查找好友。"""
+        if not user_id:
+            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM friends WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            return self._row_to_friend_dict(row) if row else None
+
+        except Exception as e:
+            logger.error("按 user_id 查找好友失败 [%s]: %s", user_id, e)
+            return None
+
+    def get_friend_by_endpoint(self, ip: str, port: int) -> Optional[Dict[str, Any]]:
+        """根据当前连接地址查找好友，用于兼容尚未携带 user_id 的旧协议。"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT * FROM friends WHERE ip = ? AND port = ?",
+                (ip, int(port or 0)),
+            )
+            row = cursor.fetchone()
+            return self._row_to_friend_dict(row) if row else None
+
+        except Exception as e:
+            logger.error("按 endpoint 查找好友失败 [%s:%s]: %s", ip, port, e)
             return None
 
     def update_friend_ip(self, name: str, new_ip: str) -> bool:
@@ -377,6 +465,162 @@ class FriendDB:
         except Exception as e:
             logger.error("更新好友在线时间失败 [%s]: %s", name, e)
             return False
+
+    # ================================================================== #
+    #  好友请求状态
+    # ================================================================== #
+
+    def upsert_friend_request(
+        self,
+        name: str,
+        ip: str,
+        port: int = 7779,
+        tags: List[str] = None,
+        bio: str = "",
+        direction: str = "outgoing",
+        status: str = "pending",
+        user_id: str = "",
+        msg_id: str = "",
+    ) -> bool:
+        """新增或更新一条好友请求状态。"""
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            tags_json = json.dumps(tags or [], ensure_ascii=False)
+            with self._lock:
+                cursor = self.conn.cursor()
+                if user_id:
+                    cursor.execute(
+                        "SELECT id FROM friend_requests WHERE user_id = ?",
+                        (user_id,),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id FROM friend_requests WHERE name = ? AND ip = ? AND port = ?",
+                        (name, ip, int(port or 0)),
+                    )
+                existing = cursor.fetchone()
+                if existing:
+                    cursor.execute("""
+                        UPDATE friend_requests
+                        SET user_id = ?, name = ?, ip = ?, port = ?, tags = ?,
+                            bio = ?, direction = ?, status = ?, msg_id = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                    """, (
+                        user_id, name, ip, int(port or 0), tags_json, bio,
+                        direction, status, msg_id, now, existing["id"],
+                    ))
+                else:
+                    cursor.execute("""
+                        INSERT INTO friend_requests
+                        (user_id, name, ip, port, tags, bio, direction, status,
+                         msg_id, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        user_id, name, ip, int(port or 0), tags_json, bio,
+                        direction, status, msg_id, now,
+                    ))
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("保存好友请求失败 [%s]: %s", name, e)
+            return False
+
+    def get_friend_request(
+        self,
+        user_id: str = "",
+        name: str = "",
+        ip: str = "",
+        port: int = 0,
+    ) -> Optional[Dict[str, Any]]:
+        """查找一条好友请求状态。"""
+        try:
+            cursor = self.conn.cursor()
+            if user_id:
+                cursor.execute(
+                    "SELECT * FROM friend_requests WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1",
+                    (user_id,),
+                )
+            elif ip and port:
+                cursor.execute("""
+                    SELECT * FROM friend_requests
+                    WHERE name = ? AND ip = ? AND port = ?
+                    ORDER BY updated_at DESC LIMIT 1
+                """, (name, ip, int(port or 0)))
+            else:
+                cursor.execute(
+                    "SELECT * FROM friend_requests WHERE name = ? ORDER BY updated_at DESC LIMIT 1",
+                    (name,),
+                )
+            row = cursor.fetchone()
+            return self._row_to_request_dict(row) if row else None
+        except Exception as e:
+            logger.error("查找好友请求失败: %s", e)
+            return None
+
+    def set_friend_request_status(
+        self,
+        status: str,
+        user_id: str = "",
+        name: str = "",
+        ip: str = "",
+        port: int = 0,
+    ) -> bool:
+        """更新好友请求状态。"""
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._lock:
+                cursor = self.conn.cursor()
+                if user_id:
+                    cursor.execute("""
+                        UPDATE friend_requests
+                        SET status = ?, updated_at = ?
+                        WHERE user_id = ?
+                    """, (status, now, user_id))
+                elif ip and port:
+                    cursor.execute("""
+                        UPDATE friend_requests
+                        SET status = ?, updated_at = ?
+                        WHERE name = ? AND ip = ? AND port = ?
+                    """, (status, now, name, ip, int(port or 0)))
+                else:
+                    cursor.execute("""
+                        UPDATE friend_requests
+                        SET status = ?, updated_at = ?
+                        WHERE name = ?
+                    """, (status, now, name))
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("更新好友请求状态失败: %s", e)
+            return False
+
+    def get_relationship_status(
+        self,
+        user_id: str = "",
+        name: str = "",
+        ip: str = "",
+        port: int = 0,
+    ) -> str:
+        """返回 none / pending_sent / pending_received / accepted / rejected。"""
+        friend = self.get_friend_by_user_id(user_id) if user_id else None
+        if not friend and name:
+            friend = self.get_friend_by_name(name)
+        if not friend and ip and port:
+            friend = self.get_friend_by_endpoint(ip, port)
+        if friend and friend.get("status", "accepted") == "accepted":
+            return "accepted"
+
+        request = self.get_friend_request(user_id=user_id, name=name, ip=ip, port=port)
+        if not request:
+            return "none"
+        if request["status"] == "accepted":
+            return "accepted"
+        if request["status"] == "rejected":
+            return "rejected"
+        if request["direction"] == "incoming":
+            return "pending_received"
+        return "pending_sent"
 
     # ================================================================== #
     #  好友匹配条件
@@ -724,15 +968,41 @@ class FriendDB:
 
         return {
             "id": row["id"],
+            "user_id": row["user_id"] if "user_id" in row.keys() else "",
             "name": row["name"],
             "ip": row["ip"],
             "port": row["port"],
             "tags": tags,
             "bio": row["bio"],
             "category": row["category"],
+            "status": row["status"] if "status" in row.keys() else "accepted",
             "added_at": row["added_at"],
             "last_seen": row["last_seen"],
         }
+
+    @staticmethod
+    def _row_to_request_dict(row) -> Dict[str, Any]:
+        try:
+            tags = json.loads(row["tags"])
+        except (json.JSONDecodeError, TypeError):
+            tags = []
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "name": row["name"],
+            "ip": row["ip"],
+            "port": row["port"],
+            "tags": tags,
+            "bio": row["bio"],
+            "direction": row["direction"],
+            "status": row["status"],
+            "msg_id": row["msg_id"],
+            "updated_at": row["updated_at"],
+        }
+
+    @staticmethod
+    def _new_id(prefix: str) -> str:
+        return f"{prefix}_{uuid.uuid4().hex}"
 
     # ================================================================== #
     #  个人资料管理与别名适配
@@ -748,21 +1018,42 @@ class FriendDB:
             row = cursor.fetchone()
 
             if row:
+                user_id = row["user_id"] if "user_id" in row.keys() else ""
+                device_id = row["device_id"] if "device_id" in row.keys() else ""
                 name = row["name"]
                 tags = json.loads(row["tags"])
                 bio = row["bio"]
                 avatar = row["avatar"] if "avatar" in row.keys() else ""
                 background = row["background"] if "background" in row.keys() else ""
+                if not user_id or not device_id:
+                    user_id = user_id or self._new_id("user")
+                    device_id = device_id or self._new_id("device")
+                    with self._lock:
+                        cursor.execute(
+                            "UPDATE my_profile SET user_id = ?, device_id = ? WHERE id = ?",
+                            (user_id, device_id, row["id"]),
+                        )
+                        self.conn.commit()
             else:
                 import socket
+                user_id = self._new_id("user")
+                device_id = self._new_id("device")
                 name = socket.gethostname()
                 tags = []
                 bio = ""
                 avatar = ""
                 background = ""
+                with self._lock:
+                    cursor.execute(
+                        "INSERT INTO my_profile (user_id, device_id, name, tags, bio, avatar, background) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (user_id, device_id, name, "[]", "", "", ""),
+                    )
+                    self.conn.commit()
 
             conditions = self.get_conditions()
             return {
+                "user_id": user_id,
+                "device_id": device_id,
                 "name": name,
                 "tags": tags,
                 "bio": bio,
@@ -774,6 +1065,8 @@ class FriendDB:
             logger.error("获取个人资料失败: %s", e)
             import socket
             return {
+                "user_id": "",
+                "device_id": "",
                 "name": socket.gethostname(),
                 "tags": [],
                 "bio": "",
@@ -787,6 +1080,13 @@ class FriendDB:
         保存本机个人资料及好友条件。
         """
         try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM my_profile LIMIT 1")
+            existing = cursor.fetchone()
+            existing_user_id = existing["user_id"] if existing and "user_id" in existing.keys() else ""
+            existing_device_id = existing["device_id"] if existing and "device_id" in existing.keys() else ""
+            user_id = profile.get("user_id") or existing_user_id or self._new_id("user")
+            device_id = profile.get("device_id") or existing_device_id or self._new_id("device")
             name = profile.get("name", "Unknown")
             tags = profile.get("tags", [])
             bio = profile.get("bio", "")
@@ -799,8 +1099,12 @@ class FriendDB:
                 # 更新个人资料（单行）
                 cursor.execute("DELETE FROM my_profile")
                 cursor.execute(
-                    "INSERT INTO my_profile (name, tags, bio, avatar, background) VALUES (?, ?, ?, ?, ?)",
-                    (name, json.dumps(tags, ensure_ascii=False), bio, avatar, background),
+                    "INSERT INTO my_profile (user_id, device_id, name, tags, bio, avatar, background) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        user_id, device_id, name,
+                        json.dumps(tags, ensure_ascii=False), bio, avatar,
+                        background,
+                    ),
                 )
                 self.conn.commit()
 

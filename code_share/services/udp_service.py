@@ -26,7 +26,15 @@ except ImportError:
 class DeviceInfo:
     """表示一个已发现的局域网设备。"""
 
-    def __init__(self, ip: str, device_name: str, tcp_port: int, last_seen: float):
+    def __init__(
+        self,
+        ip: str,
+        device_name: str,
+        tcp_port: int,
+        last_seen: float,
+        user_id: str = "",
+        device_id: str = "",
+    ):
         """
         Args:
             ip:          设备 IP 地址。
@@ -38,6 +46,8 @@ class DeviceInfo:
         self.device_name = device_name
         self.tcp_port = tcp_port
         self.last_seen = last_seen
+        self.user_id = user_id
+        self.device_id = device_id
 
     def is_online(self, timeout: int = 15) -> bool:
         """
@@ -75,6 +85,8 @@ class UDPService:
         port: int = Protocol.DEFAULT_UDP_PORT,
         device_name: str = "",
         tcp_port: int = Protocol.DEFAULT_TCP_PORT,
+        user_id: str = "",
+        device_id: str = "",
     ):
         """
         Args:
@@ -85,8 +97,10 @@ class UDPService:
         self.port = port
         self.device_name = device_name or Helpers.get_hostname()
         self.tcp_port = tcp_port
+        self.user_id = user_id
+        self.device_id = device_id
         self.sock: Optional[socket.socket] = None
-        self.devices: Dict[str, DeviceInfo] = {}  # device_name -> DeviceInfo
+        self.devices: Dict[str, DeviceInfo] = {}  # identity key -> DeviceInfo
         self.running = False
         self.multicast_lock = None
 
@@ -226,7 +240,7 @@ class UDPService:
         while self.running:
             try:
                 ping_data = Protocol.create_ping_packet(
-                    self.device_name, self.tcp_port
+                    self.device_name, self.tcp_port, self.user_id, self.device_id
                 )
                 self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 targets = self._get_broadcast_targets()
@@ -255,33 +269,51 @@ class UDPService:
                 packet_type = packet.get("type")
                 sender_ip = addr[0]
 
-                # 忽略自己发出的包 (检查源端口和昵称，防止在同台机器测试时误杀其他实例)
+                # 忽略自己发出的包，优先用 device_id；旧包回退到端口/昵称。
                 local_ips = Helpers.get_local_ips()
                 if sender_ip in local_ips:
-                    if addr[1] == self.port or packet.get("device_name") == self.device_name:
+                    packet_device_id = packet.get("device_id", "")
+                    if (
+                        packet_device_id
+                        and self.device_id
+                        and packet_device_id == self.device_id
+                    ):
+                        continue
+                    if not packet_device_id and (
+                        addr[1] == self.port
+                        or packet.get("device_name") == self.device_name
+                    ):
                         continue
 
                 if packet_type == Protocol.UDP_PING:
                     # 收到 PING -- 回复 PONG 并记录设备
                     device_name = packet.get("device_name", "Unknown")
                     tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
+                    user_id = packet.get("user_id", "")
+                    device_id = packet.get("device_id", "")
 
                     pong_data = Protocol.create_pong_packet(
-                        self.device_name, Helpers.get_default_ip(), self.tcp_port
+                        self.device_name,
+                        Helpers.get_default_ip(),
+                        self.tcp_port,
+                        self.user_id,
+                        self.device_id,
                     )
                     # 回复 PONG 到发送端包的真实源地址(IP 和 Port)，确保支持多实例测试
                     self.sock.sendto(pong_data, addr)
 
-                    self._add_device(sender_ip, device_name, tcp_port)
+                    self._add_device(sender_ip, device_name, tcp_port, user_id, device_id)
 
                 elif packet_type == Protocol.UDP_PONG:
                     # 收到 PONG -- 记录设备
                     device_name = packet.get("device_name", "Unknown")
                     tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
+                    user_id = packet.get("user_id", "")
+                    device_id = packet.get("device_id", "")
 
                     # 总是使用 sender_ip（UDP 报文的源 IP），因为这一定是局域网内可达的物理 IP。
                     # 避免使用对端包内宣告的 ip（对端可能因为 VPN/代理等配置导致判定错误）
-                    self._add_device(sender_ip, device_name, tcp_port)
+                    self._add_device(sender_ip, device_name, tcp_port, user_id, device_id)
 
             except BlockingIOError:
                 # 非阻塞 socket 暂无数据
@@ -318,7 +350,14 @@ class UDPService:
     #  设备管理
     # ================================================================== #
 
-    def _add_device(self, ip: str, device_name: str, tcp_port: int):
+    def _add_device(
+        self,
+        ip: str,
+        device_name: str,
+        tcp_port: int,
+        user_id: str = "",
+        device_id: str = "",
+    ):
         """
         添加或更新已发现的设备。
 
@@ -332,24 +371,34 @@ class UDPService:
         current_time = time.time()
         is_new = False
         is_update_notify = False
+        key = user_id or f"{device_name}@{ip}:{int(tcp_port or 0)}"
 
         with self._devices_lock:
-            if device_name in self.devices:
+            if key in self.devices:
                 # 更新已有设备
-                old_device = self.devices[device_name]
-                if old_device.ip != ip or old_device.tcp_port != tcp_port:
+                old_device = self.devices[key]
+                if (
+                    old_device.ip != ip
+                    or old_device.tcp_port != tcp_port
+                    or old_device.device_name != device_name
+                ):
                     is_update_notify = True
-                self.devices[device_name].last_seen = current_time
-                self.devices[device_name].ip = ip
-                self.devices[device_name].tcp_port = tcp_port
+                self.devices[key].last_seen = current_time
+                self.devices[key].ip = ip
+                self.devices[key].device_name = device_name
+                self.devices[key].tcp_port = tcp_port
+                self.devices[key].user_id = user_id
+                self.devices[key].device_id = device_id
             else:
                 # 新设备
-                self.devices[device_name] = DeviceInfo(ip, device_name, tcp_port, current_time)
+                self.devices[key] = DeviceInfo(
+                    ip, device_name, tcp_port, current_time, user_id, device_id
+                )
                 is_new = True
 
         # 在锁外触发回调，避免死锁
         if (is_new or is_update_notify) and self.on_device_found:
-            self.on_device_found(self.devices[device_name])
+            self.on_device_found(self.devices[key])
 
     def get_online_devices(self) -> List[DeviceInfo]:
         """
@@ -372,7 +421,7 @@ class UDPService:
 
         try:
             ping_data = Protocol.create_ping_packet(
-                self.device_name, self.tcp_port
+                self.device_name, self.tcp_port, self.user_id, self.device_id
             )
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             

@@ -43,7 +43,13 @@ class ConnectionManager:
       - on_error(msg)
     """
 
-    def __init__(self, my_name: str = "", tcp_port: int = Protocol.DEFAULT_TCP_PORT):
+    def __init__(
+        self,
+        my_name: str = "",
+        tcp_port: int = Protocol.DEFAULT_TCP_PORT,
+        my_user_id: str = "",
+        my_device_id: str = "",
+    ):
         """
         Args:
             my_name:  本机用户名 / 昵称，用于心跳和身份宣告。
@@ -51,6 +57,8 @@ class ConnectionManager:
         """
         self.my_name = my_name or Helpers.get_hostname()
         self.tcp_port = tcp_port
+        self.my_user_id = my_user_id
+        self.my_device_id = my_device_id
 
         # ------------------------------------------------------------------ #
         #  连接池：endpoint -> {"socket", "name", "ip", "port", "connected_at"}
@@ -319,7 +327,12 @@ class ConnectionManager:
 
             # 主动连接后立即交换身份，避免入站侧只能靠后续业务消息猜名字。
             profile_msg = Protocol.create_profile_exchange(
-                self.my_name, [], "", self.tcp_port
+                self.my_name,
+                [],
+                "",
+                self.tcp_port,
+                self.my_user_id,
+                self.my_device_id,
             )
             sock.sendall(profile_msg)
 

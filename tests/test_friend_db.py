@@ -51,6 +51,8 @@ class TestFriendDB:
         assert success is True
 
         loaded = db.get_my_profile()
+        assert loaded["user_id"].startswith("user_")
+        assert loaded["device_id"].startswith("device_")
         assert loaded["name"] == "UserA"
         assert loaded["tags"] == ["python", "kivy"]
         assert loaded["bio"] == "Keep coding"
@@ -81,6 +83,33 @@ class TestFriendDB:
 
         # 测试查找不存在的好友
         assert db.get_friend("Ghost") is None
+
+    def test_user_id_updates_existing_friend(self, db):
+        db.add_friend("Alice", "192.168.1.10", 7779, ["a"], "old", user_id="user_alice")
+        db.add_friend("Alice New", "192.168.1.11", 7780, ["b"], "new", user_id="user_alice")
+
+        friends = db.get_friends()
+        friend = db.get_friend_by_user_id("user_alice")
+
+        assert len(friends) == 1
+        assert friend["name"] == "Alice New"
+        assert friend["ip"] == "192.168.1.11"
+        assert friend["port"] == 7780
+
+    def test_friend_request_status_machine(self, db):
+        db.upsert_friend_request(
+            name="Alice",
+            ip="192.168.1.10",
+            port=7779,
+            direction="outgoing",
+            status="pending",
+            user_id="user_alice",
+        )
+
+        assert db.get_relationship_status(user_id="user_alice") == "pending_sent"
+
+        db.set_friend_request_status("accepted", user_id="user_alice")
+        assert db.get_relationship_status(user_id="user_alice") == "accepted"
 
     def test_remove_friend(self, db):
         db.add_friend("FriendB", "192.168.1.102", 7779, [], "bio")

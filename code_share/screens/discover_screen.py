@@ -198,6 +198,7 @@ class DiscoveredPersonItem(BoxLayout):
         name = data.get("name", "未知用户")
         port = int(data.get("tcp_port", 7779) or 7779)
         ip = data.get("ip", "0.0.0.0")
+        user_id = data.get("user_id", "")
         self.name_label.text = name
         self.ip_label.text = f"{ip}:{port}"
         
@@ -212,7 +213,17 @@ class DiscoveredPersonItem(BoxLayout):
         self.request_btn.text = "添加好友"
         self.request_btn.disabled = False
         app = get_root_app()
-        if hasattr(app, "is_existing_friend") and app.is_existing_friend(name, ip, port):
+        if hasattr(app, "get_relationship_status"):
+            status = app.get_relationship_status(name, ip, port, user_id)
+            status_text = {
+                "pending_sent": "已发送",
+                "pending_received": "待处理",
+                "accepted": "已是好友",
+            }.get(status, "")
+            if status_text:
+                self.request_btn.text = status_text
+                self.request_btn.disabled = True
+        elif hasattr(app, "is_existing_friend") and app.is_existing_friend(name, ip, port, user_id):
             self.request_btn.text = "已是好友"
             self.request_btn.disabled = True
 
@@ -222,13 +233,14 @@ class DiscoveredPersonItem(BoxLayout):
         name = self._data.get("name", "")
         ip = self._data.get("ip", "")
         port = int(self._data.get("tcp_port", 7779) or 7779)
+        user_id = self._data.get("user_id", "")
         if hasattr(app, "send_friend_request"):
             import threading
             self.request_btn.text = "发送中"
             self.request_btn.disabled = True
 
             def task():
-                success = app.send_friend_request(name, ip, port)
+                success = app.send_friend_request(name, ip, port, user_id)
                 def finish(_dt):
                     self.request_btn.text = "已发送" if success else "重试"
                     self.request_btn.disabled = False if not success else True

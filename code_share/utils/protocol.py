@@ -59,7 +59,12 @@ class Protocol:
     # ================================================================== #
 
     @staticmethod
-    def create_ping_packet(device_name: str, tcp_port: int = DEFAULT_TCP_PORT) -> bytes:
+    def create_ping_packet(
+        device_name: str,
+        tcp_port: int = DEFAULT_TCP_PORT,
+        user_id: str = "",
+        device_id: str = "",
+    ) -> bytes:
         """
         创建 UDP PING 广播包。
 
@@ -74,12 +79,19 @@ class Protocol:
             "type": Protocol.UDP_PING,
             "device_name": device_name,
             "tcp_port": tcp_port,
+            "user_id": user_id,
+            "device_id": device_id,
         }
         return json.dumps(packet, ensure_ascii=False).encode("utf-8")
 
     @staticmethod
-    def create_pong_packet(device_name: str, ip_address: str,
-                           tcp_port: int = DEFAULT_TCP_PORT) -> bytes:
+    def create_pong_packet(
+        device_name: str,
+        ip_address: str,
+        tcp_port: int = DEFAULT_TCP_PORT,
+        user_id: str = "",
+        device_id: str = "",
+    ) -> bytes:
         """
         创建 UDP PONG 应答包。
 
@@ -96,6 +108,8 @@ class Protocol:
             "device_name": device_name,
             "ip": ip_address,
             "tcp_port": tcp_port,
+            "user_id": user_id,
+            "device_id": device_id,
         }
         return json.dumps(packet, ensure_ascii=False).encode("utf-8")
 
@@ -208,8 +222,14 @@ class Protocol:
     # -- 便捷方法：PROFILE_EXCHANGE ------------------------------------- #
 
     @staticmethod
-    def create_profile_exchange(name: str, tags: List[str],
-                                bio: str, tcp_port: int = DEFAULT_TCP_PORT) -> bytes:
+    def create_profile_exchange(
+        name: str,
+        tags: List[str],
+        bio: str,
+        tcp_port: int = DEFAULT_TCP_PORT,
+        user_id: str = "",
+        device_id: str = "",
+    ) -> bytes:
         """
         创建 PROFILE_EXCHANGE 消息（自我介绍）。
 
@@ -227,13 +247,22 @@ class Protocol:
             tags=tags,
             bio=bio,
             tcp_port=tcp_port,
+            user_id=user_id,
+            device_id=device_id,
         )
 
     # -- 便捷方法：FRIEND_REQUEST --------------------------------------- #
 
     @staticmethod
-    def create_friend_request(name: str, tags: List[str],
-                              bio: str, conditions: Optional[Dict[str, Any]] = None) -> bytes:
+    def create_friend_request(
+        name: str,
+        tags: List[str],
+        bio: str,
+        conditions: Optional[Dict[str, Any]] = None,
+        user_id: str = "",
+        device_id: str = "",
+        tcp_port: int = DEFAULT_TCP_PORT,
+    ) -> bytes:
         """
         创建 FRIEND_REQUEST 消息（好友请求）。
 
@@ -250,15 +279,28 @@ class Protocol:
         """
         return Protocol.create_message(
             Protocol.FRIEND_REQUEST,
-            profile={"name": name, "tags": tags, "bio": bio},
+            profile={
+                "user_id": user_id,
+                "device_id": device_id,
+                "name": name,
+                "tags": tags,
+                "bio": bio,
+                "tcp_port": tcp_port,
+            },
             conditions=conditions or {},
         )
 
     # -- 便捷方法：FRIEND_ACCEPT ---------------------------------------- #
 
     @staticmethod
-    def create_friend_accept(name: str, tags: List[str],
-                             bio: str) -> bytes:
+    def create_friend_accept(
+        name: str,
+        tags: List[str],
+        bio: str,
+        user_id: str = "",
+        device_id: str = "",
+        tcp_port: int = DEFAULT_TCP_PORT,
+    ) -> bytes:
         """
         创建 FRIEND_ACCEPT 消息（接受好友请求）。
 
@@ -275,7 +317,14 @@ class Protocol:
             name=name,
             tags=tags,
             bio=bio,
-            profile={"name": name, "tags": tags, "bio": bio},
+            profile={
+                "user_id": user_id,
+                "device_id": device_id,
+                "name": name,
+                "tags": tags,
+                "bio": bio,
+                "tcp_port": tcp_port,
+            },
         )
 
     # -- 便捷方法：FRIEND_REJECT ---------------------------------------- #
