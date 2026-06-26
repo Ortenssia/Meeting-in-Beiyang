@@ -585,6 +585,7 @@ class CodeShareApp(App):
                 spacing=dp(10)
             )
             message = (
+                "收到好友申请\n\n"
                 f"{sender_name} 想添加你为好友\n"
                 f"IP: {sender_ip}\n"
                 f"状态: {match_text}\n"
@@ -613,7 +614,8 @@ class CodeShareApp(App):
             layout.add_widget(btn_row)
 
             popup = Popup(
-                title="收到好友申请",
+                title="",
+                title_size=0,
                 content=layout,
                 size_hint=(0.86, 0.52),
                 auto_dismiss=False
@@ -628,7 +630,7 @@ class CodeShareApp(App):
                     bio=bio,
                     category="朋友"
                 )
-                self.message_service.send_friend_accept(sender_name)
+                self.message_service.send_friend_accept(sender_name, sender_ip)
                 friends = self.root.get_screen('friends')
                 if friends:
                     friends.refresh()

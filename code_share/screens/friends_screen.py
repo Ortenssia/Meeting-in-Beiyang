@@ -337,6 +337,7 @@ class FriendList(RecycleView):
             spacing=dp(6),
         )
         layout.bind(minimum_height=layout.setter("height"))
+        self.layout_manager = layout
         self.add_widget(layout)
         self.data = []
 
@@ -701,4 +702,3 @@ class FriendsScreen(Screen):
             from kivy.uix.screenmanager import NoTransition
             app.root.transition = NoTransition()
             app.root.current = screen_name
-

@@ -247,6 +247,25 @@ class ConnectionManager:
                             if friend_ip in self.connections:
                                 self.connections[friend_ip]["name"] = friend_name
 
+                # FRIEND_REQUEST / FRIEND_ACCEPT both carry a profile. Register
+                # the inbound socket as soon as we learn the peer name so replies
+                # can be sent back over the same connection.
+                elif msg_type in (Protocol.FRIEND_REQUEST, Protocol.FRIEND_ACCEPT):
+                    profile = message.get("profile", {}) or {}
+                    friend_name = profile.get("name", "")
+                    if friend_name:
+                        with self._lock:
+                            if friend_ip not in self.connections:
+                                self.connections[friend_ip] = {
+                                    "socket": sock,
+                                    "name": friend_name,
+                                    "connected_at": Helpers.get_timestamp(),
+                                }
+                                if self.on_friend_connected:
+                                    self.on_friend_connected(friend_name, friend_ip)
+                            else:
+                                self.connections[friend_ip]["name"] = friend_name
+
                 # 将消息传递给上层
                 if self.on_message_received:
                     self.on_message_received(friend_ip, message)

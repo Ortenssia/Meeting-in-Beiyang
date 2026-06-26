@@ -224,12 +224,13 @@ class MessageService:
             logger.error(f"[MessageService] 发送好友请求失败: {e}")
             return False
 
-    def send_friend_accept(self, friend_name: str) -> bool:
+    def send_friend_accept(self, friend_name: str, friend_ip: str = "") -> bool:
         """
         接受好友请求后，向对方发送 FRIEND_ACCEPT 消息。
 
         Args:
             friend_name: 已接受的好友名称。
+            friend_ip:   对方 IP。入站好友申请尚未按名字登记连接时，用它兜底发送。
 
         Returns:
             True 表示接受消息已发送。
@@ -247,7 +248,11 @@ class MessageService:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         }
 
-        return self._send_data_to_friend(friend_name, accept_msg)
+        if self._send_data_to_friend(friend_name, accept_msg):
+            return True
+        if friend_ip:
+            return self._send_data_to_friend(friend_ip, accept_msg)
+        return False
 
     # ================================================================== #
     #  接收消息处理
@@ -450,7 +455,7 @@ class MessageService:
                 bio=profile.get("bio", ""),
             )
             # 发送 ACCEPT 回执
-            self.send_friend_accept(sender_name)
+            self.send_friend_accept(sender_name, from_ip)
             logger.info(f"[MessageService] 自动接受好友请求: {sender_name}")
 
             if self.on_friend_accepted:
