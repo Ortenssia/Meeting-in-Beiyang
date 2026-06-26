@@ -698,12 +698,18 @@ class DiscoverScreen(Screen):
                 # 在后台线程发送，防止主线程因 TCP 连接阻塞而卡顿
                 import threading
                 def task():
-                    self.set_scan_status("正在发送请求...")
+                    Clock.schedule_once(lambda _dt: self.set_scan_status("正在发送请求..."), 0)
                     success = app.send_friend_request(name, ip)
                     if success:
-                        self.set_scan_status(f"成功向 {name}({ip}) 发送申请")
+                        Clock.schedule_once(
+                            lambda _dt: self.set_scan_status(f"成功向 {name}({ip}) 发送申请"),
+                            0
+                        )
                     else:
-                        self.set_scan_status(f"发送申请失败，请检查网络")
+                        Clock.schedule_once(
+                            lambda _dt: self.set_scan_status("发送申请失败，请检查网络"),
+                            0
+                        )
                 threading.Thread(target=task, daemon=True).start()
                 popup.dismiss()
         
@@ -736,4 +742,3 @@ class DiscoverScreen(Screen):
             from kivy.uix.screenmanager import NoTransition
             app.root.transition = NoTransition()
             app.root.current = screen_name
-

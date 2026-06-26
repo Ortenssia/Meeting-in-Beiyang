@@ -555,150 +555,93 @@ class CodeShareApp(App):
         if chat:
             chat.on_new_message(friend_name, content, timestamp)
 
-    @mainthread
-    def _on_service_friend_request(self, profile, is_match):
-        # 用户手动审核好友申请的弹窗 (高拟真卡片式重构)
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.metrics import dp
-        from kivy.factory import Factory
+    def _on_service_friend_request(self, profile, is_match, from_ip=None):
+        profile = dict(profile or {})
+        if from_ip:
+            profile["ip"] = from_ip
+        Clock.schedule_once(
+            lambda _dt: self._show_friend_request_popup(profile, is_match),
+            0
+        )
 
-        sender_name = profile.get("name", "Unknown")
-        bio = profile.get("bio", "这个用户很懒，什么都没写")
-        tags = profile.get("tags", [])
-        sender_ip = profile.get("ip", "0.0.0.0")
+    def _show_friend_request_popup(self, profile, is_match):
+        """Show a conservative friend-request dialog on the Kivy main thread."""
+        try:
+            from kivy.uix.popup import Popup
+            from kivy.uix.boxlayout import BoxLayout
+            from kivy.uix.label import Label
+            from kivy.uix.button import Button
+            from kivy.metrics import dp
 
-        # 容器布局
-        # 容器布局
-        layout = BoxLayout(orientation='vertical', padding=[dp(16), dp(16), dp(16), dp(10)], spacing=dp(12))
-        with layout.canvas.before:
-            # Frosted glass background
-            Color(0.1, 0.1, 0.15, 0.72)
-            layout_bg = RoundedRectangle(pos=layout.pos, size=layout.size, radius=[dp(20)])
-            # Specular outline border
-            Color(1, 1, 1, 0.15)
-            layout_border = Line(rounded_rectangle=(layout.x, layout.y, layout.width, layout.height, dp(20)), width=dp(1))
-            
-        def update_layout_canvas(w, v):
-            layout_bg.pos = w.pos
-            layout_bg.size = w.size
-            layout_border.rounded_rectangle = (w.x, w.y, w.width, w.height, dp(20))
-            
-        layout.bind(pos=update_layout_canvas, size=update_layout_canvas)
-        
-        # 1. 顶部：大字标题及头像预览行
-        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(50), spacing=dp(10))
-        avatar = Factory.LetterAvatar(avatar_size=dp(46), text=sender_name, name_key=sender_name)
-        
-        title_box = BoxLayout(orientation='vertical', size_hint_x=0.8)
-        title_lbl = Label(
-            text="收到好友申请",
-            font_size='16sp',
-            bold=True,
-            color=(1, 1, 1, 1),
-            halign="left"
-        )
-        title_lbl.bind(size=title_lbl.setter("text_size"))
-        sub_title_lbl = Label(
-            text=f"来自 IP: {sender_ip}",
-            font_size='12sp',
-            color=(0.55, 0.57, 0.68, 1),
-            halign="left"
-        )
-        sub_title_lbl.bind(size=sub_title_lbl.setter("text_size"))
-        title_box.add_widget(title_lbl)
-        title_box.add_widget(sub_title_lbl)
-        
-        header.add_widget(avatar)
-        header.add_widget(title_box)
-        layout.add_widget(header)
+            sender_name = profile.get("name", "Unknown")
+            bio = profile.get("bio", "这个用户很懒，什么都没写")
+            tags = profile.get("tags", [])
+            sender_ip = profile.get("ip", "0.0.0.0")
+            match_text = "符合你的交友条件" if is_match else "未完全符合你的交友条件"
 
-        # 2. 中间：简介和标签信息卡片
-        info_card = BoxLayout(orientation='vertical', spacing=dp(6), padding=dp(10))
-        with info_card.canvas.before:
-            from kivy.graphics import Color, RoundedRectangle
-            Color(1, 1, 1, 0.04) # Frosted card background
-            info_bg = RoundedRectangle(pos=info_card.pos, size=info_card.size, radius=[dp(8)])
-            Color(1, 1, 1, 0.08) # Card border
-            info_border = Line(rounded_rectangle=(info_card.x, info_card.y, info_card.width, info_card.height, dp(8)), width=dp(1))
-        
-        def update_info_bg(w, v):
-            info_bg.pos = w.pos
-            info_bg.size = w.size
-            info_border.rounded_rectangle = (w.x, w.y, w.width, w.height, dp(8))
-        info_card.bind(pos=update_info_bg, size=update_info_bg)
-
-        bio_lbl = Label(
-            text=f"个人简介:\n{bio}",
-            font_size='13sp',
-            color=(0.85, 0.85, 0.9, 1),
-            halign="left",
-            valign="top"
-        )
-        bio_lbl.bind(size=bio_lbl.setter("text_size"))
-        
-        tags_lbl = Label(
-            text=f"兴趣标签: {', '.join(tags) if tags else '无'}",
-            font_size='13sp',
-            color=(0.44, 0.32, 1.0, 1), # 主色紫高亮显示标签
-            halign="left"
-        )
-        tags_lbl.bind(size=tags_lbl.setter("text_size"))
-        
-        info_card.add_widget(bio_lbl)
-        info_card.add_widget(tags_lbl)
-        layout.add_widget(info_card)
-
-        # 3. 底部：接受 / 忽略 按钮
-        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(10))
-        
-        accept_btn = Factory.ModernButtonAccent(
-            text="同意并添加",
-            font_size='14sp'
-        )
-        ignore_btn = Factory.ModernButtonSecondary(
-            text="忽略",
-            font_size='14sp'
-        )
-        
-        btn_row.add_widget(accept_btn)
-        btn_row.add_widget(ignore_btn)
-        layout.add_widget(btn_row)
-
-        popup = Popup(
-            title="",
-            title_size=0, # 隐藏默认的 Popup 标题栏
-            content=layout,
-            size_hint=(0.84, 0.46),
-            background_color=(0, 0, 0, 0), # 完全透明，使用自制磨砂玻璃面板
-            background="", # 去除默认灰色边框背景
-        )
-        
-        def on_accept(_btn):
-            # 添加好友到数据库
-            self.friend_db.add_friend(
-                name=sender_name,
-                ip=sender_ip,
-                port=Protocol.DEFAULT_TCP_PORT,
-                tags=tags,
-                bio=bio,
-                category="朋友"
+            layout = BoxLayout(
+                orientation='vertical',
+                padding=[dp(16), dp(14), dp(16), dp(12)],
+                spacing=dp(10)
             )
-            # 发送同意应答
-            self.message_service.send_friend_accept(sender_name)
-            # 刷新 UI
-            friends = self.root.get_screen('friends')
-            if friends:
-                friends.refresh()
-            discover = self.root.get_screen('discover')
-            if discover:
-                discover._refresh_online_friends()
-            popup.dismiss()
+            message = (
+                f"{sender_name} 想添加你为好友\n"
+                f"IP: {sender_ip}\n"
+                f"状态: {match_text}\n"
+                f"标签: {', '.join(tags) if tags else '无'}\n\n"
+                f"{bio}"
+            )
+            info_label = Label(
+                text=message,
+                font_size='14sp',
+                halign='left',
+                valign='top'
+            )
+            info_label.bind(size=info_label.setter("text_size"))
+            layout.add_widget(info_label)
 
-        accept_btn.bind(on_press=on_accept)
-        ignore_btn.bind(on_press=popup.dismiss)
-        popup.open()
+            btn_row = BoxLayout(
+                orientation='horizontal',
+                size_hint_y=None,
+                height=dp(42),
+                spacing=dp(10)
+            )
+            accept_btn = Button(text="同意并添加", font_size='14sp')
+            ignore_btn = Button(text="忽略", font_size='14sp')
+            btn_row.add_widget(accept_btn)
+            btn_row.add_widget(ignore_btn)
+            layout.add_widget(btn_row)
+
+            popup = Popup(
+                title="收到好友申请",
+                content=layout,
+                size_hint=(0.86, 0.52),
+                auto_dismiss=False
+            )
+
+            def on_accept(_btn):
+                self.friend_db.add_friend(
+                    name=sender_name,
+                    ip=sender_ip,
+                    port=Protocol.DEFAULT_TCP_PORT,
+                    tags=tags,
+                    bio=bio,
+                    category="朋友"
+                )
+                self.message_service.send_friend_accept(sender_name)
+                friends = self.root.get_screen('friends')
+                if friends:
+                    friends.refresh()
+                discover = self.root.get_screen('discover')
+                if discover:
+                    discover._refresh_online_friends()
+                popup.dismiss()
+
+            accept_btn.bind(on_press=on_accept)
+            ignore_btn.bind(on_press=lambda _btn: popup.dismiss())
+            popup.open()
+        except Exception as e:
+            print(f"[BeiyangSocialApp Error] Failed to show friend request popup: {e}")
 
     @mainthread
     def _on_service_friend_accepted(self, friend_name, friend_ip):

@@ -191,6 +191,32 @@ class TestSocialFlow:
         assert prof["name"] == "Eve"
         assert is_match is False
 
+    def test_friend_request_callback_receives_source_ip(self, social_env):
+        db, conn_mgr, msg_service = social_env
+
+        sender_profile = {"name": "Frank", "tags": ["sports"], "bio": "Frank Bio"}
+        req_data = {
+            "type": MessageService.FRIEND_REQUEST,
+            "msg_id": "req_uuid_3",
+            "profile": sender_profile,
+            "conditions": {"required_tags": [], "min_match_count": 0}
+        }
+
+        callback_triggered = []
+
+        def my_request_callback(profile, is_match, from_ip):
+            callback_triggered.append((profile, is_match, from_ip))
+
+        msg_service.on_friend_request = my_request_callback
+        msg_service.handle_message("192.168.1.10", req_data)
+
+        assert len(callback_triggered) == 1
+        prof, is_match, from_ip = callback_triggered[0]
+        assert prof["name"] == "Frank"
+        assert prof["ip"] == "192.168.1.10"
+        assert from_ip == "192.168.1.10"
+        assert is_match is False
+
     def test_flush_pending_messages(self, social_env):
         db, conn_mgr, msg_service = social_env
         

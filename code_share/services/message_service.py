@@ -24,6 +24,7 @@ import time
 import uuid
 import threading
 import logging
+import inspect
 from typing import Any, Callable, Dict, List, Optional
 
 try:
@@ -86,7 +87,7 @@ class MessageService:
 
         # 回调函数（由上层 App 或 Screen 绑定）
         self.on_message_received: Optional[Callable[[str, str, str], None]] = None
-        self.on_friend_request: Optional[Callable[[dict, bool], None]] = None
+        self.on_friend_request: Optional[Callable[..., None]] = None
         self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
 
         # 心跳定时器
@@ -465,7 +466,16 @@ class MessageService:
             )
             if self.on_friend_request:
                 try:
-                    self.on_friend_request(profile, conditions_matched)
+                    profile = dict(profile)
+                    profile.setdefault("ip", from_ip)
+                    try:
+                        param_count = len(inspect.signature(self.on_friend_request).parameters)
+                    except (TypeError, ValueError):
+                        param_count = 2
+                    if param_count >= 3:
+                        self.on_friend_request(profile, conditions_matched, from_ip)
+                    else:
+                        self.on_friend_request(profile, conditions_matched)
                 except Exception as e:
                     logger.error(f"[MessageService] on_friend_request 回调异常: {e}")
 
