@@ -199,6 +199,7 @@ class DiscoveredPersonItem(BoxLayout):
         port = int(data.get("tcp_port", 7779) or 7779)
         ip = data.get("ip", "0.0.0.0")
         user_id = data.get("user_id", "")
+        status = data.get("status", "")
         self.name_label.text = name
         self.ip_label.text = f"{ip}:{port}"
         
@@ -213,7 +214,7 @@ class DiscoveredPersonItem(BoxLayout):
         self.request_btn.text = "添加好友"
         self.request_btn.disabled = False
         app = get_root_app()
-        if hasattr(app, "get_relationship_status"):
+        if not status and hasattr(app, "get_relationship_status"):
             status = app.get_relationship_status(name, ip, port, user_id)
             status_text = {
                 "pending_sent": "已发送",
@@ -226,6 +227,18 @@ class DiscoveredPersonItem(BoxLayout):
         elif hasattr(app, "is_existing_friend") and app.is_existing_friend(name, ip, port, user_id):
             self.request_btn.text = "已是好友"
             self.request_btn.disabled = True
+        elif data.get("status_label"):
+            self.request_btn.text = data.get("status_label")
+
+    def on_touch_up(self, touch):
+        if not self.collide_point(*touch.pos):
+            return super().on_touch_up(touch)
+        if self._data.get("status") == "accepted":
+            app = get_root_app()
+            if hasattr(app, "open_chat_with"):
+                app.open_chat_with(self._data.get("name", ""))
+                return True
+        return super().on_touch_up(touch)
 
     def _on_send_request(self, _btn):
         """发送好友请求按钮点击事件。"""
@@ -575,24 +588,6 @@ class DiscoverScreen(Screen):
         count = len(people)
         if not self.radar_scanner.scanning:
             self.scan_status.text = f"发现 {count} 人" if count else "未发现附近的人"
-
-        # UI 诊断日志
-        try:
-            log_path = r"C:\Users\20476\.gemini\antigravity\brain\52596d6e-cae5-4db9-816b-d91323486126\scratch\ui_debug.log"
-            import os
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            with open(log_path, "a", encoding="utf-8") as f:
-                import datetime
-                f.write(f"--- {datetime.datetime.now()} ---\n")
-                f.write(f"people input: {people}\n")
-                f.write(f"discovered_list container children count: {len(self.discovered_list.container.children)}\n")
-                f.write(f"discovered_list size: {self.discovered_list.size}, height: {self.discovered_list.height}\n")
-                f.write(f"list_container size: {self.list_container.size}, height: {self.list_container.height}\n")
-                for child in self.discovered_list.container.children:
-                    f.write(f"  - child class: {child.__class__.__name__}, name: {child.name_label.text}, ip: {child.ip_label.text}\n")
-                f.write("\n")
-        except Exception as e:
-            print("Write debug log failed:", e)
 
     @mainthread
     def update_online_friends(self, friends):

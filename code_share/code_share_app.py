@@ -21,6 +21,7 @@ from services.udp_service import UDPService
 from services.connection_manager import ConnectionManager
 from services.friend_db import FriendDB
 from services.message_service import MessageService
+from services.social_service import SocialService
 
 from utils.helpers import Helpers
 from utils.protocol import Protocol
@@ -399,6 +400,7 @@ class CodeShareApp(App):
         self.connection_manager = None
         self.udp_service = None
         self.message_service = None
+        self.social_service = None
 
     def build(self):
         self.title = "相识北洋"
@@ -457,6 +459,11 @@ class CodeShareApp(App):
         self.message_service = MessageService(
             connection_manager=self.connection_manager,
             friend_db=self.friend_db
+        )
+        self.social_service = SocialService(
+            friend_db=self.friend_db,
+            connection_manager=self.connection_manager,
+            udp_service=self.udp_service,
         )
 
         # 5. 绑定回调
@@ -750,42 +757,8 @@ class CodeShareApp(App):
             self.udp_service.manual_scan()
 
     def get_discovered_people(self):
-        if self.udp_service:
-            friend_names = set()
-            friend_user_ids = set()
-            friend_endpoints = set()
-            if self.friend_db:
-                for friend in self.friend_db.get_friends():
-                    friend_names.add(friend.get("name", ""))
-                    if friend.get("user_id"):
-                        friend_user_ids.add(friend.get("user_id", ""))
-                    friend_endpoints.add(
-                        f"{friend.get('ip', '')}:{int(friend.get('port', 0) or 0)}"
-                    )
-            my_name = self.device_name
-            with self.udp_service._devices_lock:
-                return [
-                    {
-                        "user_id": getattr(dev, "user_id", ""),
-                        "device_id": getattr(dev, "device_id", ""),
-                        "name": dev.device_name,
-                        "ip": dev.ip,
-                        "tcp_port": dev.tcp_port,
-                    }
-                    for dev in self.udp_service.devices.values()
-                    if dev.is_online()
-                    and dev.device_name != my_name
-                    and getattr(dev, "user_id", "") != self.user_id
-                    and getattr(dev, "user_id", "") not in friend_user_ids
-                    and (
-                        getattr(dev, "user_id", "")
-                        or dev.device_name not in friend_names
-                    )
-                    and (
-                        getattr(dev, "user_id", "")
-                        or f"{dev.ip}:{int(dev.tcp_port or 0)}" not in friend_endpoints
-                    )
-                ]
+        if self.social_service:
+            return self.social_service.get_discovered_cards(self.user_id, self.device_name)
         return []
 
     def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT, user_id=""):
@@ -816,20 +789,13 @@ class CodeShareApp(App):
         )
 
     def get_all_friends(self):
-        if self.friend_db:
-            friends = self.friend_db.get_friends()
-            for f in friends:
-                f["online"] = self.connection_manager.is_friend_online(f["name"])
-            return friends
+        if self.social_service:
+            return self.social_service.get_friend_cards()
         return []
 
     def get_online_friends(self):
-        if self.connection_manager:
-            online = self.connection_manager.get_online_friends()
-            if not self.friend_db:
-                return online
-            friend_names = {friend.get("name", "") for friend in self.friend_db.get_friends()}
-            return [friend for friend in online if friend.get("name", "") in friend_names]
+        if self.social_service:
+            return self.social_service.get_online_friend_cards()
         return []
 
     def delete_friend(self, name):
@@ -891,33 +857,9 @@ class CodeShareApp(App):
 
     def get_chat_list(self):
         try:
-            cursor = self.friend_db.conn.cursor()
-            cursor.execute("""
-                SELECT friend_name, content, timestamp 
-                FROM chat_history 
-                WHERE id IN (
-                    SELECT MAX(id) 
-                    FROM chat_history 
-                    GROUP BY friend_name
-                )
-                ORDER BY timestamp DESC
-            """)
-            rows = cursor.fetchall()
-            
-            chat_list = []
-            for row in rows:
-                friend_name = row["friend_name"]
-                content = row["content"]
-                timestamp = row["timestamp"]
-                unread = self.get_pending_message_count(friend_name)
-                
-                chat_list.append({
-                    "name": friend_name,
-                    "last_message": content,
-                    "time": timestamp[-8:] if len(timestamp) >= 8 else timestamp,
-                    "unread": unread
-                })
-            return chat_list
+            if self.social_service:
+                return self.social_service.get_chat_list()
+            return []
         except Exception as e:
             print(f"获取聊天列表失败: {e}")
             return []
@@ -927,13 +869,6 @@ class CodeShareApp(App):
             self.friend_db.clear_pending_messages(friend_name)
 
     def get_pending_message_count(self, for_friend=None):
-        try:
-            cursor = self.friend_db.conn.cursor()
-            if for_friend:
-                cursor.execute("SELECT COUNT(*) FROM pending_messages WHERE to_name = ?", (for_friend,))
-            else:
-                cursor.execute("SELECT COUNT(*) FROM pending_messages")
-            row = cursor.fetchone()
-            return row[0] if row else 0
-        except Exception:
-            return 0
+        if self.social_service:
+            return self.social_service.get_pending_message_count(for_friend or "")
+        return 0
