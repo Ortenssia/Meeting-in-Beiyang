@@ -209,7 +209,7 @@ class Protocol:
 
     @staticmethod
     def create_profile_exchange(name: str, tags: List[str],
-                                bio: str) -> bytes:
+                                bio: str, tcp_port: int = DEFAULT_TCP_PORT) -> bytes:
         """
         创建 PROFILE_EXCHANGE 消息（自我介绍）。
 
@@ -226,6 +226,7 @@ class Protocol:
             name=name,
             tags=tags,
             bio=bio,
+            tcp_port=tcp_port,
         )
 
     # -- 便捷方法：FRIEND_REQUEST --------------------------------------- #
@@ -274,6 +275,7 @@ class Protocol:
             name=name,
             tags=tags,
             bio=bio,
+            profile={"name": name, "tags": tags, "bio": bio},
         )
 
     # -- 便捷方法：FRIEND_REJECT ---------------------------------------- #
@@ -319,6 +321,8 @@ class Protocol:
         payload = {
             "type": Protocol.CHAT_MESSAGE,
             "msg_id": msg_id,
+            "from_name": from_name,
+            "to_name": to_name,
             "from": from_name,
             "to": to_name,
             "content": content,

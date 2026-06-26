@@ -19,6 +19,8 @@ class MockConnectionManager:
     def __init__(self):
         self.online_friends = {}  # name -> ip
         self.sent_messages = []   # list of (name, msg_dict)
+        self.connect_calls = []
+        self.tcp_port = 7788
 
     def is_friend_online(self, name):
         return name in self.online_friends
@@ -40,6 +42,7 @@ class MockConnectionManager:
         return False
 
     def connect_to_friend(self, ip, port=0, name=""):
+        self.connect_calls.append((ip, port, name))
         actual_name = name if name else (port if isinstance(port, str) else "")
         if actual_name:
             self.online_friends[actual_name] = ip
@@ -132,6 +135,33 @@ class TestSocialFlow:
         assert data["original_message"]["content"] == "Hi Bob (offline)"
         assert data["original_message"]["to_name"] == "Bob"
 
+    def test_flood_relay_returns_sent_count(self, social_env):
+        db, conn_mgr, msg_service = social_env
+        db.add_friend("Charlie", "192.168.1.7", 7779, ["kivy"], "Charlie Bio")
+        db.add_friend("Dana", "192.168.1.8", 7779, ["kivy"], "Dana Bio")
+        conn_mgr.online_friends["Charlie"] = "192.168.1.7"
+        conn_mgr.online_friends["Dana"] = "192.168.1.8"
+
+        count = msg_service._flood_relay(
+            {"type": MessageService.RELAY_MESSAGE},
+            exclude_name="Dana",
+        )
+
+        assert count == 1
+        assert conn_mgr.sent_messages[0][0] == "Charlie"
+
+    def test_send_friend_request_uses_discovered_port(self, social_env):
+        db, conn_mgr, msg_service = social_env
+
+        success = msg_service.send_friend_request("Alice", "172.30.0.1", 7780)
+
+        assert success is True
+        assert conn_mgr.connect_calls == [("172.30.0.1", 7780, "Alice")]
+        target, data = conn_mgr.sent_messages[0]
+        assert target == "Alice"
+        assert data["type"] == MessageService.FRIEND_REQUEST
+        assert data["profile"]["tcp_port"] == 7788
+
     def test_receive_friend_request_auto_accept(self, social_env):
         db, conn_mgr, msg_service = social_env
 
@@ -159,6 +189,34 @@ class TestSocialFlow:
         target, data = conn_mgr.sent_messages[0]
         assert target == "Dave"
         assert data["type"] == "FRIEND_ACCEPT"
+
+    def test_existing_friend_request_resends_accept(self, social_env):
+        db, conn_mgr, msg_service = social_env
+        db.add_friend("Dave", "172.30.0.1", 7779, ["old"], "Old Bio")
+        conn_mgr.online_friends["Dave"] = "172.30.0.1"
+
+        req_data = {
+            "type": MessageService.FRIEND_REQUEST,
+            "msg_id": "req_existing_1",
+            "profile": {
+                "name": "Dave",
+                "tags": ["kivy"],
+                "bio": "Dave Bio",
+                "tcp_port": 7780,
+            },
+            "conditions": {"required_tags": [], "min_match_count": 0},
+        }
+
+        msg_service.handle_message("172.30.0.1", req_data)
+
+        friend = db.get_friend("Dave")
+        assert friend["port"] == 7780
+        assert friend["bio"] == "Dave Bio"
+        assert len(conn_mgr.sent_messages) == 1
+        target, data = conn_mgr.sent_messages[0]
+        assert target == "Dave"
+        assert data["type"] == "FRIEND_ACCEPT"
+        assert data["profile"]["tcp_port"] == 7788
 
     def test_receive_friend_request_manual_audit(self, social_env):
         db, conn_mgr, msg_service = social_env

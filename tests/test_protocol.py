@@ -68,12 +68,15 @@ class TestProtocol:
         assert data["key"] == "val"
 
     def test_create_profile_exchange(self):
-        packet = Protocol.create_profile_exchange("UserA", ["tag1", "tag2"], "hello")
+        packet = Protocol.create_profile_exchange(
+            "UserA", ["tag1", "tag2"], "hello", 7780
+        )
         data = Protocol.parse_message(packet[4:])
         assert data["type"] == Protocol.PROFILE_EXCHANGE
         assert data["name"] == "UserA"
         assert data["tags"] == ["tag1", "tag2"]
         assert data["bio"] == "hello"
+        assert data["tcp_port"] == 7780
 
     def test_create_friend_request(self):
         my_profile = {"name": "UserA", "tags": ["tag1"], "bio": "hi"}
@@ -90,6 +93,7 @@ class TestProtocol:
         data = Protocol.parse_message(packet[4:])
         assert data["type"] == Protocol.FRIEND_ACCEPT
         assert data["name"] == "UserB"
+        assert data["profile"]["name"] == "UserB"
 
     def test_create_friend_reject(self):
         packet = Protocol.create_friend_reject("UserB", "mismatch")
@@ -103,6 +107,8 @@ class TestProtocol:
         data = Protocol.parse_message(packet[4:])
         assert data["type"] == Protocol.CHAT_MESSAGE
         assert data["msg_id"] == "id123"
+        assert data["from_name"] == "UserA"
+        assert data["to_name"] == "UserB"
         assert data["content"] == "hello world"
 
     def test_create_relay_message(self):

@@ -196,8 +196,9 @@ class DiscoveredPersonItem(BoxLayout):
         """填充行数据。"""
         self._data = data
         name = data.get("name", "未知用户")
+        port = int(data.get("tcp_port", 7779) or 7779)
         self.name_label.text = name
-        self.ip_label.text = data.get("ip", "0.0.0.0")
+        self.ip_label.text = f"{data.get('ip', '0.0.0.0')}:{port}"
         
         self.avatar.text = name
         self.avatar.name_key = name
@@ -215,10 +216,20 @@ class DiscoveredPersonItem(BoxLayout):
         app = get_root_app()
         name = self._data.get("name", "")
         ip = self._data.get("ip", "")
+        port = int(self._data.get("tcp_port", 7779) or 7779)
         if hasattr(app, "send_friend_request"):
-            app.send_friend_request(name, ip)
-            self.request_btn.text = "已发送"
+            import threading
+            self.request_btn.text = "发送中"
             self.request_btn.disabled = True
+
+            def task():
+                success = app.send_friend_request(name, ip, port)
+                def finish(_dt):
+                    self.request_btn.text = "已发送" if success else "重试"
+                    self.request_btn.disabled = False if not success else True
+                Clock.schedule_once(finish, 0)
+
+            threading.Thread(target=task, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +539,7 @@ class DiscoverScreen(Screen):
         更新发现列表。
 
         Args:
-            people: list[dict]，每个 dict 包含 'name' 和 'ip' 字段。
+            people: list[dict]，每个 dict 包含 'name'、'ip' 和 'tcp_port' 字段。
         """
         self.discovered_list.update_people(people)
         count = len(people)
@@ -656,6 +667,16 @@ class DiscoverScreen(Screen):
         ip_box.add_widget(ip_lbl)
         ip_box.add_widget(ip_input)
         layout.add_widget(ip_box)
+
+        # 输入端口
+        port_box = BoxLayout(orientation='vertical', spacing=dp(4), size_hint_y=None, height=dp(64))
+        port_lbl = Label(text="TCP 端口:", font_size='12sp', color=(0.63, 0.65, 0.75, 1), halign="left")
+        port_lbl.bind(size=port_lbl.setter("text_size"))
+        port_input = Factory.ModernTextInput(hint_text="默认 7779", multiline=False)
+        port_input.text = "7779"
+        port_box.add_widget(port_lbl)
+        port_box.add_widget(port_input)
+        layout.add_widget(port_box)
         
         # 错误提示Label
         err_lbl = Label(text="", font_size='11sp', color=(0.92, 0.23, 0.35, 1), size_hint_y=None, height=dp(20), halign="center")
@@ -674,7 +695,7 @@ class DiscoverScreen(Screen):
             title="",
             title_size=0,
             content=layout,
-            size_hint=(0.84, 0.48),
+            size_hint=(0.84, 0.60),
             background_color=(0, 0, 0, 0),
             background="",
         )
@@ -692,6 +713,13 @@ class DiscoverScreen(Screen):
             if not Helpers.validate_ip(ip):
                 err_lbl.text = "IP 地址格式不合法！"
                 return
+            try:
+                port = int(port_input.text.strip() or "7779")
+                if port < 1024 or port > 65535:
+                    raise ValueError
+            except ValueError:
+                err_lbl.text = "端口范围: 1024-65535"
+                return
             
             app = get_root_app()
             if hasattr(app, "send_friend_request"):
@@ -699,10 +727,10 @@ class DiscoverScreen(Screen):
                 import threading
                 def task():
                     Clock.schedule_once(lambda _dt: self.set_scan_status("正在发送请求..."), 0)
-                    success = app.send_friend_request(name, ip)
+                    success = app.send_friend_request(name, ip, port)
                     if success:
                         Clock.schedule_once(
-                            lambda _dt: self.set_scan_status(f"成功向 {name}({ip}) 发送申请"),
+                            lambda _dt: self.set_scan_status(f"成功向 {name}({ip}:{port}) 发送申请"),
                             0
                         )
                     else:

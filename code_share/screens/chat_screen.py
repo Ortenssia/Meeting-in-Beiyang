@@ -624,7 +624,12 @@ class ChatWindowView(BoxLayout):
 
         app = get_root_app()
         if hasattr(app, "send_chat_message"):
-            app.send_chat_message(self._current_friend, text)
+            import threading
+            threading.Thread(
+                target=app.send_chat_message,
+                args=(self._current_friend, text),
+                daemon=True,
+            ).start()
 
         # 立即在本地显示（不等回执）
         import time
@@ -861,4 +866,3 @@ class ChatScreen(Screen):
             from kivy.uix.screenmanager import NoTransition
             app.root.transition = NoTransition()
             app.root.current = screen_name
-

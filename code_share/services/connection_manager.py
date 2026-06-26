@@ -53,7 +53,8 @@ class ConnectionManager:
         self.tcp_port = tcp_port
 
         # ------------------------------------------------------------------ #
-        #  连接池：friend_ip -> {"socket", "name", "connected_at"}
+        #  连接池：endpoint -> {"socket", "name", "ip", "port", "connected_at"}
+        # endpoint is normally "ip:port" when the peer advertises a TCP port.
         # ------------------------------------------------------------------ #
         self.connections: Dict[str, Dict] = {}
         self._lock = threading.Lock()
@@ -149,8 +150,8 @@ class ConnectionManager:
 
         # 断开所有好友连接
         with self._lock:
-            for ip in list(self.connections.keys()):
-                self._disconnect_friend_unlocked(ip)
+            for endpoint in list(self.connections.keys()):
+                self._disconnect_friend_unlocked(endpoint)
 
         logger.info("TCP 服务端已停止")
 
@@ -168,11 +169,6 @@ class ConnectionManager:
                 client_ip = addr[0]
 
                 logger.info("收到入站连接: %s", client_ip)
-
-                # 如果该 IP 已有连接，先关闭旧连接
-                with self._lock:
-                    if client_ip in self.connections:
-                        self._disconnect_friend_unlocked(client_ip)
 
                 # 为该连接启动接收线程
                 recv_thread = threading.Thread(
@@ -208,6 +204,7 @@ class ConnectionManager:
             sock:      该好友连接的 socket。
             friend_ip: 好友 IP 地址。
         """
+        connection_key = friend_ip
         while self._running:
             try:
                 success, data = Protocol.unpack_with_header(sock)
@@ -225,27 +222,19 @@ class ConnectionManager:
                 # 从中提取好友名字并注册到连接池
                 if msg_type == Protocol.PROFILE_EXCHANGE:
                     friend_name = message.get("name", "Unknown")
-                    with self._lock:
-                        if friend_ip not in self.connections:
-                            # 新入站连接：注册到连接池
-                            self.connections[friend_ip] = {
-                                "socket": sock,
-                                "name": friend_name,
-                                "connected_at": Helpers.get_timestamp(),
-                            }
-                            if self.on_friend_connected:
-                                self.on_friend_connected(friend_name, friend_ip)
-                        else:
-                            # 更新名字
-                            self.connections[friend_ip]["name"] = friend_name
+                    tcp_port = int(message.get("tcp_port", 0) or 0)
+                    connection_key = self._register_connection(
+                        sock, friend_ip, friend_name, tcp_port
+                    )
 
                 # 特殊处理：HEARTBEAT 消息可能带来名字更新
                 elif msg_type == Protocol.HEARTBEAT:
                     friend_name = message.get("name", "")
                     if friend_name:
-                        with self._lock:
-                            if friend_ip in self.connections:
-                                self.connections[friend_ip]["name"] = friend_name
+                        tcp_port = int(message.get("port", 0) or 0)
+                        connection_key = self._register_connection(
+                            sock, friend_ip, friend_name, tcp_port
+                        )
 
                 # FRIEND_REQUEST / FRIEND_ACCEPT both carry a profile. Register
                 # the inbound socket as soon as we learn the peer name so replies
@@ -254,17 +243,10 @@ class ConnectionManager:
                     profile = message.get("profile", {}) or {}
                     friend_name = profile.get("name", "")
                     if friend_name:
-                        with self._lock:
-                            if friend_ip not in self.connections:
-                                self.connections[friend_ip] = {
-                                    "socket": sock,
-                                    "name": friend_name,
-                                    "connected_at": Helpers.get_timestamp(),
-                                }
-                                if self.on_friend_connected:
-                                    self.on_friend_connected(friend_name, friend_ip)
-                            else:
-                                self.connections[friend_ip]["name"] = friend_name
+                        tcp_port = int(profile.get("tcp_port", 0) or 0)
+                        connection_key = self._register_connection(
+                            sock, friend_ip, friend_name, tcp_port
+                        )
 
                 # 将消息传递给上层
                 if self.on_message_received:
@@ -275,26 +257,30 @@ class ConnectionManager:
                 break
 
         # 连接断开，清理
-        self._handle_disconnect(friend_ip)
+        self._handle_disconnect(connection_key)
         try:
             sock.close()
         except Exception:
             pass
 
-    def _handle_disconnect(self, friend_ip: str):
+    def _handle_disconnect(self, endpoint: str):
         """
         处理好友连接断开事件。
 
         从连接池移除该 IP，并触发 on_friend_disconnected 回调。
 
         Args:
-            friend_ip: 断开连接的好友 IP。
+            endpoint: 断开的连接 key（通常为 ip:port）。
         """
         friend_name = ""
+        friend_ip = endpoint
         with self._lock:
-            if friend_ip in self.connections:
-                friend_name = self.connections[friend_ip].get("name", "")
-                del self.connections[friend_ip]
+            key = self._find_connection_key(endpoint)
+            if key:
+                info = self.connections[key]
+                friend_name = info.get("name", "")
+                friend_ip = info.get("ip", endpoint)
+                del self.connections[key]
 
         if friend_ip and self.on_friend_disconnected:
             self.on_friend_disconnected(friend_ip)
@@ -329,17 +315,13 @@ class ConnectionManager:
             sock.connect((ip, friend_port))
             sock.settimeout(None)  # 连接成功后恢复阻塞模式
 
-            # 如果该 IP 已有旧连接，先关闭
-            with self._lock:
-                if ip in self.connections:
-                    self._disconnect_friend_unlocked(ip)
+            key = self._register_connection(sock, ip, name or ip, friend_port)
 
-                # 注册新连接到连接池
-                self.connections[ip] = {
-                    "socket": sock,
-                    "name": name or ip,
-                    "connected_at": Helpers.get_timestamp(),
-                }
+            # 主动连接后立即交换身份，避免入站侧只能靠后续业务消息猜名字。
+            profile_msg = Protocol.create_profile_exchange(
+                self.my_name, [], "", self.tcp_port
+            )
+            sock.sendall(profile_msg)
 
             logger.info("已连接到好友: %s (%s:%d)", name, ip, friend_port)
 
@@ -352,7 +334,7 @@ class ConnectionManager:
                 target=self._receive_worker,
                 args=(sock, ip),
                 daemon=True,
-                name=f"Recv-{ip}",
+                name=f"Recv-{key}",
             )
             recv_thread.start()
 
@@ -377,28 +359,31 @@ class ConnectionManager:
             ip: 好友 IP 地址。
         """
         with self._lock:
-            self._disconnect_friend_unlocked(ip)
+            key = self._find_connection_key(ip)
+            if key:
+                self._disconnect_friend_unlocked(key)
 
         if self.on_friend_disconnected:
             self.on_friend_disconnected(ip)
 
         logger.info("已断开好友连接: %s", ip)
 
-    def _disconnect_friend_unlocked(self, ip: str):
+    def _disconnect_friend_unlocked(self, endpoint: str):
         """
         断开好友连接的内部实现（调用时须持有 _lock）。
 
         Args:
-            ip: 好友 IP 地址。
+            endpoint: 连接 key、IP、或好友名。
         """
-        if ip in self.connections:
-            sock = self.connections[ip].get("socket")
+        key = self._find_connection_key(endpoint)
+        if key:
+            sock = self.connections[key].get("socket")
             if sock:
                 try:
                     sock.close()
                 except Exception:
                     pass
-            del self.connections[ip]
+            del self.connections[key]
 
     def send_to_friend(self, ip_or_name: str, data: bytes) -> bool:
         """
@@ -416,31 +401,22 @@ class ConnectionManager:
             True 表示发送成功，False 表示失败。
         """
         with self._lock:
-            ip = ip_or_name
-            if ip not in self.connections:
-                # 尝试通过名字查找在线 IP
-                found_ip = None
-                for conn_ip, info in self.connections.items():
-                    if info.get("name") == ip_or_name:
-                        found_ip = conn_ip
-                        break
-                if found_ip:
-                    ip = found_ip
-                else:
-                    error_msg = f"好友 {ip_or_name} 不在连接池中"
-                    logger.warning(error_msg)
-                    if self.on_error:
-                        self.on_error(error_msg)
-                    return False
-            sock = self.connections[ip]["socket"]
+            key = self._find_connection_key(ip_or_name)
+            if not key:
+                error_msg = f"好友 {ip_or_name} 不在连接池中"
+                logger.warning(error_msg)
+                if self.on_error:
+                    self.on_error(error_msg)
+                return False
+            sock = self.connections[key]["socket"]
 
         try:
             sock.sendall(data)
             return True
         except Exception as e:
-            error_msg = f"发送消息给 {ip} 失败: {e}"
+            error_msg = f"发送消息给 {ip_or_name} 失败: {e}"
             logger.error(error_msg)
-            self._handle_disconnect(ip)
+            self._handle_disconnect(key)
             return False
 
     def broadcast_to_friends(self, data: bytes):
@@ -451,12 +427,12 @@ class ConnectionManager:
             data: 待发送 of 字节串（已打包的完整消息）。
         """
         with self._lock:
-            ip_list = list(self.connections.keys())
+            endpoint_list = list(self.connections.keys())
 
         failed_ips: List[str] = []
-        for ip in ip_list:
-            if not self.send_to_friend(ip, data):
-                failed_ips.append(ip)
+        for endpoint in endpoint_list:
+            if not self.send_to_friend(endpoint, data):
+                failed_ips.append(endpoint)
 
         if failed_ips:
             logger.warning("广播失败的好友: %s", failed_ips)
@@ -475,7 +451,8 @@ class ConnectionManager:
         with self._lock:
             return [
                 {
-                    "ip": ip,
+                    "ip": info.get("ip", ip),
+                    "port": info.get("port", 0),
                     "name": info["name"],
                     "connected_at": info["connected_at"],
                 }
@@ -506,23 +483,27 @@ class ConnectionManager:
             在线 IP，未找到则返回空字符串。
         """
         with self._lock:
-            for ip, info in self.connections.items():
+            for _key, info in self.connections.items():
                 if info.get("name") == name:
-                    return ip
+                    port = int(info.get("port", 0) or 0)
+                    return self._endpoint_key(info.get("ip", ""), port)
         return ""
 
-    def is_connected(self, ip: str) -> bool:
+    def is_connected(self, ip: str, port: int = 0) -> bool:
         """
         检查指定 IP 的好友是否已连接。
 
         Args:
             ip: 好友 IP 地址。
+            port: TCP 端口；为 0 时匹配任意同 IP 连接。
 
         Returns:
             True 表示已连接，False 表示未连接。
         """
         with self._lock:
-            return ip in self.connections
+            if port:
+                return self._endpoint_key(ip, port) in self.connections
+            return any(info.get("ip") == ip for info in self.connections.values())
 
     def get_friend_name(self, ip: str) -> str:
         """
@@ -535,8 +516,9 @@ class ConnectionManager:
             好友名字；若未连接则返回空字符串。
         """
         with self._lock:
-            if ip in self.connections:
-                return self.connections[ip].get("name", "")
+            key = self._find_connection_key(ip)
+            if key:
+                return self.connections[key].get("name", "")
             return ""
 
     def update_friend_name(self, ip: str, name: str):
@@ -548,8 +530,9 @@ class ConnectionManager:
             name: 新名字。
         """
         with self._lock:
-            if ip in self.connections:
-                self.connections[ip]["name"] = name
+            key = self._find_connection_key(ip)
+            if key:
+                self.connections[key]["name"] = name
 
     def get_connection_count(self) -> int:
         """
@@ -560,6 +543,54 @@ class ConnectionManager:
         """
         with self._lock:
             return len(self.connections)
+
+    @staticmethod
+    def _endpoint_key(ip: str, port: int = 0) -> str:
+        try:
+            port = int(port or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return f"{ip}:{port}" if port > 0 else ip
+
+    def _find_connection_key(self, ip_or_name: str) -> Optional[str]:
+        if ip_or_name in self.connections:
+            return ip_or_name
+        for key, info in self.connections.items():
+            if info.get("name") == ip_or_name:
+                return key
+        for key, info in self.connections.items():
+            if info.get("ip") == ip_or_name:
+                return key
+        return None
+
+    def _register_connection(
+        self,
+        sock: socket.socket,
+        ip: str,
+        name: str,
+        port: int = 0,
+    ) -> str:
+        key = self._endpoint_key(ip, port)
+        should_notify = False
+        with self._lock:
+            for existing_key, info in list(self.connections.items()):
+                if info.get("socket") is sock and existing_key != key:
+                    del self.connections[existing_key]
+            if key not in self.connections:
+                should_notify = True
+            self.connections[key] = {
+                "socket": sock,
+                "name": name or ip,
+                "ip": ip,
+                "port": int(port or 0),
+                "connected_at": self.connections.get(key, {}).get(
+                    "connected_at", Helpers.get_timestamp()
+                ),
+            }
+
+        if should_notify and self.on_friend_connected:
+            self.on_friend_connected(name or ip, ip)
+        return key
 
     # ================================================================== #
     #  心跳线程

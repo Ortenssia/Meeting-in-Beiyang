@@ -190,18 +190,27 @@ class MessageService:
         )
         return True
 
-    def send_friend_request(self, target_name: str, target_ip: str) -> bool:
+    def send_friend_request(
+        self,
+        target_name: str,
+        target_ip: str,
+        target_port: int = Protocol.DEFAULT_TCP_PORT,
+    ) -> bool:
         """
         向发现的用户发送好友请求。
 
         Args:
             target_name: 目标用户名称。
             target_ip:   目标用户 IP 地址。
+            target_port: 目标用户 TCP 端口。
 
         Returns:
             True 表示请求已发送。
         """
         my_profile = self.friend_db.get_my_profile()
+        my_profile["tcp_port"] = getattr(
+            self.connection_manager, "tcp_port", Protocol.DEFAULT_TCP_PORT
+        )
         conditions = self.friend_db.get_friend_conditions()
 
         request_msg = {
@@ -218,7 +227,7 @@ class MessageService:
 
         # 如果尚未建立连接，尝试先连接再发送
         try:
-            self.connection_manager.connect_to_friend(target_ip, name=target_name)
+            self.connection_manager.connect_to_friend(target_ip, target_port, target_name)
             return self._send_data_to_friend(target_name, request_msg)
         except Exception as e:
             logger.error(f"[MessageService] 发送好友请求失败: {e}")
@@ -236,6 +245,9 @@ class MessageService:
             True 表示接受消息已发送。
         """
         my_profile = self.friend_db.get_my_profile()
+        my_profile["tcp_port"] = getattr(
+            self.connection_manager, "tcp_port", Protocol.DEFAULT_TCP_PORT
+        )
         friend = self.friend_db.get_friend(friend_name)
         if not friend:
             logger.warning(f"[MessageService] 好友 {friend_name} 不存在")
@@ -251,7 +263,9 @@ class MessageService:
         if self._send_data_to_friend(friend_name, accept_msg):
             return True
         if friend_ip:
-            return self._send_data_to_friend(friend_ip, accept_msg)
+            port = friend.get("port", Protocol.DEFAULT_TCP_PORT)
+            endpoint = f"{friend_ip}:{port}" if port else friend_ip
+            return self._send_data_to_friend(endpoint, accept_msg)
         return False
 
     # ================================================================== #
@@ -425,6 +439,10 @@ class MessageService:
         conditions = data.get("conditions", {})
         sender_name = profile.get("name", "Unknown")
         msg_id = data.get("msg_id", "")
+        sender_port = int(
+            profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
+            or Protocol.DEFAULT_TCP_PORT
+        )
 
         # 去重
         if msg_id and self.friend_db.check_msg_id(msg_id):
@@ -435,7 +453,18 @@ class MessageService:
         # 检查是否已经是好友
         existing = self.friend_db.get_friend(sender_name)
         if existing:
-            logger.info(f"[MessageService] {sender_name} 已是好友，忽略请求")
+            self.friend_db.add_friend(
+                name=sender_name,
+                ip=from_ip,
+                port=sender_port,
+                tags=profile.get("tags", existing.get("tags", [])),
+                category=existing.get("category", "朋友"),
+                bio=profile.get("bio", existing.get("bio", "")),
+            )
+            self.send_friend_accept(sender_name, from_ip)
+            logger.info(
+                f"[MessageService] {sender_name} 已是好友，已补发确认回执"
+            )
             return
 
         # 检查条件匹配
@@ -450,6 +479,7 @@ class MessageService:
             self.friend_db.add_friend(
                 name=sender_name,
                 ip=from_ip,
+                port=sender_port,
                 tags=tags,
                 category="朋友",
                 bio=profile.get("bio", ""),
@@ -505,17 +535,26 @@ class MessageService:
 
         tags = profile.get("tags", [])
         bio = profile.get("bio", "")
+        port = int(profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
 
         # 检查是否已经是好友
         existing = self.friend_db.get_friend(friend_name)
         if existing:
             # 更新 profile 信息
-            self.friend_db.update_friend_ip(friend_name, from_ip)
+            self.friend_db.add_friend(
+                name=friend_name,
+                ip=from_ip,
+                port=port,
+                tags=tags,
+                category=existing.get("category", "朋友"),
+                bio=bio,
+            )
             logger.info(f"[MessageService] 好友 {friend_name} 已存在，更新 IP")
         else:
             self.friend_db.add_friend(
                 name=friend_name,
                 ip=from_ip,
+                port=port,
                 tags=tags,
                 category="朋友",
                 bio=bio,
@@ -542,11 +581,20 @@ class MessageService:
         friend = self.friend_db.get_friend(friend_name)
         if friend:
             old_ip = friend.get("ip", "")
-            if old_ip != from_ip:
-                self.friend_db.update_friend_ip(friend_name, from_ip)
+            old_port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or 0)
+            new_port = int(data.get("port", old_port) or old_port)
+            if old_ip != from_ip or (new_port and old_port != new_port):
+                self.friend_db.add_friend(
+                    name=friend_name,
+                    ip=from_ip,
+                    port=new_port or old_port,
+                    tags=friend.get("tags", []),
+                    category=friend.get("category", "朋友"),
+                    bio=friend.get("bio", ""),
+                )
                 logger.info(
-                    f"[MessageService] 心跳更新 {friend_name} IP: "
-                    f"{old_ip} -> {from_ip}"
+                    f"[MessageService] 心跳更新 {friend_name} 地址: "
+                    f"{old_ip}:{old_port} -> {from_ip}:{new_port or old_port}"
                 )
 
     # ================================================================== #
@@ -675,6 +723,9 @@ class MessageService:
                 continue
             if self._send_data_to_friend(friend_name, relay_msg):
                 count += 1
+
+        return count
+
     def _relay_chat_to_others(
         self,
         chat_msg: Dict[str, Any],

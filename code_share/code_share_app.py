@@ -502,7 +502,7 @@ class CodeShareApp(App):
                 self.friend_db.update_friend_ip(name, ip)
                 print(f"[App] 检测到好友 {name} IP 地址变更: {old_ip} -> {ip}")
             # 如果未连接，在后台发起 TCP 连接
-            if not self.connection_manager.is_connected(ip):
+            if not self.connection_manager.is_connected(ip, port):
                 threading.Thread(
                     target=self.connection_manager.connect_to_friend,
                     args=(ip, port, name),
@@ -622,15 +622,20 @@ class CodeShareApp(App):
             )
 
             def on_accept(_btn):
+                import threading
                 self.friend_db.add_friend(
                     name=sender_name,
                     ip=sender_ip,
-                    port=Protocol.DEFAULT_TCP_PORT,
+                    port=int(profile.get("tcp_port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT),
                     tags=tags,
                     bio=bio,
                     category="朋友"
                 )
-                self.message_service.send_friend_accept(sender_name, sender_ip)
+                threading.Thread(
+                    target=self.message_service.send_friend_accept,
+                    args=(sender_name, sender_ip),
+                    daemon=True,
+                ).start()
                 friends = self.root.get_screen('friends')
                 if friends:
                     friends.refresh()
@@ -698,15 +703,15 @@ class CodeShareApp(App):
         if self.udp_service:
             with self.udp_service._devices_lock:
                 return [
-                    {"name": dev.device_name, "ip": dev.ip}
+                    {"name": dev.device_name, "ip": dev.ip, "tcp_port": dev.tcp_port}
                     for dev in self.udp_service.devices.values()
                     if dev.is_online()
                 ]
         return []
 
-    def send_friend_request(self, name, ip):
+    def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT):
         if self.message_service:
-            return self.message_service.send_friend_request(name, ip)
+            return self.message_service.send_friend_request(name, ip, port)
         return False
 
     def get_all_friends(self):
@@ -726,8 +731,10 @@ class CodeShareApp(App):
         friend = self.friend_db.get_friend(name)
         if friend:
             ip = friend.get("ip")
+            port = friend.get("port")
             if ip and self.connection_manager:
-                self.connection_manager.disconnect_friend(ip)
+                endpoint = f"{ip}:{port}" if port else ip
+                self.connection_manager.disconnect_friend(endpoint)
             self.friend_db.remove_friend(name)
             # 刷新 UI
             friends = self.root.get_screen('friends')
