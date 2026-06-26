@@ -14,6 +14,7 @@ offline message relay through online friends.
 - Automatic or manual friend request approval
 - Friend categories, search, removal, and online status
 - Chat screen with persisted message history
+- Direct P2P file transfer between online friends with chunking and SHA-256 checks
 - Offline message cache and relay forwarding
 - Android packaging with Buildozer
 
@@ -39,7 +40,7 @@ python -m pytest -q
 Current validation result:
 
 ```text
-27 passed
+41 passed
 ```
 
 ## Android Build
@@ -61,4 +62,5 @@ code_share/
 tests/          Unit tests for protocol, database, and social flow
 main.py         Application entry point
 buildozer.spec  Android packaging configuration
+received_files/ Local inbox for files received from friends
 ```

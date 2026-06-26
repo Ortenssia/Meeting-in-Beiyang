@@ -19,7 +19,10 @@
   - friend_db:        好友 / 消息 / 聊天记录 SQLite 存储
 """
 
+import base64
+import hashlib
 import json
+import os
 import time
 import uuid
 import threading
@@ -49,14 +52,18 @@ class MessageService:
     FRIEND_REQUEST = "FRIEND_REQUEST"
     FRIEND_ACCEPT = "FRIEND_ACCEPT"
     HEARTBEAT = "HEARTBEAT"
+    FILE_OFFER = "FILE_OFFER"
+    FILE_CHUNK = "FILE_CHUNK"
+    FILE_COMPLETE = "FILE_COMPLETE"
 
     # 洪泛中继最大跳数，防止无限传播
     MAX_RELAY_HOPS = 3
 
     # 心跳间隔（秒）
     HEARTBEAT_INTERVAL = 15
+    FILE_CHUNK_SIZE = 48 * 1024
 
-    def __init__(self, connection_manager, friend_db):
+    def __init__(self, connection_manager, friend_db, receive_dir: str = "received_files"):
         """
         初始化消息服务。
 
@@ -84,11 +91,14 @@ class MessageService:
         """
         self.connection_manager = connection_manager
         self.friend_db = friend_db
+        self.receive_dir = receive_dir
 
         # 回调函数（由上层 App 或 Screen 绑定）
         self.on_message_received: Optional[Callable[[str, str, str], None]] = None
         self.on_friend_request: Optional[Callable[..., None]] = None
         self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
+        self.on_file_received: Optional[Callable[[str, str, str], None]] = None
+        self.on_file_progress: Optional[Callable[[str, str, int, int], None]] = None
 
         # 心跳定时器
         self._heartbeat_timer: Optional[threading.Timer] = None
@@ -98,6 +108,10 @@ class MessageService:
         self._processed_relay_ids: set = set()
         self._relay_id_lock = threading.Lock()
         self._MAX_RELAY_CACHE = 5000
+
+        self._incoming_files: Dict[str, Dict[str, Any]] = {}
+        self._file_lock = threading.Lock()
+        os.makedirs(self.receive_dir, exist_ok=True)
 
     # ================================================================== #
     #  生命周期管理
@@ -313,6 +327,83 @@ class MessageService:
             return self._send_data_to_friend(endpoint, accept_msg)
         return False
 
+    def send_file(self, to_name: str, file_path: str) -> bool:
+        """
+        向在线好友发送文件。
+
+        文件传输只走直连 TCP，不进入离线中继队列；这样可以避免大文件在 P2P
+        洪泛网络里被重复缓存和转发。
+        """
+        if not file_path or not os.path.isfile(file_path):
+            logger.warning("[MessageService] 文件不存在: %s", file_path)
+            return False
+        if not self.connection_manager.is_friend_online(to_name):
+            logger.warning("[MessageService] 好友不在线，无法发送文件: %s", to_name)
+            return False
+
+        my_profile = self.friend_db.get_my_profile()
+        my_name = my_profile.get("name", "Unknown")
+        filename = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        file_id = str(uuid.uuid4())
+        sha256 = self._sha256_file(file_path)
+        chunk_count = (file_size + self.FILE_CHUNK_SIZE - 1) // self.FILE_CHUNK_SIZE
+
+        offer = {
+            "type": self.FILE_OFFER,
+            "file_id": file_id,
+            "from_name": my_name,
+            "to_name": to_name,
+            "filename": filename,
+            "size": file_size,
+            "chunk_size": self.FILE_CHUNK_SIZE,
+            "chunk_count": chunk_count,
+            "sha256": sha256,
+            "timestamp": timestamp,
+        }
+        if not self._send_data_to_friend(to_name, offer):
+            return False
+
+        with open(file_path, "rb") as src:
+            for index, chunk in enumerate(iter(lambda: src.read(self.FILE_CHUNK_SIZE), b"")):
+                chunk_msg = {
+                    "type": self.FILE_CHUNK,
+                    "file_id": file_id,
+                    "chunk_index": index,
+                    "data_b64": base64.b64encode(chunk).decode("ascii"),
+                }
+                if not self._send_data_to_friend(to_name, chunk_msg):
+                    logger.warning("[MessageService] 文件分块发送失败: %s #%s", filename, index)
+                    return False
+                if self.on_file_progress:
+                    try:
+                        self.on_file_progress(to_name, filename, index + 1, chunk_count)
+                    except Exception:
+                        logger.debug("[MessageService] on_file_progress 回调异常", exc_info=True)
+
+        complete = {
+            "type": self.FILE_COMPLETE,
+            "file_id": file_id,
+            "from_name": my_name,
+            "to_name": to_name,
+            "filename": filename,
+            "size": file_size,
+            "sha256": sha256,
+            "timestamp": timestamp,
+        }
+        if not self._send_data_to_friend(to_name, complete):
+            return False
+
+        self.friend_db.save_chat_message(
+            from_name=my_name,
+            to_name=to_name,
+            content=f"[文件] {filename}",
+            timestamp=timestamp,
+            msg_id=file_id,
+        )
+        return True
+
     # ================================================================== #
     #  接收消息处理
     # ================================================================== #
@@ -344,6 +435,12 @@ class MessageService:
             self._handle_friend_accept(from_ip, data)
         elif msg_type == self.HEARTBEAT:
             self._handle_heartbeat(from_ip, data)
+        elif msg_type == self.FILE_OFFER:
+            self._handle_file_offer(from_ip, data)
+        elif msg_type == self.FILE_CHUNK:
+            self._handle_file_chunk(from_ip, data)
+        elif msg_type == self.FILE_COMPLETE:
+            self._handle_file_complete(from_ip, data)
         else:
             logger.warning(f"[MessageService] 未知消息类型: {msg_type}")
 
@@ -679,6 +776,139 @@ class MessageService:
                     f"{old_ip}:{old_port} -> {from_ip}:{new_port or old_port}"
                 )
 
+    # ------------------------------------------------------------------ #
+    #  FILE_* 处理
+    # ------------------------------------------------------------------ #
+
+    def _handle_file_offer(self, from_ip: str, data: Dict[str, Any]):
+        """接收文件元信息并创建临时接收状态。"""
+        my_name = self.friend_db.get_my_profile().get("name", "")
+        to_name = data.get("to_name", "")
+        if to_name and to_name != my_name:
+            return
+
+        file_id = data.get("file_id", "")
+        from_name = data.get("from_name", "")
+        if not file_id or not from_name:
+            return
+
+        filename = self._safe_filename(data.get("filename", "received.bin"))
+        final_path = self._unique_receive_path(filename)
+        part_path = final_path + ".part"
+
+        with self._file_lock:
+            self._incoming_files[file_id] = {
+                "from_name": from_name,
+                "from_ip": from_ip,
+                "filename": filename,
+                "final_path": final_path,
+                "part_path": part_path,
+                "size": int(data.get("size", 0) or 0),
+                "chunk_size": int(data.get("chunk_size", self.FILE_CHUNK_SIZE) or self.FILE_CHUNK_SIZE),
+                "chunk_count": int(data.get("chunk_count", 0) or 0),
+                "sha256": data.get("sha256", ""),
+                "timestamp": data.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S")),
+                "received": set(),
+            }
+
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        with open(part_path, "wb"):
+            pass
+        logger.info("[MessageService] 准备接收文件 %s from %s", filename, from_name)
+
+    def _handle_file_chunk(self, from_ip: str, data: Dict[str, Any]):
+        """写入一个文件分块。"""
+        file_id = data.get("file_id", "")
+        if not file_id:
+            return
+
+        with self._file_lock:
+            state = self._incoming_files.get(file_id)
+        if not state:
+            logger.warning("[MessageService] 收到未知文件分块: %s", file_id)
+            return
+
+        try:
+            index = int(data.get("chunk_index", -1))
+            raw = base64.b64decode(data.get("data_b64", "").encode("ascii"))
+        except Exception:
+            logger.warning("[MessageService] 文件分块解析失败: %s", file_id)
+            return
+
+        if index < 0:
+            return
+
+        with self._file_lock:
+            offset = index * int(state["chunk_size"])
+            with open(state["part_path"], "r+b") as dst:
+                dst.seek(offset)
+                dst.write(raw)
+            state["received"].add(index)
+            received_count = len(state["received"])
+            chunk_count = int(state.get("chunk_count", 0) or 0)
+
+        if self.on_file_progress:
+            try:
+                self.on_file_progress(
+                    state.get("from_name", ""),
+                    state.get("filename", ""),
+                    received_count,
+                    chunk_count,
+                )
+            except Exception:
+                logger.debug("[MessageService] on_file_progress 回调异常", exc_info=True)
+
+    def _handle_file_complete(self, from_ip: str, data: Dict[str, Any]):
+        """完成文件接收、校验并写入聊天记录。"""
+        my_name = self.friend_db.get_my_profile().get("name", "")
+        file_id = data.get("file_id", "")
+        if not file_id:
+            return
+
+        with self._file_lock:
+            state = self._incoming_files.pop(file_id, None)
+        if not state:
+            logger.warning("[MessageService] 收到未知文件完成通知: %s", file_id)
+            return
+
+        part_path = state["part_path"]
+        final_path = state["final_path"]
+        expected_count = int(state.get("chunk_count", 0) or 0)
+        if expected_count and len(state["received"]) < expected_count:
+            logger.warning("[MessageService] 文件未收齐: %s", state["filename"])
+            return
+
+        expected_hash = data.get("sha256") or state.get("sha256", "")
+        if expected_hash and self._sha256_file(part_path) != expected_hash:
+            logger.warning("[MessageService] 文件校验失败: %s", state["filename"])
+            return
+
+        os.replace(part_path, final_path)
+        from_name = data.get("from_name") or state.get("from_name", "")
+        timestamp = data.get("timestamp") or state.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))
+        filename = state.get("filename", os.path.basename(final_path))
+        content = f"[文件] {filename}"
+
+        self.friend_db.save_chat_message(
+            from_name=from_name,
+            to_name=my_name,
+            content=content,
+            timestamp=timestamp,
+            msg_id=file_id,
+        )
+        logger.info("[MessageService] 文件接收完成: %s", final_path)
+
+        if self.on_message_received:
+            try:
+                self.on_message_received(from_name, content, timestamp)
+            except Exception as e:
+                logger.error(f"[MessageService] on_message_received 回调异常: {e}")
+        if self.on_file_received:
+            try:
+                self.on_file_received(from_name, final_path, timestamp)
+            except Exception:
+                logger.debug("[MessageService] on_file_received 回调异常", exc_info=True)
+
     # ================================================================== #
     #  离线消息刷新
     # ================================================================== #
@@ -757,6 +987,31 @@ class MessageService:
     # ================================================================== #
     #  内部工具方法
     # ================================================================== #
+
+    def _sha256_file(self, path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _sha256_bytes(self, data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def _safe_filename(self, filename: str) -> str:
+        name = os.path.basename(filename or "received.bin").strip()
+        if not name:
+            name = "received.bin"
+        return "".join(ch if ch not in '<>:"/\\|?*' else "_" for ch in name)
+
+    def _unique_receive_path(self, filename: str) -> str:
+        base, ext = os.path.splitext(filename)
+        candidate = os.path.join(self.receive_dir, filename)
+        index = 1
+        while os.path.exists(candidate) or os.path.exists(candidate + ".part"):
+            candidate = os.path.join(self.receive_dir, f"{base}_{index}{ext}")
+            index += 1
+        return candidate
 
     def _send_data_to_friend(self, friend_name: str, data: Dict[str, Any]) -> bool:
         """

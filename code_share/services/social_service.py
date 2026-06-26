@@ -103,9 +103,11 @@ class SocialService:
         rows = cursor.fetchall()
 
         friend_cards = {friend["name"]: friend for friend in self.get_friend_cards()}
+        seen = set()
         chat_list = []
         for row in rows:
             name = row["friend_name"]
+            seen.add(name)
             friend = friend_cards.get(name, {})
             chat_list.append({
                 "user_id": friend.get("user_id", ""),
@@ -113,6 +115,17 @@ class SocialService:
                 "online": friend.get("online", False),
                 "last_message": row["content"],
                 "time": row["timestamp"][-8:] if len(row["timestamp"]) >= 8 else row["timestamp"],
+                "unread": self.get_pending_message_count(name),
+            })
+        for name, friend in friend_cards.items():
+            if name in seen:
+                continue
+            chat_list.append({
+                "user_id": friend.get("user_id", ""),
+                "name": name,
+                "online": friend.get("online", False),
+                "last_message": "可以开始聊天",
+                "time": "",
                 "unread": self.get_pending_message_count(name),
             })
         return chat_list

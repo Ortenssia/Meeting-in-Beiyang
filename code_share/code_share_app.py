@@ -458,7 +458,8 @@ class CodeShareApp(App):
         # 4. 初始化消息中继服务
         self.message_service = MessageService(
             connection_manager=self.connection_manager,
-            friend_db=self.friend_db
+            friend_db=self.friend_db,
+            receive_dir="received_files",
         )
         self.social_service = SocialService(
             friend_db=self.friend_db,
@@ -840,6 +841,11 @@ class CodeShareApp(App):
 
         if self.message_service:
             return self.message_service.send_message(friend_name, text)
+        return False
+
+    def send_file_to_friend(self, friend_name, file_path):
+        if self.message_service:
+            return self.message_service.send_file(friend_name, file_path)
         return False
 
     def get_chat_history(self, friend_name):

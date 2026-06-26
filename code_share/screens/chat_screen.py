@@ -20,12 +20,17 @@ from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
+from kivy.uix.filechooser import FileChooserListView
+from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.screenmanager import Screen
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.graphics import Color, RoundedRectangle, Rectangle, Line, Ellipse
 from kivy.factory import Factory
+import os
+import threading
+import time
 
 
 def get_root_app():
@@ -501,9 +506,25 @@ class ChatWindowView(BoxLayout):
         self.msg_input = Factory.ModernTextInput(
             hint_text="输入消息...",
             multiline=False,
-            size_hint_x=0.85,
+            size_hint_x=1,
         )
         self.msg_input.bind(on_text_validate=self._on_send)
+
+        self.file_btn = Button(
+            text="+",
+            font_size="20sp",
+            bold=True,
+            size_hint_x=None,
+            width=dp(38),
+            size_hint_y=None,
+            height=dp(38),
+            background_normal='',
+            background_down='',
+            background_color=(0.18, 0.18, 0.2, 1),
+            color=(1, 1, 1, 1),
+            pos_hint={'center_y': 0.5}
+        )
+        self.file_btn.bind(on_press=self._show_file_picker)
 
         # 悬浮圆形“发送”胶囊按键
         self.send_btn = Button(
@@ -534,6 +555,7 @@ class ChatWindowView(BoxLayout):
         self.send_btn.bind(pos=update_send_btn, size=update_send_btn)
         self.send_btn.bind(on_press=self._on_send)
 
+        input_bar.add_widget(self.file_btn)
         input_bar.add_widget(self.msg_input)
         input_bar.add_widget(self.send_btn)
         self.add_widget(input_bar)
@@ -624,7 +646,6 @@ class ChatWindowView(BoxLayout):
 
         app = get_root_app()
         if hasattr(app, "send_chat_message"):
-            import threading
             threading.Thread(
                 target=app.send_chat_message,
                 args=(self._current_friend, text),
@@ -632,7 +653,6 @@ class ChatWindowView(BoxLayout):
             ).start()
 
         # 立即在本地显示（不等回执）
-        import time
         ts = time.strftime("%H:%M:%S", time.localtime())
         my_name = ""
         if hasattr(app, "device_name"):
@@ -643,6 +663,64 @@ class ChatWindowView(BoxLayout):
 
         self.append_message(my_name, text, ts, is_self=True)
         self.msg_input.text = ""
+
+    def _show_file_picker(self, *_args):
+        """打开文件选择器并发送选中的文件。"""
+        if not self._current_friend:
+            return
+
+        root = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(10))
+        chooser = FileChooserListView(path=os.path.expanduser("~"), multiselect=False)
+        root.add_widget(chooser)
+
+        actions = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(42),
+            spacing=dp(8),
+        )
+        cancel_btn = Button(text="取消", font_size="14sp")
+        send_btn = Button(text="发送文件", font_size="14sp")
+        actions.add_widget(cancel_btn)
+        actions.add_widget(send_btn)
+        root.add_widget(actions)
+
+        popup = Popup(
+            title="选择要发送的文件",
+            content=root,
+            size_hint=(0.9, 0.82),
+            auto_dismiss=False,
+        )
+
+        def send_selected(_btn):
+            if not chooser.selection:
+                return
+            file_path = chooser.selection[0]
+            popup.dismiss()
+            self._send_file(file_path)
+
+        cancel_btn.bind(on_press=lambda _btn: popup.dismiss())
+        send_btn.bind(on_press=send_selected)
+        popup.open()
+
+    def _send_file(self, file_path):
+        app = get_root_app()
+        filename = os.path.basename(file_path)
+        my_name = getattr(app, "device_name", "")
+        ts = time.strftime("%H:%M:%S", time.localtime())
+        self.append_message(my_name, f"[正在发送文件] {filename}", ts, is_self=True)
+
+        def worker():
+            success = False
+            if hasattr(app, "send_file_to_friend"):
+                success = app.send_file_to_friend(self._current_friend, file_path)
+            done_ts = time.strftime("%H:%M:%S", time.localtime())
+            if success:
+                self.append_message(my_name, f"[文件] {filename}", done_ts, is_self=True)
+            else:
+                self.append_message(my_name, f"[文件发送失败] {filename}", done_ts, is_self=True)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_back(self, _btn):
         """返回聊天列表。"""

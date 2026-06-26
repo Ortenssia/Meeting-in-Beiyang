@@ -1,7 +1,7 @@
 """
 社交消息协议模块 (Challenge 3 - 相识北洋)
 
-定义基于 TCP 的 P2P 社交消息协议，包含 9 种消息类型：
+定义基于 TCP 的 P2P 社交消息协议，包含社交、聊天和文件传输消息：
   - PROFILE_EXCHANGE:   交换自我介绍（姓名、标签、简介）
   - FRIEND_REQUEST:     发送好友请求（附带个人资料）
   - FRIEND_ACCEPT:      接受好友请求
@@ -11,6 +11,9 @@
   - HEARTBEAT:          周期性 IP 宣告（用于 IP 变更检测）
   - ONLINE_STATUS:      上线/下线状态通知
   - FRIEND_CONDITIONS:  分享好友匹配条件
+  - FILE_OFFER:         文件传输元信息
+  - FILE_CHUNK:         文件分块数据
+  - FILE_COMPLETE:      文件传输完成通知
 
 同时定义 UDP PING/PONG 协议用于局域网设备发现。
 
@@ -44,6 +47,9 @@ class Protocol:
     HEARTBEAT = "HEARTBEAT"                 # 心跳 / IP 宣告
     ONLINE_STATUS = "ONLINE_STATUS"         # 上线/下线状态
     FRIEND_CONDITIONS = "FRIEND_CONDITIONS" # 好友匹配条件
+    FILE_OFFER = "FILE_OFFER"               # 文件传输元信息
+    FILE_CHUNK = "FILE_CHUNK"               # 文件分块数据
+    FILE_COMPLETE = "FILE_COMPLETE"         # 文件传输完成
 
     # ------------------------------------------------------------------ #
     #  默认端口（与 challenge1/2 区分）
@@ -471,4 +477,68 @@ class Protocol:
             optional_tags=optional_tags,
             min_match_count=min_match_count,
             auto_accept=auto_accept,
+        )
+
+    # -- 便捷方法：文件传输 -------------------------------------------- #
+
+    @staticmethod
+    def create_file_offer(
+        file_id: str,
+        from_name: str,
+        to_name: str,
+        filename: str,
+        size: int,
+        chunk_size: int,
+        chunk_count: int,
+        sha256: str = "",
+        timestamp: str = "",
+    ) -> bytes:
+        """创建 FILE_OFFER 消息（文件元信息）。"""
+        return Protocol.create_message(
+            Protocol.FILE_OFFER,
+            file_id=file_id,
+            from_name=from_name,
+            to_name=to_name,
+            filename=filename,
+            size=size,
+            chunk_size=chunk_size,
+            chunk_count=chunk_count,
+            sha256=sha256,
+            timestamp=timestamp,
+        )
+
+    @staticmethod
+    def create_file_chunk(
+        file_id: str,
+        chunk_index: int,
+        data_b64: str,
+    ) -> bytes:
+        """创建 FILE_CHUNK 消息（base64 分块）。"""
+        return Protocol.create_message(
+            Protocol.FILE_CHUNK,
+            file_id=file_id,
+            chunk_index=chunk_index,
+            data_b64=data_b64,
+        )
+
+    @staticmethod
+    def create_file_complete(
+        file_id: str,
+        from_name: str,
+        to_name: str,
+        filename: str,
+        size: int,
+        sha256: str = "",
+        timestamp: str = "",
+    ) -> bytes:
+        """创建 FILE_COMPLETE 消息（传输完成）。"""
+        return Protocol.create_message(
+            Protocol.FILE_COMPLETE,
+            file_id=file_id,
+            from_name=from_name,
+            to_name=to_name,
+            filename=filename,
+            size=size,
+            sha256=sha256,
+            timestamp=timestamp,
         )

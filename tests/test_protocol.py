@@ -142,3 +142,40 @@ class TestProtocol:
         assert data["type"] == Protocol.ONLINE_STATUS
         assert data["name"] == "UserA"
         assert data["online"] is True
+
+    def test_create_file_transfer_messages(self):
+        offer = Protocol.create_file_offer(
+            "file-id",
+            "UserA",
+            "UserB",
+            "report.pdf",
+            1024,
+            256,
+            4,
+            "hash",
+            "2026-06-26 12:00:00",
+        )
+        offer_data = Protocol.parse_message(offer[4:])
+        assert offer_data["type"] == Protocol.FILE_OFFER
+        assert offer_data["file_id"] == "file-id"
+        assert offer_data["filename"] == "report.pdf"
+        assert offer_data["chunk_count"] == 4
+
+        chunk = Protocol.create_file_chunk("file-id", 2, "YWJj")
+        chunk_data = Protocol.parse_message(chunk[4:])
+        assert chunk_data["type"] == Protocol.FILE_CHUNK
+        assert chunk_data["chunk_index"] == 2
+        assert chunk_data["data_b64"] == "YWJj"
+
+        complete = Protocol.create_file_complete(
+            "file-id",
+            "UserA",
+            "UserB",
+            "report.pdf",
+            1024,
+            "hash",
+            "2026-06-26 12:00:00",
+        )
+        complete_data = Protocol.parse_message(complete[4:])
+        assert complete_data["type"] == Protocol.FILE_COMPLETE
+        assert complete_data["sha256"] == "hash"

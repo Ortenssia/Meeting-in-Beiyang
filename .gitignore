@@ -9,6 +9,7 @@ test_*.db
 
 *.log
 *.tmp
+received_files/
 
 bin/
 *.apk

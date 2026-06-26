@@ -6,6 +6,7 @@ import sys
 import os
 import json
 import struct
+import base64
 
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -49,13 +50,11 @@ class MockConnectionManager:
 
 
 @pytest.fixture
-def social_env():
+def social_env(tmp_path):
     # Setup database
-    db_path = "test_social_flow.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    db_path = tmp_path / "test_social_flow.db"
     
-    db = FriendDB(db_path)
+    db = FriendDB(str(db_path))
     # Configure user profile
     db.save_profile({
         "name": "Me",
@@ -70,16 +69,15 @@ def social_env():
     })
 
     conn_mgr = MockConnectionManager()
-    msg_service = MessageService(connection_manager=conn_mgr, friend_db=db)
+    msg_service = MessageService(
+        connection_manager=conn_mgr,
+        friend_db=db,
+        receive_dir=str(tmp_path / "received_files"),
+    )
     
     yield db, conn_mgr, msg_service
     
     db.close()
-    if os.path.exists(db_path):
-        try:
-            os.remove(db_path)
-        except PermissionError:
-            pass
 
 
 class TestSocialFlow:
@@ -316,3 +314,66 @@ class TestSocialFlow:
         assert target == "Bob"
         assert data["type"] == MessageService.CHAT_MESSAGE
         assert data["content"] == "Hello Bob offline!"
+
+    def test_send_file_online_friend(self, social_env, tmp_path):
+        db, conn_mgr, msg_service = social_env
+        sample = tmp_path / "sample.txt"
+        sample.write_text("hello file transfer", encoding="utf-8")
+        db.add_friend("Alice", "192.168.1.5", 7779, ["kivy"], "Alice Bio")
+        conn_mgr.online_friends["Alice"] = "192.168.1.5"
+
+        success = msg_service.send_file("Alice", str(sample))
+
+        assert success is True
+        types = [msg["type"] for _target, msg in conn_mgr.sent_messages]
+        assert types[0] == MessageService.FILE_OFFER
+        assert MessageService.FILE_CHUNK in types
+        assert types[-1] == MessageService.FILE_COMPLETE
+        assert db.get_chat_history("Alice")[0]["content"] == "[文件] sample.txt"
+
+    def test_receive_file_writes_to_receive_dir(self, social_env):
+        db, _conn_mgr, msg_service = social_env
+        callbacks = []
+        msg_service.on_file_received = lambda name, path, ts: callbacks.append((name, path, ts))
+
+        payload = b"beiyang file payload"
+        file_id = "file-1"
+        offer = {
+            "type": MessageService.FILE_OFFER,
+            "file_id": file_id,
+            "from_name": "Alice",
+            "to_name": "Me",
+            "filename": "note.txt",
+            "size": len(payload),
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "sha256": msg_service._sha256_bytes(payload),
+            "timestamp": "2026-06-26 12:00:00",
+        }
+        chunk = {
+            "type": MessageService.FILE_CHUNK,
+            "file_id": file_id,
+            "chunk_index": 0,
+            "data_b64": base64.b64encode(payload).decode("ascii"),
+        }
+        complete = {
+            "type": MessageService.FILE_COMPLETE,
+            "file_id": file_id,
+            "from_name": "Alice",
+            "to_name": "Me",
+            "filename": "note.txt",
+            "size": len(payload),
+            "sha256": msg_service._sha256_bytes(payload),
+            "timestamp": "2026-06-26 12:00:00",
+        }
+
+        msg_service.handle_message("192.168.1.5", offer)
+        msg_service.handle_message("192.168.1.5", chunk)
+        msg_service.handle_message("192.168.1.5", complete)
+
+        assert len(callbacks) == 1
+        _, saved_path, _ = callbacks[0]
+        with open(saved_path, "rb") as f:
+            assert f.read() == payload
+        history = db.get_chat_history("Alice")
+        assert history[0]["content"] == "[文件] note.txt"
