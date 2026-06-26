@@ -31,6 +31,17 @@ Optional runtime arguments:
 python main.py --port 7779 --udp-port 8890 --db friends.db --name Alice
 ```
 
+Same-machine two-user test:
+
+```powershell
+python main.py --name Alice --port 7779 --udp-port 8890 --db alice.db
+python main.py --name Bob --port 7780 --udp-port 8891 --db bob.db
+```
+
+The two instances must use different database files so they get different
+user/device identities. UDP discovery probes loopback, local interface IPs,
+broadcast addresses, and common discovery ports for this workflow.
+
 ## Run Tests
 
 ```powershell
@@ -40,7 +51,7 @@ python -m pytest -q
 Current validation result:
 
 ```text
-41 passed
+42 passed
 ```
 
 ## Android Build

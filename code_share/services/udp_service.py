@@ -118,7 +118,9 @@ class UDPService:
 
     def _get_broadcast_targets(self) -> List[str]:
         """获取所有潜在的广播目标 IP 地址，包含应对校园网的子网单播扫描。"""
-        targets = ["255.255.255.255"]
+        # 127.0.0.1 and local interface IPs are required for same-machine
+        # multi-instance tests where each app listens on a different UDP port.
+        targets = ["127.0.0.1", "255.255.255.255"]
         try:
             ifaces = Helpers._detect_interfaces()
             for iface in ifaces:
@@ -131,6 +133,8 @@ class UDPService:
                 # 但它们通常不会拦截普通的单播 (Unicast) UDP 数据。
                 ip = iface.get("ip")
                 mask = iface.get("mask")
+                if ip:
+                    targets.append(ip)
                 
                 # 如果是常见的 255.255.255.0 子网，且不是本机回环
                 if ip and mask == "255.255.255.0" and not ip.startswith("127."):
@@ -140,8 +144,7 @@ class UDPService:
                         # 将整个网段的 1~254 都加入目标列表
                         for i in range(1, 255):
                             scan_ip = f"{prefix}.{i}"
-                            if scan_ip != ip:  # 排除自己
-                                targets.append(scan_ip)
+                            targets.append(scan_ip)
         except Exception as e:
             print(f"[UDPService] Error getting targets: {e}")
         return list(set(targets))
@@ -440,9 +443,22 @@ class UDPService:
             # 2. 子网单播扫描 (突破路由器对广播的禁用)
             try:
                 ifaces = Helpers._detect_interfaces()
+                loopback_targets = ["127.0.0.1"]
+                for host in loopback_targets:
+                    for p_port in probe_ports:
+                        try:
+                            self.sock.sendto(ping_data, (host, p_port))
+                        except Exception:
+                            pass
                 for iface in ifaces:
                     ip = iface.get("ip")
                     mask = iface.get("mask")
+                    if ip:
+                        for p_port in probe_ports:
+                            try:
+                                self.sock.sendto(ping_data, (ip, p_port))
+                            except Exception:
+                                pass
                     if ip and mask and not ip.startswith("127."):
                         hosts = Helpers.get_subnet_hosts(ip, mask)
                         for host in hosts:
