@@ -449,15 +449,22 @@ class ConnectionManager:
             列表，每项为字典 {"ip": str, "name": str, "connected_at": str}。
         """
         with self._lock:
-            return [
-                {
-                    "ip": info.get("ip", ip),
-                    "port": info.get("port", 0),
-                    "name": info["name"],
+            deduped = {}
+            for key, info in self.connections.items():
+                name = info.get("name", "")
+                ip = info.get("ip", key)
+                port = int(info.get("port", 0) or 0)
+                dedupe_key = name or self._endpoint_key(ip, port)
+                current = deduped.get(dedupe_key)
+                if current and int(current.get("port", 0) or 0) and not port:
+                    continue
+                deduped[dedupe_key] = {
+                    "ip": ip,
+                    "port": port,
+                    "name": name,
                     "connected_at": info["connected_at"],
                 }
-                for ip, info in self.connections.items()
-            ]
+            return list(deduped.values())
 
     def is_friend_online(self, name: str) -> bool:
         """
@@ -575,6 +582,20 @@ class ConnectionManager:
         with self._lock:
             for existing_key, info in list(self.connections.items()):
                 if info.get("socket") is sock and existing_key != key:
+                    del self.connections[existing_key]
+                elif (
+                    port
+                    and existing_key != key
+                    and info.get("ip") == ip
+                    and info.get("name") == (name or ip)
+                    and not int(info.get("port", 0) or 0)
+                ):
+                    try:
+                        old_sock = info.get("socket")
+                        if old_sock and old_sock is not sock:
+                            old_sock.close()
+                    except Exception:
+                        pass
                     del self.connections[existing_key]
             if key not in self.connections:
                 should_notify = True

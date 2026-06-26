@@ -687,9 +687,13 @@ class FriendsScreen(Screen):
                 "name": f.get("name", "未知"),
                 "online": f.get("online", False),
                 "last_seen": f.get("last_seen", ""),
+                "category": f.get("category", "朋友"),
+                "ip": f.get("ip", ""),
+                "port": f.get("port", 0),
             }
             for f in filtered
         ]
+        self.friend_list.refresh_from_data()
 
         self.count_label.text = f"共 {len(filtered)} 位好友"
 

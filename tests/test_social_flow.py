@@ -162,6 +162,16 @@ class TestSocialFlow:
         assert data["type"] == MessageService.FRIEND_REQUEST
         assert data["profile"]["tcp_port"] == 7788
 
+    def test_send_friend_request_skips_existing_friend(self, social_env):
+        db, conn_mgr, msg_service = social_env
+        db.add_friend("Alice", "172.30.0.1", 7780, ["kivy"], "Alice Bio")
+
+        success = msg_service.send_friend_request("Alice", "172.30.0.1", 7780)
+
+        assert success is False
+        assert conn_mgr.connect_calls == []
+        assert conn_mgr.sent_messages == []
+
     def test_receive_friend_request_auto_accept(self, social_env):
         db, conn_mgr, msg_service = social_env
 

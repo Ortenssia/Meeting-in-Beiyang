@@ -392,6 +392,7 @@ class CodeShareApp(App):
         self.tcp_port = tcp_port
         self.udp_port = udp_port
         self.db_path = db_path
+        self.name_override = (name_override or "").strip()
         self.device_name = name_override or Helpers.get_hostname()
 
         self.friend_db = None
@@ -421,9 +422,13 @@ class CodeShareApp(App):
 
         # 从数据库加载上次保存的昵称和个性化设置
         my_profile = self.friend_db.get_my_profile()
+        if self.name_override:
+            my_profile["name"] = self.name_override
+            self.friend_db.save_profile(my_profile)
+            self.device_name = self.name_override
         if my_profile:
             # 如果命令行没有强行指定名字，才用数据库里的
-            if self.device_name == Helpers.get_hostname() or not self.device_name:
+            if not self.name_override and (self.device_name == Helpers.get_hostname() or not self.device_name):
                 if my_profile.get("name"):
                     self.device_name = my_profile["name"]
             self.custom_background = my_profile.get("background", "")
@@ -701,17 +706,42 @@ class CodeShareApp(App):
 
     def get_discovered_people(self):
         if self.udp_service:
+            friend_names = set()
+            friend_endpoints = set()
+            if self.friend_db:
+                for friend in self.friend_db.get_friends():
+                    friend_names.add(friend.get("name", ""))
+                    friend_endpoints.add(
+                        f"{friend.get('ip', '')}:{int(friend.get('port', 0) or 0)}"
+                    )
+            my_name = self.device_name
             with self.udp_service._devices_lock:
                 return [
                     {"name": dev.device_name, "ip": dev.ip, "tcp_port": dev.tcp_port}
                     for dev in self.udp_service.devices.values()
                     if dev.is_online()
+                    and dev.device_name != my_name
+                    and dev.device_name not in friend_names
+                    and f"{dev.ip}:{int(dev.tcp_port or 0)}" not in friend_endpoints
                 ]
         return []
 
     def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT):
+        if self.is_existing_friend(name, ip, port):
+            return False
         if self.message_service:
             return self.message_service.send_friend_request(name, ip, port)
+        return False
+
+    def is_existing_friend(self, name="", ip="", port=0):
+        if not self.friend_db:
+            return False
+        if name and self.friend_db.get_friend(name):
+            return True
+        endpoint = f"{ip}:{int(port or 0)}"
+        for friend in self.friend_db.get_friends():
+            if f"{friend.get('ip', '')}:{int(friend.get('port', 0) or 0)}" == endpoint:
+                return True
         return False
 
     def get_all_friends(self):
@@ -724,7 +754,11 @@ class CodeShareApp(App):
 
     def get_online_friends(self):
         if self.connection_manager:
-            return self.connection_manager.get_online_friends()
+            online = self.connection_manager.get_online_friends()
+            if not self.friend_db:
+                return online
+            friend_names = {friend.get("name", "") for friend in self.friend_db.get_friends()}
+            return [friend for friend in online if friend.get("name", "") in friend_names]
         return []
 
     def delete_friend(self, name):

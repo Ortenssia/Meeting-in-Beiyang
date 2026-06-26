@@ -211,6 +211,13 @@ class MessageService:
         my_profile["tcp_port"] = getattr(
             self.connection_manager, "tcp_port", Protocol.DEFAULT_TCP_PORT
         )
+        my_name = my_profile.get("name", "")
+        if target_name == my_name and target_port == my_profile["tcp_port"]:
+            logger.info("[MessageService] 跳过向自己发送好友请求: %s", target_name)
+            return False
+        if self.friend_db.get_friend(target_name):
+            logger.info("[MessageService] %s 已是好友，跳过重复好友请求", target_name)
+            return False
         conditions = self.friend_db.get_friend_conditions()
 
         request_msg = {

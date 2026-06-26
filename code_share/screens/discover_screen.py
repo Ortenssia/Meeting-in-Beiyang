@@ -197,8 +197,9 @@ class DiscoveredPersonItem(BoxLayout):
         self._data = data
         name = data.get("name", "未知用户")
         port = int(data.get("tcp_port", 7779) or 7779)
+        ip = data.get("ip", "0.0.0.0")
         self.name_label.text = name
-        self.ip_label.text = f"{data.get('ip', '0.0.0.0')}:{port}"
+        self.ip_label.text = f"{ip}:{port}"
         
         self.avatar.text = name
         self.avatar.name_key = name
@@ -210,6 +211,10 @@ class DiscoveredPersonItem(BoxLayout):
         # 还原状态
         self.request_btn.text = "添加好友"
         self.request_btn.disabled = False
+        app = get_root_app()
+        if hasattr(app, "is_existing_friend") and app.is_existing_friend(name, ip, port):
+            self.request_btn.text = "已是好友"
+            self.request_btn.disabled = True
 
     def _on_send_request(self, _btn):
         """发送好友请求按钮点击事件。"""
@@ -271,6 +276,7 @@ class OnlineFriendItem(BoxLayout):
         self.width = dp(66)
         self.spacing = dp(4)
         self.padding = [dp(2), dp(2)]
+        self._data = {}
 
         # 1. 头像置顶并居中
         avatar_box = BoxLayout(size_hint_y=None, height=dp(42))
@@ -298,11 +304,23 @@ class OnlineFriendItem(BoxLayout):
 
     def populate(self, data):
         """填充数据。"""
+        self._data = data
         name = data.get("name", "未知")
         self.name_label.text = name
         self.avatar.text = name
         self.avatar.name_key = name
         self.avatar.is_online = True
+
+    def on_touch_up(self, touch):
+        if not self.collide_point(*touch.pos):
+            return super().on_touch_up(touch)
+        name = self._data.get("name", "")
+        if name:
+            app = get_root_app()
+            if hasattr(app, "open_chat_with"):
+                app.open_chat_with(name)
+                return True
+        return super().on_touch_up(touch)
 
 
 # ---------------------------------------------------------------------------
