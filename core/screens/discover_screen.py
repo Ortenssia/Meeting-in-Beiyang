@@ -94,7 +94,7 @@ class RadarScanner(Widget):
         cx = self.x + self.width / 2
         cy = self.y + self.height / 2
         max_r = min(self.width, self.height) / 2 - dp(10)
-        
+
         active_color = (0.0, 0.6, 1.0) # QQ Blue
 
         with self.canvas.before:
@@ -202,14 +202,14 @@ class DiscoveredPersonItem(BoxLayout):
         status = data.get("status", "")
         self.name_label.text = name
         self.ip_label.text = f"{ip}:{port}"
-        
+
         self.avatar.text = name
         self.avatar.name_key = name
         self.avatar.is_online = False
-        
+
         self.request_btn.unbind(on_press=self._on_send_request)
         self.request_btn.bind(on_press=self._on_send_request)
-        
+
         # 还原状态
         self.request_btn.text = "添加好友"
         self.request_btn.disabled = False
@@ -360,7 +360,7 @@ class OnlineFriendsList(ScrollView):
         self.do_scroll_x = True
         self.scroll_type = ['bars', 'content']
         self.bar_width = dp(2)
-        
+
         self.container = BoxLayout(
             orientation="horizontal",
             size_hint_x=None,
@@ -406,7 +406,7 @@ class DiscoverScreen(Screen):
             height=dp(48),
             spacing=dp(6),
         )
-        
+
         title = Label(
             text="相识北洋",
             font_size="20sp",
@@ -417,7 +417,7 @@ class DiscoverScreen(Screen):
             size_hint_x=0.35,
         )
         title.bind(size=title.setter("text_size"))
-        
+
         self.scan_status = Label(
             text="未开始扫描",
             font_size="11sp",
@@ -427,7 +427,7 @@ class DiscoverScreen(Screen):
             size_hint_x=0.25,
         )
         self.scan_status.bind(size=self.scan_status.setter("text_size"))
-        
+
         self.scan_btn = Factory.ModernButtonAccent(
             text="雷达扫描",
             size_hint_x=0.2,
@@ -435,7 +435,7 @@ class DiscoverScreen(Screen):
             font_size="11sp",
         )
         self.scan_btn.bind(on_press=self._on_scan)
-        
+
         self.manual_btn = Factory.ModernButton(
             text="手动添加",
             size_hint_x=0.2,
@@ -443,7 +443,7 @@ class DiscoverScreen(Screen):
             font_size="11sp",
         )
         self.manual_btn.bind(on_press=self._on_manual_add)
-        
+
         header_row.add_widget(title)
         header_row.add_widget(self.scan_status)
         header_row.add_widget(self.scan_btn)
@@ -512,14 +512,14 @@ class DiscoverScreen(Screen):
             size_hint_y=1,
         )
         self.radar_box.add_widget(Widget()) # 顶部弹簧
-        
+
         radar_center = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(160))
         self.radar_scanner = RadarScanner()
         radar_center.add_widget(Widget()) # 居中弹簧
         radar_center.add_widget(self.radar_scanner)
         radar_center.add_widget(Widget()) # 居中弹簧
         self.radar_box.add_widget(radar_center)
-        
+
         self.radar_box.add_widget(Widget()) # 底部弹簧
 
         # -- 底部导航栏 --
@@ -535,7 +535,7 @@ class DiscoverScreen(Screen):
             size_hint_y=None,
             height=dp(56),
         )
-        
+
         nav_container = BoxLayout(
             orientation="horizontal",
             spacing=0,
@@ -553,7 +553,7 @@ class DiscoverScreen(Screen):
                 points=[nav_container.x, nav_container.y + nav_container.height, nav_container.x + nav_container.width, nav_container.y + nav_container.height],
                 width=dp(1)
             )
-        
+
         def update_nav_bg(w, v):
             self._nav_bg.pos = nav_container.pos
             self._nav_bg.size = nav_container.size
@@ -567,7 +567,7 @@ class DiscoverScreen(Screen):
             ("我的", "profile"),
             ("设置", "settings"),
         ]
-        
+
         for text, sn in nav_items:
             is_active = (sn == active_tab_name)
             btn = Factory.IconTabButton(
@@ -577,7 +577,7 @@ class DiscoverScreen(Screen):
             )
             btn.bind(on_press=lambda _b, name=sn: self._navigate(name))
             nav_container.add_widget(btn)
-            
+
         nav_wrapper.add_widget(nav_container)
         return nav_wrapper
 
@@ -649,16 +649,16 @@ class DiscoverScreen(Screen):
         if hasattr(app, "scan_for_people"):
             self.scan_status.text = "正在扫描附近的人..."
             self.scan_btn.disabled = True
-            
+
             # 从容器中移除列表，添加雷达
             if self.discovered_list in self.list_container.children:
                 self.list_container.remove_widget(self.discovered_list)
             if self.radar_box not in self.list_container.children:
                 self.list_container.add_widget(self.radar_box)
-            
+
             self.radar_scanner.scanning = True
             app.scan_for_people()
-            
+
             # 延时恢复按钮状态
             from kivy.clock import Clock
             Clock.schedule_once(lambda dt: self._enable_scan_btn(), 5)
@@ -667,14 +667,14 @@ class DiscoverScreen(Screen):
 
     def _enable_scan_btn(self):
         self.scan_btn.disabled = False
-        
+
         # 停止雷达，从容器中移除雷达并重新添加列表
         self.radar_scanner.scanning = False
         if self.radar_box in self.list_container.children:
             self.list_container.remove_widget(self.radar_box)
         if self.discovered_list not in self.list_container.children:
             self.list_container.add_widget(self.discovered_list)
-        
+
         self._refresh_discovered()  # 扫描完刷新列表并重置文字
         self._refresh_network_diagnostics()
 
@@ -686,7 +686,7 @@ class DiscoverScreen(Screen):
         from kivy.metrics import dp
         from kivy.factory import Factory
         from kivy.graphics import Color, RoundedRectangle, Line
-        
+
         # 容器布局
         layout = BoxLayout(orientation='vertical', padding=[dp(16), dp(16), dp(16), dp(10)], spacing=dp(12))
         with layout.canvas.before:
@@ -694,17 +694,17 @@ class DiscoverScreen(Screen):
             layout_bg = RoundedRectangle(pos=layout.pos, size=layout.size, radius=[dp(20)])
             Color(1, 1, 1, 0.15)
             layout_border = Line(rounded_rectangle=(layout.x, layout.y, layout.width, layout.height, dp(20)), width=dp(1))
-            
+
         def update_layout_canvas(w, v):
             layout_bg.pos = w.pos
             layout_bg.size = w.size
             layout_border.rounded_rectangle = (w.x, w.y, w.width, w.height, dp(20))
-            
+
         layout.bind(pos=update_layout_canvas, size=update_layout_canvas)
-        
+
         # 标题
         title_lbl = Label(
-            text="手动添加好友",
+            text="手动连接好友",
             font_size='16sp',
             bold=True,
             color=(1, 1, 1, 1),
@@ -714,7 +714,18 @@ class DiscoverScreen(Screen):
         )
         title_lbl.bind(size=title_lbl.setter("text_size"))
         layout.add_widget(title_lbl)
-        
+
+        mode_lbl = Label(
+            text="支持：定点 UDP 探测 / TCP 直连 / 发送好友申请",
+            font_size='11sp',
+            color=(0.52, 0.55, 0.68, 1),
+            size_hint_y=None,
+            height=dp(22),
+            halign="center",
+        )
+        mode_lbl.bind(size=mode_lbl.setter("text_size"))
+        layout.add_widget(mode_lbl)
+
         # 输入姓名
         name_box = BoxLayout(orientation='vertical', spacing=dp(4), size_hint_y=None, height=dp(64))
         name_lbl = Label(text="好友姓名:", font_size='12sp', color=(0.63, 0.65, 0.75, 1), halign="left")
@@ -723,7 +734,7 @@ class DiscoverScreen(Screen):
         name_box.add_widget(name_lbl)
         name_box.add_widget(name_input)
         layout.add_widget(name_box)
-        
+
         # 输入 IP
         ip_box = BoxLayout(orientation='vertical', spacing=dp(4), size_hint_y=None, height=dp(64))
         ip_lbl = Label(text="好友 IP 地址:", font_size='12sp', color=(0.63, 0.65, 0.75, 1), halign="left")
@@ -742,50 +753,91 @@ class DiscoverScreen(Screen):
         port_box.add_widget(port_lbl)
         port_box.add_widget(port_input)
         layout.add_widget(port_box)
-        
+
         # 错误提示Label
         err_lbl = Label(text="", font_size='11sp', color=(0.92, 0.23, 0.35, 1), size_hint_y=None, height=dp(20), halign="center")
         err_lbl.bind(size=err_lbl.setter("text_size"))
         layout.add_widget(err_lbl)
-        
+
         # 底部按钮
-        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(10))
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(8))
+        probe_btn = Factory.ModernButtonSecondary(text="探测连接", font_size='13sp')
         send_btn = Factory.ModernButtonAccent(text="发送申请", font_size='14sp')
         cancel_btn = Factory.ModernButtonSecondary(text="取消", font_size='14sp')
+        btn_row.add_widget(probe_btn)
         btn_row.add_widget(send_btn)
         btn_row.add_widget(cancel_btn)
         layout.add_widget(btn_row)
-        
+
         popup = Popup(
             title="",
             title_size=0,
             content=layout,
-            size_hint=(0.84, 0.60),
+            size_hint=(0.84, 0.66),
             background_color=(0, 0, 0, 0),
             background="",
         )
-        
-        def on_send(_btn):
+
+        def parse_inputs():
             name = name_input.text.strip()
             ip = ip_input.text.strip()
             if not name:
                 err_lbl.text = "姓名不能为空！"
-                return
+                return None
             try:
                 from core.utils.helpers import Helpers
             except ImportError:
                 from utils.helpers import Helpers
             if not Helpers.validate_ip(ip):
                 err_lbl.text = "IP 地址格式不合法！"
-                return
+                return None
             try:
                 port = int(port_input.text.strip() or "7779")
                 if port < 1024 or port > 65535:
                     raise ValueError
             except ValueError:
                 err_lbl.text = "端口范围: 1024-65535"
+                return None
+            return name, ip, port
+
+        def on_probe(_btn):
+            parsed = parse_inputs()
+            if not parsed:
                 return
-            
+            name, ip, port = parsed
+            app = get_root_app()
+            if not hasattr(app, "probe_peer"):
+                err_lbl.text = "当前版本不支持探测"
+                return
+            import threading
+            def task():
+                Clock.schedule_once(lambda _dt: self.set_scan_status("正在探测指定 IP..."), 0)
+                result = app.probe_peer(ip, port, name)
+                if result.get("tcp_connected"):
+                    Clock.schedule_once(
+                        lambda _dt: self.set_scan_status(f"TCP 已连接 {name}({ip}:{port})"),
+                        0
+                    )
+                elif result.get("udp_probe", {}).get("sent", 0):
+                    Clock.schedule_once(
+                        lambda _dt: self.set_scan_status(f"已向 {ip} 发出 UDP 探测，等待回应"),
+                        0
+                    )
+                else:
+                    Clock.schedule_once(
+                        lambda _dt: self.set_scan_status("探测失败，请检查 IP、端口、防火墙或 AP 隔离"),
+                        0
+                    )
+                Clock.schedule_once(lambda _dt: self._refresh_discovered(), 0)
+                Clock.schedule_once(lambda _dt: self._refresh_network_diagnostics(), 0)
+            threading.Thread(target=task, daemon=True).start()
+
+        def on_send(_btn):
+            parsed = parse_inputs()
+            if not parsed:
+                return
+            name, ip, port = parsed
+
             app = get_root_app()
             if hasattr(app, "send_friend_request"):
                 # 在后台线程发送，防止主线程因 TCP 连接阻塞而卡顿
@@ -805,7 +857,8 @@ class DiscoverScreen(Screen):
                         )
                 threading.Thread(target=task, daemon=True).start()
                 popup.dismiss()
-        
+
+        probe_btn.bind(on_press=on_probe)
         send_btn.bind(on_press=on_send)
         cancel_btn.bind(on_press=popup.dismiss)
         popup.open()

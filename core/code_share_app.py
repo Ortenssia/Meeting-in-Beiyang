@@ -660,6 +660,11 @@ class CodeShareApp(App):
         if self.runtime:
             self.runtime.scan_for_people()
 
+    def probe_peer(self, ip, port=Protocol.DEFAULT_TCP_PORT, display_name=""):
+        if self.runtime:
+            return self.runtime.probe_peer(ip, port, display_name)
+        return {"ip": ip, "tcp_port": port, "tcp_connected": False}
+
     def get_discovered_people(self):
         return self.runtime.get_discovered_people() if self.runtime else []
 

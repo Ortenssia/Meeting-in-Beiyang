@@ -181,6 +181,30 @@ class SocialRuntime:
         if self.udp_service:
             self.udp_service.manual_scan()
 
+    def probe_peer(self, ip: str, tcp_port: int = Protocol.DEFAULT_TCP_PORT,
+                   display_name: str = "") -> dict:
+        """Try multiple app-level paths to reach one peer."""
+        result = {
+            "ip": ip,
+            "tcp_port": int(tcp_port or Protocol.DEFAULT_TCP_PORT),
+            "display_name": display_name or ip,
+            "udp_probe": {},
+            "tcp_connected": False,
+        }
+        if self.udp_service:
+            result["udp_probe"] = self.udp_service.probe_host(ip)
+        if self.connection_manager:
+            result["tcp_connected"] = self.connection_manager.connect_to_friend(
+                ip, result["tcp_port"], result["display_name"]
+            )
+        if result["tcp_connected"] and self.udp_service:
+            self.udp_service._add_device(
+                ip,
+                result["display_name"],
+                result["tcp_port"],
+            )
+        return result
+
     def get_discovered_people(self):
         if self.social_service:
             return self.social_service.get_discovered_cards(self.user_id, self.device_name)

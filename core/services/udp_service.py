@@ -495,6 +495,40 @@ class UDPService:
         except Exception as e:
             self._mark_diagnostic(last_error=f"Manual scan failed: {e}")
 
+    def probe_host(self, host: str, ports: Optional[List[int]] = None) -> dict:
+        """Probe one host with UDP discovery packets."""
+        result = {
+            "host": host,
+            "ports": ports or self._get_probe_ports(),
+            "sent": 0,
+            "failed": 0,
+        }
+        if not self.sock:
+            message = "UDP socket is not initialized. Check firewall or port binding."
+            self._mark_diagnostic(last_error=message)
+            result["error"] = message
+            return result
+
+        try:
+            ping_data = Protocol.create_ping_packet(
+                self.device_name, self.tcp_port, self.user_id, self.device_id
+            )
+            self._mark_diagnostic(
+                last_scan_at=time.time(),
+                last_targets=1,
+                last_probe_ports=result["ports"],
+            )
+            for port in result["ports"]:
+                if self._send_probe(ping_data, host, int(port)):
+                    result["sent"] += 1
+                else:
+                    result["failed"] += 1
+        except Exception as e:
+            message = f"UDP probe to {host} failed: {e}"
+            self._mark_diagnostic(last_error=message)
+            result["error"] = message
+        return result
+
     def _get_probe_ports(self) -> List[int]:
         """Return discovery ports used by both normal and manual scans."""
         return sorted(set([8890, 8891, 8892, 8893, self.port]))
