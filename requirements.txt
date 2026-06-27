@@ -1,4 +1,4 @@
 # Beiyang Social - Challenge 3 依赖
-kivy>=2.0.0
+flet==0.85.3
 plyer>=2.0.0
 pytest>=7.0.0

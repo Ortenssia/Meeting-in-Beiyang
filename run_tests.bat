@@ -13,7 +13,8 @@ if errorlevel 1 (
 )
 
 echo [1/1] 运行所有测试...
-python -m pytest core/tests/ -v --tb=short
+REM 使用本地 basetemp，避免系统临时目录权限不足导致用例全部 setup 失败
+python -m pytest core/tests/ -v --tb=short --basetemp=".pytest_tmp"
 
 echo.
 echo ============================================

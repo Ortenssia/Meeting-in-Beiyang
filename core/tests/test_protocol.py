@@ -9,7 +9,7 @@ import json
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.utils.protocol import Protocol
+from core.backend.shared.protocol import Protocol
 
 
 class MockSocket:

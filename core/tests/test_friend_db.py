@@ -8,7 +8,7 @@ import os
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.services.friend_db import FriendDB
+from core.backend.services.friend_db import FriendDB
 
 
 @pytest.fixture
@@ -57,7 +57,8 @@ class TestFriendDB:
             port=7779,
             tags=["sports"],
             bio="Active person",
-            category="同学"
+            category="同学",
+            avatar="avatars/friend.png",
         )
         assert success is True
 
@@ -66,6 +67,7 @@ class TestFriendDB:
         assert friend["ip"] == "192.168.1.102"
         assert friend["tags"] == ["sports"]
         assert friend["category"] == "同学"
+        assert friend["avatar"] == "avatars/friend.png"
 
         # 测试 get_friends()
         friends = db.get_friends()
@@ -74,6 +76,14 @@ class TestFriendDB:
 
         # 测试查找不存在的好友
         assert db.get_friend("Ghost") is None
+
+    def test_update_friend_avatar(self, db):
+        db.add_friend("FriendB", "192.168.1.102", 7779, [], "bio", user_id="user_friend")
+
+        assert db.update_friend_avatar(name="FriendB", user_id="user_friend", avatar="cache/friend.png") is True
+
+        friend = db.get_friend_by_user_id("user_friend")
+        assert friend["avatar"] == "cache/friend.png"
 
     def test_user_id_updates_existing_friend(self, db):
         db.add_friend("Alice", "192.168.1.10", 7779, ["a"], "old", user_id="user_alice")
@@ -86,6 +96,96 @@ class TestFriendDB:
         assert friend["name"] == "Alice New"
         assert friend["ip"] == "192.168.1.11"
         assert friend["port"] == 7780
+
+    def test_repair_blank_friend_name_from_request(self, tmp_path):
+        db_path = tmp_path / "repair.db"
+        first = FriendDB(str(db_path))
+        cursor = first.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO friend_requests
+            (user_id, name, ip, port, tags, bio, direction, status, msg_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "user_bob",
+                "Bob",
+                "127.0.0.1",
+                7780,
+                "[]",
+                "",
+                "incoming",
+                "accepted",
+                "msg-1",
+                "2026-06-28 01:19:00",
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO friends
+            (user_id, name, ip, port, tags, bio, avatar, background, category,
+             status, added_at, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "user_bob",
+                "",
+                "127.0.0.1",
+                7780,
+                "[]",
+                "",
+                "",
+                "",
+                "朋友",
+                "accepted",
+                "2026-06-28 01:19:00",
+                "2026-06-28 01:19:00",
+            ),
+        )
+        first.conn.commit()
+        first.close()
+
+        repaired = FriendDB(str(db_path))
+        try:
+            friend = repaired.get_friend_by_user_id("user_bob")
+            assert friend["name"] == "Bob"
+        finally:
+            repaired.close()
+
+    def test_repair_removes_unrecoverable_blank_friend(self, tmp_path):
+        db_path = tmp_path / "repair_delete.db"
+        first = FriendDB(str(db_path))
+        cursor = first.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO friends
+            (user_id, name, ip, port, tags, bio, avatar, background, category,
+             status, added_at, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "",
+                "",
+                "172.29.64.1",
+                7779,
+                "[]",
+                "",
+                "",
+                "",
+                "朋友",
+                "accepted",
+                "2026-06-28 01:19:00",
+                "2026-06-28 01:19:00",
+            ),
+        )
+        first.conn.commit()
+        first.close()
+
+        repaired = FriendDB(str(db_path))
+        try:
+            assert repaired.get_friends() == []
+        finally:
+            repaired.close()
 
     def test_friend_request_status_machine(self, db):
         db.upsert_friend_request(
@@ -202,3 +302,42 @@ class TestFriendDB:
         success = db.clear_chat_history("FriendB")
         assert success is True
         assert len(db.get_chat_history("FriendB")) == 0
+
+    def test_group_and_moments(self, db):
+        # 1. Test groups
+        group_id = "test-group-id"
+        success = db.save_group(group_id, "Test Group", ["Alice", "Bob"])
+        assert success is True
+
+        group = db.get_group(group_id)
+        assert group is not None
+        assert group["group_name"] == "Test Group"
+        assert "Alice" in group["members"]
+        assert "Bob" in group["members"]
+
+        groups = db.get_all_groups()
+        assert len(groups) == 1
+        assert groups[0]["group_id"] == group_id
+
+        # 2. Test group chat history
+        msg_id = "msg-1"
+        success = db.save_group_chat_message(msg_id, group_id, "Alice", "Hello group!", "2026-06-13 12:00:00")
+        assert success is True
+        assert db.has_group_message(msg_id) is True
+
+        history = db.get_group_chat_history(group_id)
+        assert len(history) == 1
+        assert history[0]["content"] == "Hello group!"
+        assert history[0]["sender"] == "Alice"
+
+        # 3. Test moments
+        post_id = "post-1"
+        success = db.save_moment(post_id, "Alice", "My first post!", "/path/to/img.png", "2026-06-13 12:05:00")
+        assert success is True
+        assert db.has_moment(post_id) is True
+
+        moments = db.get_moments()
+        assert len(moments) == 1
+        assert moments[0]["content"] == "My first post!"
+        assert moments[0]["author"] == "Alice"
+        assert moments[0]["media_path"] == "/path/to/img.png"

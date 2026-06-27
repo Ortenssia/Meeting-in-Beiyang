@@ -11,8 +11,8 @@ import base64
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.services.message_service import MessageService
-from core.services.friend_db import FriendDB
+from core.backend.services.message_service import MessageService
+from core.backend.services.friend_db import FriendDB
 
 
 class MockConnectionManager:
@@ -73,6 +73,7 @@ def social_env(tmp_path):
         connection_manager=conn_mgr,
         friend_db=db,
         receive_dir=str(tmp_path / "received_files"),
+        avatar_dir=str(tmp_path / "received_avatars"),
     )
     
     yield db, conn_mgr, msg_service
@@ -161,6 +162,26 @@ class TestSocialFlow:
         assert data["profile"]["tcp_port"] == 7788
         assert data["profile"]["user_id"].startswith("user_")
         assert db.get_relationship_status(user_id="user_alice") == "pending_sent"
+
+    def test_send_friend_request_sends_local_avatar_file(self, social_env, tmp_path):
+        db, conn_mgr, msg_service = social_env
+        avatar = tmp_path / "me.png"
+        avatar.write_bytes(b"avatar bytes")
+        profile = db.get_my_profile()
+        profile["avatar"] = str(avatar)
+        db.save_profile(profile)
+
+        success = msg_service.send_friend_request("Alice", "172.30.0.1", 7780, "user_alice")
+
+        assert success is True
+        messages = [data for _target, data in conn_mgr.sent_messages]
+        assert messages[0]["type"] == MessageService.FRIEND_REQUEST
+        assert messages[0]["profile"]["avatar"] == ""
+        assert messages[1]["type"] == MessageService.FILE_OFFER
+        assert messages[1]["purpose"] == "avatar"
+        assert messages[1]["avatar_owner"] == "Me"
+        assert messages[-1]["type"] == MessageService.FILE_COMPLETE
+        assert messages[-1]["purpose"] == "avatar"
 
     def test_send_friend_request_skips_existing_friend(self, social_env):
         db, conn_mgr, msg_service = social_env
@@ -329,7 +350,11 @@ class TestSocialFlow:
         assert types[0] == MessageService.FILE_OFFER
         assert MessageService.FILE_CHUNK in types
         assert types[-1] == MessageService.FILE_COMPLETE
-        assert db.get_chat_history("Alice")[0]["content"] == "[文件] sample.txt"
+        content = db.get_chat_history("Alice")[0]["content"]
+        assert content.startswith("[文件] ")
+        payload = json.loads(content.split("] ", 1)[1])
+        assert payload["filename"] == "sample.txt"
+        assert payload["path"] == str(sample)
 
     def test_receive_file_writes_to_receive_dir(self, social_env):
         db, _conn_mgr, msg_service = social_env
@@ -373,7 +398,154 @@ class TestSocialFlow:
 
         assert len(callbacks) == 1
         _, saved_path, _ = callbacks[0]
+        assert os.path.dirname(saved_path) == msg_service.receive_dir
         with open(saved_path, "rb") as f:
             assert f.read() == payload
         history = db.get_chat_history("Alice")
-        assert history[0]["content"] == "[文件] note.txt"
+        content = history[0]["content"]
+        assert content.startswith("[文件] ")
+        file_payload = json.loads(content.split("] ", 1)[1])
+        assert file_payload["filename"] == "note.txt"
+        assert file_payload["path"] == saved_path
+
+    def test_receive_file_writes_to_custom_receive_dir(self, social_env, tmp_path):
+        db, _conn_mgr, msg_service = social_env
+        custom_dir = tmp_path / "chosen_inbox"
+        msg_service.set_receive_dir(str(custom_dir))
+
+        payload = b"custom inbox payload"
+        file_id = "file-custom-dir"
+        offer = {
+            "type": MessageService.FILE_OFFER,
+            "file_id": file_id,
+            "from_name": "Alice",
+            "to_name": "Me",
+            "filename": "custom.txt",
+            "size": len(payload),
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "sha256": msg_service._sha256_bytes(payload),
+            "timestamp": "2026-06-26 12:00:00",
+        }
+        chunk = {
+            "type": MessageService.FILE_CHUNK,
+            "file_id": file_id,
+            "chunk_index": 0,
+            "data_b64": base64.b64encode(payload).decode("ascii"),
+        }
+        complete = {
+            "type": MessageService.FILE_COMPLETE,
+            "file_id": file_id,
+            "from_name": "Alice",
+            "to_name": "Me",
+            "filename": "custom.txt",
+            "size": len(payload),
+            "sha256": msg_service._sha256_bytes(payload),
+            "timestamp": "2026-06-26 12:00:00",
+        }
+
+        msg_service.handle_message("192.168.1.5", offer)
+        msg_service.handle_message("192.168.1.5", chunk)
+        msg_service.handle_message("192.168.1.5", complete)
+
+        saved_path = custom_dir / "custom.txt"
+        assert saved_path.read_bytes() == payload
+        history = db.get_chat_history("Alice")
+        file_payload = json.loads(history[0]["content"].split("] ", 1)[1])
+        assert file_payload["path"] == str(saved_path)
+
+    def test_file_resume_uses_offer_part_path_when_name_conflicts(self, social_env, tmp_path):
+        _db, conn_mgr, msg_service = social_env
+        msg_service.set_receive_dir(str(tmp_path))
+        (tmp_path / "note.txt").write_text("existing finished file", encoding="utf-8")
+
+        payload = b"x" * (msg_service.FILE_CHUNK_SIZE + 10)
+        offer = {
+            "type": MessageService.FILE_OFFER,
+            "file_id": "resume-conflict",
+            "from_name": "Alice",
+            "to_name": "Me",
+            "filename": "note.txt",
+            "size": len(payload),
+            "chunk_size": msg_service.FILE_CHUNK_SIZE,
+            "chunk_count": 2,
+            "sha256": msg_service._sha256_bytes(payload),
+            "timestamp": "2026-06-26 12:00:00",
+        }
+
+        msg_service.handle_message("192.168.1.5", offer)
+        with msg_service._file_lock:
+            state = msg_service._incoming_files["resume-conflict"]
+        assert state["part_path"].endswith("note_1.txt.part")
+        with open(state["part_path"], "wb") as f:
+            f.write(payload[:msg_service.FILE_CHUNK_SIZE])
+
+        conn_mgr.online_friends["Alice"] = "192.168.1.5"
+        msg_service.handle_message(
+            "192.168.1.5",
+            {
+                "type": msg_service.FILE_RESUME_REQ,
+                "file_id": "resume-conflict",
+                "filename": "../note.txt",
+                "sha256": msg_service._sha256_bytes(payload),
+            },
+        )
+
+        target, data = conn_mgr.sent_messages[-1]
+        assert target == "Alice"
+        assert data["type"] == msg_service.FILE_RESUME_RESP
+        assert data["completed_chunks"] == 1
+
+    def test_receive_avatar_file_updates_friend_avatar(self, social_env):
+        db, _conn_mgr, msg_service = social_env
+        callbacks = []
+        msg_service.on_file_received = lambda name, path, ts: callbacks.append((name, path, ts))
+        db.add_friend("Alice", "192.168.1.5", 7779, ["kivy"], "Alice Bio", user_id="user_alice")
+
+        payload = b"fake png avatar payload"
+        file_id = "avatar-file-1"
+        offer = {
+            "type": MessageService.FILE_OFFER,
+            "file_id": file_id,
+            "from_name": "Alice",
+            "to_name": "Me",
+            "filename": "alice.png",
+            "size": len(payload),
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "sha256": msg_service._sha256_bytes(payload),
+            "timestamp": "2026-06-26 12:00:00",
+            "purpose": "avatar",
+            "avatar_owner": "Alice",
+            "avatar_user_id": "user_alice",
+        }
+        chunk = {
+            "type": MessageService.FILE_CHUNK,
+            "file_id": file_id,
+            "chunk_index": 0,
+            "data_b64": base64.b64encode(payload).decode("ascii"),
+        }
+        complete = {
+            "type": MessageService.FILE_COMPLETE,
+            "file_id": file_id,
+            "from_name": "Alice",
+            "to_name": "Me",
+            "filename": "alice.png",
+            "size": len(payload),
+            "sha256": msg_service._sha256_bytes(payload),
+            "timestamp": "2026-06-26 12:00:00",
+            "purpose": "avatar",
+            "avatar_owner": "Alice",
+            "avatar_user_id": "user_alice",
+        }
+
+        msg_service.handle_message("192.168.1.5", offer)
+        msg_service.handle_message("192.168.1.5", chunk)
+        msg_service.handle_message("192.168.1.5", complete)
+
+        friend = db.get_friend_by_user_id("user_alice")
+        assert friend["avatar"].endswith(".png")
+        with open(friend["avatar"], "rb") as f:
+            assert f.read() == payload
+        assert db.get_chat_history("Alice") == []
+        assert callbacks[0][0] == "Alice"

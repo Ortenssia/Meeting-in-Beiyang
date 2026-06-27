@@ -7,8 +7,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.services import social_runtime
-from core.services.social_runtime import RuntimeConfig, SocialRuntime
+from core.backend.services import social_runtime
+from core.backend.services.social_runtime import RuntimeConfig, SocialRuntime
 
 
 class ImmediateThread:
@@ -19,6 +19,17 @@ class ImmediateThread:
 
     def start(self):
         self.target(*self.args)
+
+
+class DeferredThread(ImmediateThread):
+    instances = []
+
+    def __init__(self, target, args=(), daemon=None, **kwargs):
+        super().__init__(target, args, daemon, **kwargs)
+        self.__class__.instances.append(self)
+
+    def start(self):
+        pass
 
 
 class DummyDevice:
@@ -56,6 +67,99 @@ def test_runtime_initializes_identity_and_health(tmp_path):
         runtime.stop()
 
 
+def test_runtime_can_change_receive_dir_and_persist_setting(tmp_path):
+    db_path = tmp_path / "alice.db"
+    chosen_dir = tmp_path / "chosen_inbox"
+    runtime = SocialRuntime(
+        RuntimeConfig(
+            db_path=str(db_path),
+            name_override="Alice",
+        )
+    ).initialize()
+
+    try:
+        resolved = runtime.set_receive_dir(str(chosen_dir))
+        assert resolved == str(chosen_dir)
+        assert runtime.get_receive_dir() == str(chosen_dir)
+        assert runtime.message_service.receive_dir == str(chosen_dir)
+        assert chosen_dir.is_dir()
+    finally:
+        runtime.stop()
+
+    restarted = SocialRuntime(
+        RuntimeConfig(
+            db_path=str(db_path),
+            name_override="Alice",
+        )
+    ).initialize()
+    try:
+        assert restarted.get_receive_dir() == str(chosen_dir)
+    finally:
+        restarted.stop()
+
+
+def test_runtime_name_override_rotates_identity_when_reusing_db_for_new_name(tmp_path):
+    db_path = tmp_path / "shared.db"
+    alice = SocialRuntime(
+        RuntimeConfig(db_path=str(db_path), name_override="Alice")
+    ).initialize()
+    try:
+        alice_user_id = alice.user_id
+        alice_device_id = alice.device_id
+    finally:
+        alice.stop()
+
+    bob = SocialRuntime(
+        RuntimeConfig(db_path=str(db_path), name_override="Bob")
+    ).initialize()
+    try:
+        assert bob.device_name == "Bob"
+        assert bob.user_id != alice_user_id
+        assert bob.device_id != alice_device_id
+    finally:
+        bob.stop()
+
+
+def test_runtime_preserves_saved_profile_for_same_name_override(tmp_path):
+    db_path = tmp_path / "alice.db"
+    runtime = SocialRuntime(
+        RuntimeConfig(db_path=str(db_path), name_override="Alice")
+    ).initialize()
+    try:
+        runtime.save_profile({
+            "name": "Alice 自定义",
+            "tags": ["编程", "摄影"],
+            "bio": "Keep profile",
+            "conditions": {
+                "required_tags": ["编程"],
+                "optional_tags": ["音乐"],
+                "min_match_count": 2,
+                "auto_accept": True,
+            },
+        })
+        saved_user_id = runtime.user_id
+        saved_device_id = runtime.device_id
+    finally:
+        runtime.stop()
+
+    restarted = SocialRuntime(
+        RuntimeConfig(db_path=str(db_path), name_override="Alice")
+    ).initialize()
+    try:
+        profile = restarted.friend_db.get_my_profile()
+        assert restarted.device_name == "Alice 自定义"
+        assert profile["tags"] == ["编程", "摄影"]
+        assert profile["bio"] == "Keep profile"
+        assert profile["conditions"]["required_tags"] == ["编程"]
+        assert profile["conditions"]["optional_tags"] == ["音乐"]
+        assert profile["conditions"]["min_match_count"] == 2
+        assert profile["conditions"]["auto_accept"] is True
+        assert restarted.user_id == saved_user_id
+        assert restarted.device_id == saved_device_id
+    finally:
+        restarted.stop()
+
+
 def test_runtime_updates_known_friend_endpoint_and_reconnects(tmp_path, monkeypatch):
     monkeypatch.setattr(social_runtime.threading, "Thread", ImmediateThread)
     runtime = SocialRuntime(
@@ -88,5 +192,46 @@ def test_runtime_updates_known_friend_endpoint_and_reconnects(tmp_path, monkeypa
         assert friend["ip"] == "127.0.0.1"
         assert friend["port"] == 7780
         assert connect_calls == [("127.0.0.1", 7780, "Alice")]
+    finally:
+        runtime.stop()
+
+
+def test_runtime_deduplicates_pending_reconnects(tmp_path, monkeypatch):
+    DeferredThread.instances.clear()
+    monkeypatch.setattr(social_runtime.threading, "Thread", DeferredThread)
+    runtime = SocialRuntime(
+        RuntimeConfig(
+            db_path=str(tmp_path / "alice.db"),
+            name_override="Me",
+        )
+    ).initialize()
+
+    try:
+        runtime.connection_manager.is_connected = lambda _ip, _port=0: False
+        runtime.connection_manager.connect_to_friend = lambda *_args: True
+
+        runtime._schedule_friend_connection("127.0.0.1", 7780, "Alice")
+        runtime._schedule_friend_connection("127.0.0.1", 7780, "Alice")
+
+        assert len(DeferredThread.instances) == 1
+        DeferredThread.instances[0].target()
+        assert runtime._connecting_endpoints == set()
+    finally:
+        runtime.stop()
+
+
+def test_runtime_does_not_schedule_reconnect_while_stopping(tmp_path, monkeypatch):
+    DeferredThread.instances.clear()
+    monkeypatch.setattr(social_runtime.threading, "Thread", DeferredThread)
+    runtime = SocialRuntime(
+        RuntimeConfig(db_path=str(tmp_path / "alice.db"), name_override="Me")
+    ).initialize()
+
+    try:
+        runtime._stopping = True
+        runtime._schedule_friend_connection("127.0.0.1", 7780, "Alice")
+
+        assert DeferredThread.instances == []
+        assert runtime._connecting_endpoints == set()
     finally:
         runtime.stop()

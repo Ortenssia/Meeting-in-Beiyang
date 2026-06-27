@@ -7,8 +7,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.services.friend_db import FriendDB
-from core.services.social_service import SocialService
+from core.backend.services.friend_db import FriendDB
+from core.backend.services.social_service import SocialService
 
 
 class DummyConnection:
@@ -20,12 +20,12 @@ class DummyConnection:
 
 
 class DummyDevice:
-    def __init__(self, name, ip, port, user_id):
+    def __init__(self, name, ip, port, user_id, device_id=None):
         self.device_name = name
         self.ip = ip
         self.tcp_port = port
         self.user_id = user_id
-        self.device_id = f"device_{user_id}"
+        self.device_id = device_id if device_id is not None else f"device_{user_id}"
         self.last_seen = time.time()
 
     def is_online(self):
@@ -52,6 +52,40 @@ def test_social_service_hides_existing_friends_from_discovery(tmp_path):
 
     assert [card["name"] for card in cards] == ["Bob"]
     assert cards[0]["status"] == "none"
+
+
+def test_social_service_does_not_hide_same_user_different_device(tmp_path):
+    db = FriendDB(str(tmp_path / "social.db"))
+    udp = DummyUDP([
+        DummyDevice("Bob", "127.0.0.1", 7780, "user_shared", "device_bob"),
+    ])
+
+    service = SocialService(db, DummyConnection([]), udp)
+    cards = service.get_discovered_cards(
+        my_user_id="user_shared",
+        my_name="Alice",
+        my_device_id="device_alice",
+        my_tcp_port=7779,
+    )
+
+    assert [card["name"] for card in cards] == ["Bob"]
+
+
+def test_social_service_hides_same_device_only(tmp_path):
+    db = FriendDB(str(tmp_path / "social.db"))
+    udp = DummyUDP([
+        DummyDevice("Alice", "127.0.0.1", 7779, "user_alice", "device_alice"),
+    ])
+
+    service = SocialService(db, DummyConnection([]), udp)
+    cards = service.get_discovered_cards(
+        my_user_id="user_alice",
+        my_name="Alice",
+        my_device_id="device_alice",
+        my_tcp_port=7779,
+    )
+
+    assert cards == []
 
 
 def test_social_service_friend_cards_are_accepted_only(tmp_path):

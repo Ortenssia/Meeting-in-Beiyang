@@ -6,15 +6,19 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.services.connection_manager import ConnectionManager
+from core.backend.services.connection_manager import ConnectionManager
 
 
 class DummySocket:
     def __init__(self):
         self.closed = False
+        self.sent = []
 
     def close(self):
         self.closed = True
+
+    def sendall(self, data):
+        self.sent.append(data)
 
 
 def test_register_connection_dedupes_temporary_ip_entry():
@@ -42,3 +46,29 @@ def test_get_online_friends_prefers_port_entry_for_same_name():
 
     assert len(online) == 1
     assert online[0]["port"] == 7780
+
+
+def test_stale_socket_disconnect_does_not_remove_replacement_connection():
+    manager = ConnectionManager(my_name="Me", tcp_port=7779)
+    old_socket = DummySocket()
+    new_socket = DummySocket()
+
+    key = manager._register_connection(old_socket, "172.30.0.1", "Alice", 7780)
+    manager._register_connection(new_socket, "172.30.0.1", "Alice", 7780)
+    manager._handle_disconnect(key, old_socket)
+
+    assert old_socket.closed is True
+    assert manager.connections[key]["socket"] is new_socket
+    assert manager.is_friend_online("Alice") is True
+
+
+def test_registered_connection_has_send_lock_and_sends_through_it():
+    manager = ConnectionManager(my_name="Me", tcp_port=7779)
+    sock = DummySocket()
+
+    key = manager._register_connection(sock, "172.30.0.1", "Alice", 7780)
+    ok = manager.send_to_friend("Alice", b"payload")
+
+    assert ok is True
+    assert sock.sent == [b"payload"]
+    assert "send_lock" in manager.connections[key]
