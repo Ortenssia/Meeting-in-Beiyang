@@ -51,7 +51,7 @@ python -m pytest -q
 Current validation result:
 
 ```text
-42 passed
+44 passed
 ```
 
 ## Android Build
@@ -68,10 +68,18 @@ buildozer android debug
 ```text
 code_share/
   screens/      Kivy UI screens
-  services/     UDP discovery, TCP connection pool, message relay, SQLite storage
+  services/     Social runtime, UDP discovery, TCP connection pool, message relay, SQLite storage
   utils/        Protocol and helper functions
 tests/          Unit tests for protocol, database, and social flow
 main.py         Application entry point
 buildozer.spec  Android packaging configuration
 received_files/ Local inbox for files received from friends
 ```
+
+## Runtime Architecture
+
+`SocialRuntime` is the boundary between the Kivy UI and the P2P system. It owns
+identity loading, UDP discovery, TCP connections, relationship updates, message
+relay, file transfer callbacks, lifecycle start/stop, and health diagnostics.
+Screens should call the App-level methods instead of touching lower-level
+services directly.

@@ -17,11 +17,7 @@ from screens.chat_screen import ChatScreen
 from screens.profile_screen import ProfileScreen
 from screens.settings_screen import SettingsScreen
 
-from services.udp_service import UDPService
-from services.connection_manager import ConnectionManager
-from services.friend_db import FriendDB
-from services.message_service import MessageService
-from services.social_service import SocialService
+from services.social_runtime import RuntimeConfig, SocialRuntime
 
 from utils.helpers import Helpers
 from utils.protocol import Protocol
@@ -401,6 +397,7 @@ class CodeShareApp(App):
         self.udp_service = None
         self.message_service = None
         self.social_service = None
+        self.runtime = None
 
     def build(self):
         self.title = "相识北洋"
@@ -419,127 +416,53 @@ class CodeShareApp(App):
         return sm
 
     def _init_services(self):
-        # 1. 初始化数据库
-        self.friend_db = FriendDB(self.db_path)
+        self.runtime = SocialRuntime(
+            RuntimeConfig(
+                tcp_port=self.tcp_port,
+                udp_port=self.udp_port,
+                db_path=self.db_path,
+                name_override=self.name_override,
+                receive_dir="received_files",
+            )
+        ).initialize()
+        self.runtime.on_discovery_changed = self._on_device_found
+        self.runtime.on_online_changed = self._on_online_changed
+        self.runtime.on_friends_changed = self._on_friends_changed
+        self.runtime.on_message_received = self._on_service_message_received
+        self.runtime.on_friend_request = self._on_service_friend_request
+        self.runtime.on_friend_accepted = self._on_service_friend_accepted
+        self.runtime.on_error = self._on_error
+        self._mirror_runtime_state()
 
-        # 从数据库加载上次保存的昵称和个性化设置
-        my_profile = self.friend_db.get_my_profile()
-        if self.name_override:
-            my_profile["name"] = self.name_override
-            self.friend_db.save_profile(my_profile)
-            self.device_name = self.name_override
-        if my_profile:
-            # 如果命令行没有强行指定名字，才用数据库里的
-            if not self.name_override and (self.device_name == Helpers.get_hostname() or not self.device_name):
-                if my_profile.get("name"):
-                    self.device_name = my_profile["name"]
-            self.custom_background = my_profile.get("background", "")
-            self.custom_avatar = my_profile.get("avatar", "")
-        self.user_id = my_profile.get("user_id", "")
-        self.device_id = my_profile.get("device_id", "")
-
-        # 2. 初始化连接池管理器
-        self.connection_manager = ConnectionManager(
-            my_name=self.device_name,
-            tcp_port=self.tcp_port,
-            my_user_id=self.user_id,
-            my_device_id=self.device_id,
-        )
-
-        # 3. 初始化 UDP 广播发现服务
-        self.udp_service = UDPService(
-            port=self.udp_port,
-            device_name=self.device_name,
-            tcp_port=self.tcp_port,
-            user_id=self.user_id,
-            device_id=self.device_id,
-        )
-
-        # 4. 初始化消息中继服务
-        self.message_service = MessageService(
-            connection_manager=self.connection_manager,
-            friend_db=self.friend_db,
-            receive_dir="received_files",
-        )
-        self.social_service = SocialService(
-            friend_db=self.friend_db,
-            connection_manager=self.connection_manager,
-            udp_service=self.udp_service,
-        )
-
-        # 5. 绑定回调
-        self.udp_service.on_device_found = self._on_device_found
-        self.udp_service.on_device_offline = self._on_device_offline
-
-        self.connection_manager.on_friend_connected = self._on_friend_connected
-        self.connection_manager.on_friend_disconnected = self._on_friend_disconnected
-        self.connection_manager.on_message_received = self._on_message_received
-        self.connection_manager.on_error = self._on_error
-
-        self.message_service.on_message_received = self._on_service_message_received
-        self.message_service.on_friend_request = self._on_service_friend_request
-        self.message_service.on_friend_accepted = self._on_service_friend_accepted
+    def _mirror_runtime_state(self):
+        self.device_name = self.runtime.device_name
+        self.user_id = self.runtime.user_id
+        self.device_id = self.runtime.device_id
+        self.custom_background = self.runtime.custom_background
+        self.custom_avatar = self.runtime.custom_avatar
+        self.friend_db = self.runtime.friend_db
+        self.connection_manager = self.runtime.connection_manager
+        self.udp_service = self.runtime.udp_service
+        self.message_service = self.runtime.message_service
+        self.social_service = self.runtime.social_service
 
     def on_start(self):
-        # 启动所有后台线程与网络监听
-        if self.udp_service:
-            self.udp_service.start()
-        if self.connection_manager:
-            self.connection_manager.start_server()
-        if self.message_service:
-            self.message_service.start()
+        if self.runtime:
+            self.runtime.start()
 
     def on_stop(self):
-        # 停止所有服务与线程释放资源
-        if self.udp_service:
-            self.udp_service.stop()
-        if self.connection_manager:
-            self.connection_manager.stop()
-        if self.message_service:
-            self.message_service.stop()
-        if self.friend_db:
-            self.friend_db.close()
+        if self.runtime:
+            self.runtime.stop()
 
     # ================================================================== #
     #  服务层回调处理
     # ================================================================== #
 
     @mainthread
-    def _on_device_found(self, device_info):
+    def _on_device_found(self):
         discover = self.root.get_screen('discover')
         if discover:
             discover._refresh_discovered()
-
-        # 支持移动性：如果发现的设备是已存好友且 IP 变更，则更新地址簿并重连
-        name = device_info.device_name
-        ip = device_info.ip
-        port = device_info.tcp_port
-        friend = (
-            self.friend_db.get_friend_by_user_id(getattr(device_info, "user_id", ""))
-            or self.friend_db.get_friend(name)
-        )
-        if friend:
-            old_ip = friend.get("ip", "")
-            old_port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
-            if old_ip != ip or old_port != port:
-                self.friend_db.add_friend(
-                    name=friend.get("name", name),
-                    ip=ip,
-                    port=port,
-                    tags=friend.get("tags", []),
-                    bio=friend.get("bio", ""),
-                    category=friend.get("category", "朋友"),
-                    user_id=friend.get("user_id", ""),
-                    status=friend.get("status", "accepted"),
-                )
-                print(f"[App] 检测到好友 {name} 地址变更: {old_ip}:{old_port} -> {ip}:{port}")
-            # 如果未连接，在后台发起 TCP 连接
-            if not self.connection_manager.is_connected(ip, port):
-                threading.Thread(
-                    target=self.connection_manager.connect_to_friend,
-                    args=(ip, port, friend.get("name", name)),
-                    daemon=True
-                ).start()
 
     @mainthread
     def _on_device_offline(self, ip):
@@ -548,30 +471,21 @@ class CodeShareApp(App):
             discover._refresh_discovered()
 
     @mainthread
-    def _on_friend_connected(self, name, ip):
+    def _on_online_changed(self):
         discover = self.root.get_screen('discover')
         if discover:
             discover._refresh_online_friends()
+
+    @mainthread
+    def _on_friends_changed(self):
         friends = self.root.get_screen('friends')
         if friends:
             friends.refresh()
-
-        # 触发离线消息同步
-        if self.message_service:
-            threading.Thread(
-                target=self.message_service.flush_pending_messages,
-                args=(name,),
-                daemon=True
-            ).start()
 
     @mainthread
     def _on_friend_disconnected(self, ip):
-        discover = self.root.get_screen('discover')
-        if discover:
-            discover._refresh_online_friends()
-        friends = self.root.get_screen('friends')
-        if friends:
-            friends.refresh()
+        self._on_online_changed()
+        self._on_friends_changed()
 
     def _on_message_received(self, ip, data):
         # 将接收到的原始网络包传递给消息服务进一步解析
@@ -722,10 +636,9 @@ class CodeShareApp(App):
 
     def set_tcp_port(self, port):
         self.tcp_port = port
-        if self.connection_manager:
-            self.connection_manager.tcp_port = port
-        if self.udp_service:
-            self.udp_service.tcp_port = port
+        if self.runtime:
+            self.runtime.set_tcp_port(port)
+            self._mirror_runtime_state()
 
     def get_my_profile(self):
         p = self.friend_db.get_my_profile()
@@ -735,32 +648,16 @@ class CodeShareApp(App):
         return p
 
     def save_profile(self, profile):
-        self.friend_db.save_profile(profile)
-        saved = self.friend_db.get_my_profile()
-        self.device_name = profile.get("name", self.device_name)
-        self.user_id = saved.get("user_id", "")
-        self.device_id = saved.get("device_id", "")
-        if "background" in profile:
-            self.custom_background = profile["background"]
-        if "avatar" in profile:
-            self.custom_avatar = profile["avatar"]
-        if self.udp_service:
-            self.udp_service.device_name = self.device_name
-            self.udp_service.user_id = self.user_id
-            self.udp_service.device_id = self.device_id
-        if self.connection_manager:
-            self.connection_manager.my_name = self.device_name
-            self.connection_manager.my_user_id = self.user_id
-            self.connection_manager.my_device_id = self.device_id
+        if self.runtime:
+            self.runtime.save_profile(profile)
+            self._mirror_runtime_state()
 
     def scan_for_people(self):
-        if self.udp_service:
-            self.udp_service.manual_scan()
+        if self.runtime:
+            self.runtime.scan_for_people()
 
     def get_discovered_people(self):
-        if self.social_service:
-            return self.social_service.get_discovered_cards(self.user_id, self.device_name)
-        return []
+        return self.runtime.get_discovered_people() if self.runtime else []
 
     def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT, user_id=""):
         if self.is_existing_friend(name, ip, port, user_id):
@@ -790,14 +687,10 @@ class CodeShareApp(App):
         )
 
     def get_all_friends(self):
-        if self.social_service:
-            return self.social_service.get_friend_cards()
-        return []
+        return self.runtime.get_all_friends() if self.runtime else []
 
     def get_online_friends(self):
-        if self.social_service:
-            return self.social_service.get_online_friend_cards()
-        return []
+        return self.runtime.get_online_friends() if self.runtime else []
 
     def delete_friend(self, name):
         friend = self.friend_db.get_friend(name)
@@ -863,12 +756,13 @@ class CodeShareApp(App):
 
     def get_chat_list(self):
         try:
-            if self.social_service:
-                return self.social_service.get_chat_list()
-            return []
+            return self.runtime.get_chat_list() if self.runtime else []
         except Exception as e:
             print(f"获取聊天列表失败: {e}")
             return []
+
+    def get_runtime_health(self):
+        return self.runtime.get_health() if self.runtime else {}
 
     def clear_pending_messages(self, friend_name):
         if self.friend_db:
