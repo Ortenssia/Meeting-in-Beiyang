@@ -17,10 +17,10 @@ from screens.chat_screen import ChatScreen
 from screens.profile_screen import ProfileScreen
 from screens.settings_screen import SettingsScreen
 
-from services.social_runtime import RuntimeConfig, SocialRuntime
+from core.services.social_runtime import RuntimeConfig, SocialRuntime
 
-from utils.helpers import Helpers
-from utils.protocol import Protocol
+from core.utils.helpers import Helpers
+from core.utils.protocol import Protocol
 from kivy.core.text import LabelBase
 
 

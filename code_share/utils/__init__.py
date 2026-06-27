@@ -1,3 +1,4 @@
-from .protocol import Protocol
-from .helpers import Helpers
-__all__ = ['Protocol', 'Helpers']
+try:
+    from code_share.core.utils import *  # noqa: F401,F403
+except ImportError:
+    from core.utils import *  # noqa: F401,F403
