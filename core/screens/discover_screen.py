@@ -484,6 +484,20 @@ class DiscoverScreen(Screen):
         discovered_heading.bind(size=discovered_heading.setter("text_size"))
         root.add_widget(discovered_heading)
 
+        self.network_diag_label = Label(
+            text="网络诊断：等待扫描",
+            font_size="10sp",
+            size_hint_y=None,
+            height=dp(36),
+            halign="left",
+            valign="middle",
+            color=(0.47, 0.50, 0.62, 1),
+            shorten=True,
+            shorten_from="right",
+        )
+        self.network_diag_label.bind(size=self.network_diag_label.setter("text_size"))
+        root.add_widget(self.network_diag_label)
+
         # -- 列表与雷达容器 (利用这个容器在扫描时动态切换，避免 Kivy 尺寸 bug) --
         self.list_container = BoxLayout(orientation="vertical", size_hint_y=1)
         root.add_widget(self.list_container)
@@ -573,6 +587,7 @@ class DiscoverScreen(Screen):
         """进入界面时自动刷新发现列表和在线好友列表。"""
         self._refresh_discovered()
         self._refresh_online_friends()
+        self._refresh_network_diagnostics()
 
     # ---- 公共 API --------------------------------------------------------
 
@@ -588,6 +603,7 @@ class DiscoverScreen(Screen):
         count = len(people)
         if not self.radar_scanner.scanning:
             self.scan_status.text = f"发现 {count} 人" if count else "未发现附近的人"
+        self._refresh_network_diagnostics()
 
     @mainthread
     def update_online_friends(self, friends):
@@ -603,6 +619,27 @@ class DiscoverScreen(Screen):
     def set_scan_status(self, text: str):
         """设置扫描状态文本（线程安全）。"""
         self.scan_status.text = text
+
+    @mainthread
+    def update_network_diagnostics(self, diagnostics: dict):
+        """显示当前发现链路诊断摘要。"""
+        if not diagnostics:
+            self.network_diag_label.text = "网络诊断：暂无数据"
+            return
+        ips = diagnostics.get("local_ips") or []
+        primary_ip = next((ip for ip in ips if not ip.startswith("127.")), ips[0] if ips else "未知")
+        udp_state = "开" if diagnostics.get("udp_running") else "关"
+        tcp_state = "开" if diagnostics.get("tcp_running") else "关"
+        text = (
+            f"网络诊断：本机 {primary_ip} | UDP {diagnostics.get('udp_port', '-')}/{udp_state} "
+            f"| TCP {diagnostics.get('tcp_port', '-')}/{tcp_state} | "
+            f"目标 {diagnostics.get('last_targets', 0)} | "
+            f"发出 {diagnostics.get('send_success', 0)}/{diagnostics.get('send_attempts', 0)} | "
+            f"收到 {diagnostics.get('receive_packets', 0)} | {diagnostics.get('hint', '')}"
+        )
+        if diagnostics.get("last_error"):
+            text += f" | 最近错误: {diagnostics.get('last_error')}"
+        self.network_diag_label.text = text
 
     # ---- 事件处理 --------------------------------------------------------
 
@@ -625,6 +662,8 @@ class DiscoverScreen(Screen):
             # 延时恢复按钮状态
             from kivy.clock import Clock
             Clock.schedule_once(lambda dt: self._enable_scan_btn(), 5)
+            Clock.schedule_once(lambda dt: self._refresh_network_diagnostics(), 1)
+            Clock.schedule_once(lambda dt: self._refresh_network_diagnostics(), 3)
 
     def _enable_scan_btn(self):
         self.scan_btn.disabled = False
@@ -637,6 +676,7 @@ class DiscoverScreen(Screen):
             self.list_container.add_widget(self.discovered_list)
         
         self._refresh_discovered()  # 扫描完刷新列表并重置文字
+        self._refresh_network_diagnostics()
 
     def _on_manual_add(self, _btn):
         """弹出手动添加好友对话框，直接向指定 IP 发送 TCP 好友请求。"""
@@ -777,6 +817,12 @@ class DiscoverScreen(Screen):
             people = app.get_discovered_people()
             if people is not None:
                 self.update_discovered_people(people)
+
+    def _refresh_network_diagnostics(self):
+        """从 App 获取网络发现诊断并刷新。"""
+        app = get_root_app()
+        if hasattr(app, "get_network_diagnostics"):
+            self.update_network_diagnostics(app.get_network_diagnostics())
 
     def _refresh_online_friends(self):
         """从 App 获取在线好友列表并刷新。"""

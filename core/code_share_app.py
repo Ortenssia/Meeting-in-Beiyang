@@ -663,6 +663,9 @@ class CodeShareApp(App):
     def get_discovered_people(self):
         return self.runtime.get_discovered_people() if self.runtime else []
 
+    def get_network_diagnostics(self):
+        return self.runtime.get_network_diagnostics() if self.runtime else {}
+
     def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT, user_id=""):
         if self.is_existing_friend(name, ip, port, user_id):
             return False

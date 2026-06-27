@@ -106,6 +106,22 @@ class UDPService:
 
         # 设备列表锁，保护多线程读写 devices 字典
         self._devices_lock = threading.Lock()
+        self._diagnostics_lock = threading.Lock()
+        self._diagnostics = {
+            "started_at": None,
+            "last_scan_at": None,
+            "last_receive_at": None,
+            "last_device_at": None,
+            "last_error": "",
+            "last_targets": 0,
+            "last_probe_ports": [],
+            "send_attempts": 0,
+            "send_success": 0,
+            "send_errors": 0,
+            "receive_packets": 0,
+            "receive_ping": 0,
+            "receive_pong": 0,
+        }
 
         # 回调函数（由上层设置）
         self.on_device_found: Optional[Callable[[DeviceInfo], None]] = None
@@ -190,7 +206,10 @@ class UDPService:
             self.sock.bind(("0.0.0.0", self.port))
             self.sock.setblocking(False)
             self.running = True
+            self._mark_diagnostic(started_at=time.time(), last_error="")
         except Exception as e:
+            message = f"UDP {self.port} bind failed: {e}"
+            self._mark_diagnostic(last_error=message)
             print(f"[UDPService] Error binding UDP socket on port {self.port}: {e}")
             self.sock = None
             self.running = False
@@ -248,15 +267,17 @@ class UDPService:
                 self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 targets = self._get_broadcast_targets()
                 # 探测常见 UDP 发现端口，支持单机多实例测试
-                probe_ports = list(set([8890, 8891, 8892, 8893, self.port]))
+                probe_ports = self._get_probe_ports()
+                self._mark_diagnostic(
+                    last_scan_at=time.time(),
+                    last_targets=len(targets),
+                    last_probe_ports=probe_ports,
+                )
                 for target in targets:
                     for p_port in probe_ports:
-                        try:
-                            self.sock.sendto(ping_data, (target, p_port))
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                        self._send_probe(ping_data, target, p_port)
+            except Exception as e:
+                self._mark_diagnostic(last_error=f"UDP broadcast failed: {e}")
             time.sleep(5)
 
     def _receive_worker(self):
@@ -271,6 +292,8 @@ class UDPService:
 
                 packet_type = packet.get("type")
                 sender_ip = addr[0]
+                self._bump_diagnostic("receive_packets")
+                self._mark_diagnostic(last_receive_at=time.time())
 
                 # 忽略自己发出的包，优先用 device_id；旧包回退到端口/昵称。
                 local_ips = Helpers.get_local_ips()
@@ -289,6 +312,7 @@ class UDPService:
                         continue
 
                 if packet_type == Protocol.UDP_PING:
+                    self._bump_diagnostic("receive_ping")
                     # 收到 PING -- 回复 PONG 并记录设备
                     device_name = packet.get("device_name", "Unknown")
                     tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
@@ -308,6 +332,7 @@ class UDPService:
                     self._add_device(sender_ip, device_name, tcp_port, user_id, device_id)
 
                 elif packet_type == Protocol.UDP_PONG:
+                    self._bump_diagnostic("receive_pong")
                     # 收到 PONG -- 记录设备
                     device_name = packet.get("device_name", "Unknown")
                     tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
@@ -321,7 +346,8 @@ class UDPService:
             except BlockingIOError:
                 # 非阻塞 socket 暂无数据
                 time.sleep(0.05)
-            except Exception:
+            except Exception as e:
+                self._mark_diagnostic(last_error=f"UDP receive failed: {e}")
                 time.sleep(0.05)
 
     def _cleanup_worker(self):
@@ -398,6 +424,7 @@ class UDPService:
                     ip, device_name, tcp_port, current_time, user_id, device_id
                 )
                 is_new = True
+        self._mark_diagnostic(last_device_at=current_time)
 
         # 在锁外触发回调，避免死锁
         if (is_new or is_update_notify) and self.on_device_found:
@@ -419,6 +446,8 @@ class UDPService:
         立即向广播地址以及子网内的所有主机发送 PING 包，绕过路由器的多播/广播限制。
         """
         if not self.sock:
+            message = "UDP socket is not initialized. Check firewall or port binding."
+            self._mark_diagnostic(last_error=message)
             print("[UDPService] Cannot scan, UDP socket not initialized.")
             return
 
@@ -429,16 +458,18 @@ class UDPService:
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             
             # 探测端口列表，用于支持单机多实例测试
-            probe_ports = list(set([8890, 8891, 8892, 8893, self.port]))
+            probe_ports = self._get_probe_ports()
             
             # 1. 广播扫描
             targets = self._get_broadcast_targets()
+            self._mark_diagnostic(
+                last_scan_at=time.time(),
+                last_targets=len(targets),
+                last_probe_ports=probe_ports,
+            )
             for target in targets:
                 for p_port in probe_ports:
-                    try:
-                        self.sock.sendto(ping_data, (target, p_port))
-                    except Exception:
-                        pass
+                    self._send_probe(ping_data, target, p_port)
             
             # 2. 子网单播扫描 (突破路由器对广播的禁用)
             try:
@@ -446,28 +477,90 @@ class UDPService:
                 loopback_targets = ["127.0.0.1"]
                 for host in loopback_targets:
                     for p_port in probe_ports:
-                        try:
-                            self.sock.sendto(ping_data, (host, p_port))
-                        except Exception:
-                            pass
+                        self._send_probe(ping_data, host, p_port)
                 for iface in ifaces:
                     ip = iface.get("ip")
                     mask = iface.get("mask")
                     if ip:
                         for p_port in probe_ports:
-                            try:
-                                self.sock.sendto(ping_data, (ip, p_port))
-                            except Exception:
-                                pass
+                            self._send_probe(ping_data, ip, p_port)
                     if ip and mask and not ip.startswith("127."):
                         hosts = Helpers.get_subnet_hosts(ip, mask)
                         for host in hosts:
                             for p_port in probe_ports:
-                                try:
-                                    self.sock.sendto(ping_data, (host, p_port))
-                                except Exception:
-                                    pass
+                                self._send_probe(ping_data, host, p_port)
             except Exception as e:
+                self._mark_diagnostic(last_error=f"Subnet unicast scan failed: {e}")
                 print(f"[UDPService] Subnet unicast scan failed: {e}")
-        except Exception:
-            pass
+        except Exception as e:
+            self._mark_diagnostic(last_error=f"Manual scan failed: {e}")
+
+    def _get_probe_ports(self) -> List[int]:
+        """Return discovery ports used by both normal and manual scans."""
+        return sorted(set([8890, 8891, 8892, 8893, self.port]))
+
+    def _send_probe(self, payload: bytes, host: str, port: int) -> bool:
+        self._bump_diagnostic("send_attempts")
+        try:
+            self.sock.sendto(payload, (host, port))
+            self._bump_diagnostic("send_success")
+            return True
+        except Exception as e:
+            self._bump_diagnostic("send_errors")
+            self._mark_diagnostic(last_error=f"UDP send to {host}:{port} failed: {e}")
+            return False
+
+    def _mark_diagnostic(self, **values):
+        with self._diagnostics_lock:
+            self._diagnostics.update(values)
+
+    def _bump_diagnostic(self, key: str, amount: int = 1):
+        with self._diagnostics_lock:
+            self._diagnostics[key] = int(self._diagnostics.get(key, 0) or 0) + amount
+
+    def get_diagnostics(self) -> dict:
+        """Return a snapshot useful for explaining why discovery is empty."""
+        try:
+            interfaces = Helpers._detect_interfaces()
+        except Exception as e:
+            interfaces = []
+            self._mark_diagnostic(last_error=f"Interface detection failed: {e}")
+
+        with self._devices_lock:
+            device_count = len([d for d in self.devices.values() if d.is_online()])
+        with self._diagnostics_lock:
+            diagnostics = dict(self._diagnostics)
+
+        local_ips = []
+        for iface in interfaces:
+            ip = iface.get("ip")
+            if ip and ip not in local_ips:
+                local_ips.append(ip)
+        if "127.0.0.1" not in local_ips:
+            local_ips.append("127.0.0.1")
+
+        diagnostics.update({
+            "udp_port": self.port,
+            "tcp_port": self.tcp_port,
+            "udp_running": self.running,
+            "has_socket": self.sock is not None,
+            "device_count": device_count,
+            "local_ips": local_ips,
+            "interfaces": interfaces,
+            "probe_ports": self._get_probe_ports(),
+        })
+        diagnostics["hint"] = self._diagnostic_hint(diagnostics)
+        return diagnostics
+
+    def _diagnostic_hint(self, diagnostics: dict) -> str:
+        if not diagnostics.get("udp_running") or not diagnostics.get("has_socket"):
+            return "UDP 没有启动，优先检查端口占用和 Windows 防火墙。"
+        if not diagnostics.get("interfaces"):
+            return "没有识别到可用网卡，请检查网络连接或 VPN/虚拟网卡优先级。"
+        if diagnostics.get("send_success", 0) == 0:
+            return "扫描包没有成功发出，通常是 socket 或系统权限问题。"
+        if diagnostics.get("receive_packets", 0) == 0:
+            return "已发出扫描但没有收到回应；常见原因是防火墙、不同网段或 AP 隔离。"
+        if diagnostics.get("device_count", 0) == 0:
+            return "收到过 UDP 包但没有可用用户，可能是协议不匹配或对方被识别为本机。"
+        return "发现链路正常。"

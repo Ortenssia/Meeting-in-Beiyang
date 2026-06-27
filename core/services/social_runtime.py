@@ -163,6 +163,20 @@ class SocialRuntime:
             "friend_count": len(self.get_all_friends()),
         }
 
+    def get_network_diagnostics(self) -> dict:
+        udp_diag = self.udp_service.get_diagnostics() if self.udp_service else {}
+        health = self.get_health()
+        return {
+            **udp_diag,
+            "name": self.device_name,
+            "user_id": self.user_id,
+            "device_id": self.device_id,
+            "tcp_running": health["tcp_running"],
+            "discovered_count": health["discovered_count"],
+            "online_count": health["online_count"],
+            "friend_count": health["friend_count"],
+        }
+
     def scan_for_people(self):
         if self.udp_service:
             self.udp_service.manual_scan()
