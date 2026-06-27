@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from code_share.services.connection_manager import ConnectionManager
+from core.services.connection_manager import ConnectionManager
 
 
 class DummySocket:

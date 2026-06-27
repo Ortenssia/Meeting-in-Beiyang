@@ -14,6 +14,7 @@
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -32,12 +33,17 @@ class FriendDB:
     所有数据库操作均通过内部互斥锁保证线程安全。
     """
 
-    def __init__(self, db_path: str = "friends.db"):
+    def __init__(self, db_path: str = "assets/data/friends.db"):
         """
         Args:
-            db_path: SQLite 数据库文件路径，默认为 "friends.db"。
+            db_path: SQLite 数据库文件路径，默认为 "assets/data/friends.db"。
         """
+        if db_path and not os.path.dirname(db_path):
+            db_path = os.path.join("assets", "data", db_path)
         self.db_path = db_path
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         self.conn: Optional[sqlite3.Connection] = None
         self._lock = threading.Lock()
         self._init_db()

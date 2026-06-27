@@ -9,7 +9,10 @@ test_*.db
 
 *.log
 *.tmp
-received_files/
+assets/data/*.db
+assets/data/*.db-journal
+assets/received_files/*
+!assets/received_files/.gitkeep
 
 bin/
 *.apk

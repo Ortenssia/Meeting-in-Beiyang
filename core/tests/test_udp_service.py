@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from code_share.services import udp_service
-from code_share.services.udp_service import UDPService
+from core.services import udp_service
+from core.services.udp_service import UDPService
 
 
 def test_broadcast_targets_include_loopback_and_local_ip(monkeypatch):

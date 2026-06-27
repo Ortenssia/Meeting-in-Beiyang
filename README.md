@@ -41,17 +41,19 @@ python main.py --name Bob --port 7780 --udp-port 8891 --db bob.db
 The two instances must use different database files so they get different
 user/device identities. UDP discovery probes loopback, local interface IPs,
 broadcast addresses, and common discovery ports for this workflow.
+Database files created from plain names such as `alice.db` are stored under
+`assets/data/`.
 
 ## Run Tests
 
 ```powershell
-python -m pytest -q
+python -m pytest core/tests -q
 ```
 
 Current validation result:
 
 ```text
-45 passed
+46 passed
 ```
 
 ## Android Build
@@ -66,21 +68,18 @@ buildozer android debug
 ## Project Layout
 
 ```text
-code_share/
-  core/         Business/runtime core: protocol, helpers, services, storage
-  screens/      Kivy UI screens
-  services/     Compatibility imports for older code paths
-  utils/        Compatibility imports for older code paths
-tests/          Unit tests for protocol, database, and social flow
-assets/         Project assets placeholder for future images, icons, and media
+core/           Application code: UI screens, runtime, protocol, services, storage
+  tests/        Unit tests for protocol, database, and social flow
+assets/         Project assets, local databases, and received files
+  data/         Local SQLite databases (ignored except .gitkeep)
+  received_files/ Local inbox for files received from friends
 main.py         Application entry point
 buildozer.spec  Android packaging configuration
-received_files/ Local inbox for files received from friends
 ```
 
 ## Runtime Architecture
 
-`code_share/core` is the non-UI boundary. `SocialRuntime` owns identity loading,
+`core` is the application code boundary. `SocialRuntime` owns identity loading,
 UDP discovery, TCP connections, relationship updates, message relay, file
 transfer callbacks, lifecycle start/stop, and health diagnostics. Screens should
 call the App-level methods instead of touching lower-level services directly.

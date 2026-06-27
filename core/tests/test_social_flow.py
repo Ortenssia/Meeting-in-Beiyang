@@ -11,8 +11,8 @@ import base64
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from code_share.services.message_service import MessageService
-from code_share.services.friend_db import FriendDB
+from core.services.message_service import MessageService
+from core.services.friend_db import FriendDB
 
 
 class MockConnectionManager:

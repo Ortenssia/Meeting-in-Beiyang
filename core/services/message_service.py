@@ -63,7 +63,7 @@ class MessageService:
     HEARTBEAT_INTERVAL = 15
     FILE_CHUNK_SIZE = 48 * 1024
 
-    def __init__(self, connection_manager, friend_db, receive_dir: str = "received_files"):
+    def __init__(self, connection_manager, friend_db, receive_dir: str = "assets/received_files"):
         """
         初始化消息服务。
 

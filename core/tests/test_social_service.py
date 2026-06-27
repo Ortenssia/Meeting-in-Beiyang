@@ -7,8 +7,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from code_share.services.friend_db import FriendDB
-from code_share.services.social_service import SocialService
+from core.services.friend_db import FriendDB
+from core.services.social_service import SocialService
 
 
 class DummyConnection:

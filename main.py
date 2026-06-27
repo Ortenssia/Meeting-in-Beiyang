@@ -39,11 +39,11 @@ try:
 except Exception as e:
     print(f"[CodeShare Diagnostic] Failed to debug mainpyfile: {e}")
 
-print(f"[CodeShare Diagnostic] 'code_share' in current dir: {os.path.exists('code_share')}")
+print(f"[CodeShare Diagnostic] 'core' in current dir: {os.path.exists('core')}")
 print("=" * 60)
 
 def is_valid_root(path):
-    return path and os.path.isdir(path) and os.path.isdir(os.path.join(path, 'code_share'))
+    return path and os.path.isdir(path) and os.path.isdir(os.path.join(path, 'core'))
 
 # 1. 尝试从 __file__ 获取（标准运行方式）
 try:
@@ -166,15 +166,15 @@ sys.path.insert(0, project_root)
 print(f"[CodeShare] Resolved project root: {project_root}")
 print(f"[CodeShare] sys.path: {sys.path[:3]}")
 
-# 调试：如果在解析的路径下找不到 code_share 文件夹，输出目录内容
-if not os.path.isdir(os.path.join(project_root, 'code_share')):
-    print(f"[CodeShare] ERROR: 'code_share' directory not found in resolved root '{project_root}'!")
+# 调试：如果在解析的路径下找不到 core 文件夹，输出目录内容
+if not os.path.isdir(os.path.join(project_root, 'core')):
+    print(f"[CodeShare] ERROR: 'core' directory not found in resolved root '{project_root}'!")
     try:
         print(f"[CodeShare] Contents of '{project_root}': {os.listdir(project_root)}")
     except Exception as e:
         print(f"[CodeShare] Cannot list contents of '{project_root}': {e}")
 
-from code_share.code_share_app import CodeShareApp
+from core.code_share_app import CodeShareApp
 import argparse
 
 if __name__ == '__main__':
@@ -188,9 +188,14 @@ if __name__ == '__main__':
     parser.add_argument("--name", type=str, default="", help="Username/Device name Override")
     args, unknown = parser.parse_known_args()
     
+    db_path = args.db
+    if db_path and not os.path.dirname(db_path):
+        db_path = os.path.join("assets", "data", db_path)
+    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+
     CodeShareApp(
         tcp_port=args.port,
         udp_port=args.udp_port,
-        db_path=args.db,
+        db_path=db_path,
         name_override=args.name
     ).run()

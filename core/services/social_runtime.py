@@ -32,9 +32,9 @@ except ImportError:
 class RuntimeConfig:
     tcp_port: int = Protocol.DEFAULT_TCP_PORT
     udp_port: int = Protocol.DEFAULT_UDP_PORT
-    db_path: str = "friends.db"
+    db_path: str = "assets/data/friends.db"
     name_override: str = ""
-    receive_dir: str = "received_files"
+    receive_dir: str = "assets/received_files"
 
 
 class SocialRuntime:

@@ -7,8 +7,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from code_share.services import social_runtime
-from code_share.services.social_runtime import RuntimeConfig, SocialRuntime
+from core.services import social_runtime
+from core.services.social_runtime import RuntimeConfig, SocialRuntime
 
 
 class ImmediateThread:

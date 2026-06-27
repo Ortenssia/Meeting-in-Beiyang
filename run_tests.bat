@@ -13,7 +13,7 @@ if errorlevel 1 (
 )
 
 echo [1/1] 运行所有测试...
-python -m pytest tests/ -v --tb=short
+python -m pytest core/tests/ -v --tb=short
 
 echo.
 echo ============================================

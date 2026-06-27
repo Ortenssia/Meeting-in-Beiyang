@@ -8,25 +8,16 @@ import os
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from code_share.services.friend_db import FriendDB
+from core.services.friend_db import FriendDB
 
 
 @pytest.fixture
-def db():
-    db_path = "test_friends.db"
-    # Ensure no leftover DB from previous runs
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    
-    friend_db = FriendDB(db_path)
+def db(tmp_path):
+    db_path = tmp_path / "test_friends.db"
+    friend_db = FriendDB(str(db_path))
     yield friend_db
     
     friend_db.close()
-    if os.path.exists(db_path):
-        try:
-            os.remove(db_path)
-        except PermissionError:
-            pass
 
 
 class TestFriendDB:

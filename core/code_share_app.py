@@ -384,7 +384,7 @@ class CodeShareApp(App):
     custom_background = StringProperty("")
     custom_avatar = StringProperty("")
 
-    def __init__(self, tcp_port=Protocol.DEFAULT_TCP_PORT, udp_port=Protocol.DEFAULT_UDP_PORT, db_path="friends.db", name_override="", **kwargs):
+    def __init__(self, tcp_port=Protocol.DEFAULT_TCP_PORT, udp_port=Protocol.DEFAULT_UDP_PORT, db_path="assets/data/friends.db", name_override="", **kwargs):
         super().__init__(**kwargs)
         self.tcp_port = tcp_port
         self.udp_port = udp_port
@@ -422,7 +422,7 @@ class CodeShareApp(App):
                 udp_port=self.udp_port,
                 db_path=self.db_path,
                 name_override=self.name_override,
-                receive_dir="received_files",
+                receive_dir="assets/received_files",
             )
         ).initialize()
         self.runtime.on_discovery_changed = self._on_device_found
