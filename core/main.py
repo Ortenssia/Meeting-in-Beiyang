@@ -195,10 +195,6 @@ if not is_valid_root(project_root):
     except Exception as e:
         print(f"[CodeShare] Cannot list contents of '{project_root}': {e}")
 
-try:
-    from core.code_share_app import CodeShareApp
-except ImportError:
-    from code_share_app import CodeShareApp
 import argparse
 
 if __name__ == '__main__':
@@ -216,6 +212,11 @@ if __name__ == '__main__':
     if db_path and not os.path.dirname(db_path):
         db_path = os.path.join("assets", "data", db_path)
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+
+    try:
+        from core.code_share_app import CodeShareApp
+    except ImportError:
+        from code_share_app import CodeShareApp
 
     CodeShareApp(
         tcp_port=args.port,

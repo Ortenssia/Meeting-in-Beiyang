@@ -1,26 +1,35 @@
 @echo off
-chcp 65001 >nul
+setlocal
+cd /d "%~dp0"
+set PIP_DISABLE_PIP_VERSION_CHECK=1
+
 echo ============================================
-echo   相识北洋 - 校园社交应用 (挑战3)
+echo   Meeting in Beiyang - Challenge 3
 echo ============================================
 echo.
 
-REM 检查 Python 是否安装
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未检测到 Python，请先安装 Python 3.8+
+    echo [ERROR] Python was not found. Please install Python 3.8 or newer.
     pause
     exit /b 1
 )
 
-echo [1/2] 检查并安装依赖...
+echo [1/2] Checking dependencies...
 pip install -r requirements.txt -q
+if errorlevel 1 (
+    echo [ERROR] Failed to install dependencies.
+    pause
+    exit /b 1
+)
 
 echo.
-echo [2/2] 启动应用...
+echo [2/2] Starting app...
 echo.
-echo 提示：按 Ctrl+C 可退出应用
-echo ============================================
-python core\main.py
+python core\main.py %*
 
+set EXIT_CODE=%ERRORLEVEL%
+echo.
+echo App exited with code %EXIT_CODE%.
 pause
+exit /b %EXIT_CODE%
