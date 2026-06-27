@@ -21,3 +21,9 @@ def test_assets_contain_local_data_directories():
     root = Path(__file__).resolve().parents[2]
     assert (root / "assets" / "data").is_dir()
     assert (root / "assets" / "received_files").is_dir()
+
+
+def test_root_does_not_contain_python_application_code():
+    root = Path(__file__).resolve().parents[2]
+    assert not (root / "main.py").exists()
+    assert (root / "core" / "main.py").is_file()

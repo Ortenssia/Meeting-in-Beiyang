@@ -731,7 +731,10 @@ class DiscoverScreen(Screen):
             if not name:
                 err_lbl.text = "姓名不能为空！"
                 return
-            from core.utils.helpers import Helpers
+            try:
+                from core.utils.helpers import Helpers
+            except ImportError:
+                from utils.helpers import Helpers
             if not Helpers.validate_ip(ip):
                 err_lbl.text = "IP 地址格式不合法！"
                 return

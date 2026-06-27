@@ -22,20 +22,20 @@ offline message relay through online friends.
 
 ```powershell
 pip install -r requirements.txt
-python main.py
+python core/main.py
 ```
 
 Optional runtime arguments:
 
 ```powershell
-python main.py --port 7779 --udp-port 8890 --db friends.db --name Alice
+python core/main.py --port 7779 --udp-port 8890 --db friends.db --name Alice
 ```
 
 Same-machine two-user test:
 
 ```powershell
-python main.py --name Alice --port 7779 --udp-port 8890 --db alice.db
-python main.py --name Bob --port 7780 --udp-port 8891 --db bob.db
+python core/main.py --name Alice --port 7779 --udp-port 8890 --db alice.db
+python core/main.py --name Bob --port 7780 --udp-port 8891 --db bob.db
 ```
 
 The two instances must use different database files so they get different
@@ -53,7 +53,7 @@ python -m pytest core/tests -q
 Current validation result:
 
 ```text
-46 passed
+47 passed
 ```
 
 ## Android Build
@@ -73,7 +73,7 @@ core/           Application code: UI screens, runtime, protocol, services, stora
 assets/         Project assets, local databases, and received files
   data/         Local SQLite databases (ignored except .gitkeep)
   received_files/ Local inbox for files received from friends
-main.py         Application entry point
+core/main.py    Application entry point
 buildozer.spec  Android packaging configuration
 ```
 

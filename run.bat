@@ -21,6 +21,6 @@ echo [2/2] 启动应用...
 echo.
 echo 提示：按 Ctrl+C 可退出应用
 echo ============================================
-python main.py
+python core\main.py
 
 pause

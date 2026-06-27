@@ -1,6 +1,6 @@
 """
 Code Share - 相识北洋社交应用 (挑战3)
-运行方式: python main.py
+运行方式: python core/main.py
 """
 import sys
 import os
@@ -43,14 +43,35 @@ print(f"[CodeShare Diagnostic] 'core' in current dir: {os.path.exists('core')}")
 print("=" * 60)
 
 def is_valid_root(path):
-    return path and os.path.isdir(path) and os.path.isdir(os.path.join(path, 'core'))
+    return (
+        path
+        and os.path.isdir(path)
+        and (
+            os.path.isfile(os.path.join(path, 'core', 'code_share_app.py'))
+            or os.path.isfile(os.path.join(path, 'code_share_app.py'))
+        )
+    )
+
+
+def normalize_project_root(path):
+    """Prefer the repository root when running from core/main.py locally."""
+    if not path:
+        return None
+    parent = os.path.dirname(path)
+    if (
+        os.path.basename(path).lower() == "core"
+        and os.path.isfile(os.path.join(path, "code_share_app.py"))
+        and os.path.isfile(os.path.join(parent, "core", "code_share_app.py"))
+    ):
+        return parent
+    return path
 
 # 1. 尝试从 __file__ 获取（标准运行方式）
 try:
     if '__file__' in globals() and __file__ and not __file__.startswith('<'):
         path = os.path.dirname(os.path.abspath(__file__))
         if is_valid_root(path):
-            project_root = path
+            project_root = normalize_project_root(path)
             print(f"[CodeShare] Method 1 (__file__) succeeded: {project_root}")
 except Exception as e:
     print(f"[CodeShare] Method 1 failed: {e}")
@@ -65,7 +86,7 @@ if not project_root:
                 candidate = locals_dict['mainpyfile']
                 path = os.path.dirname(os.path.abspath(candidate))
                 if is_valid_root(path):
-                    project_root = path
+                    project_root = normalize_project_root(path)
                     print(f"[CodeShare] Method 2 (Stack frame mainpyfile) succeeded: {project_root}")
                     break
             frame = frame.f_back
@@ -79,7 +100,7 @@ if not project_root:
         if hasattr(__main__, 'mainpyfile') and __main__.mainpyfile:
             path = os.path.dirname(os.path.abspath(__main__.mainpyfile))
             if is_valid_root(path):
-                project_root = path
+                project_root = normalize_project_root(path)
                 print(f"[CodeShare] Method 3 (__main__.mainpyfile) succeeded: {project_root}")
     except Exception as e:
         print(f"[CodeShare] Method 3 failed: {e}")
@@ -90,7 +111,7 @@ if not project_root:
         if sys.argv and sys.argv[0] and not sys.argv[0].startswith('<'):
             path = os.path.dirname(os.path.abspath(sys.argv[0]))
             if is_valid_root(path):
-                project_root = path
+                project_root = normalize_project_root(path)
                 print(f"[CodeShare] Method 4 (sys.argv[0]) succeeded: {project_root}")
     except Exception as e:
         print(f"[CodeShare] Method 4 failed: {e}")
@@ -100,7 +121,7 @@ if not project_root:
     try:
         path = os.getcwd()
         if is_valid_root(path):
-            project_root = path
+            project_root = normalize_project_root(path)
             print(f"[CodeShare] Method 5 (getcwd) succeeded: {project_root}")
     except Exception as e:
         print(f"[CodeShare] Method 5 failed: {e}")
@@ -132,7 +153,7 @@ if not project_root:
         curr = start_path
         for _ in range(5):
             if is_valid_root(curr):
-                project_root = curr
+                project_root = normalize_project_root(curr)
                 print(f"[CodeShare] Method 6 (Recursive scan) succeeded: {project_root}")
                 break
             parent = os.path.dirname(curr)
@@ -152,7 +173,7 @@ if not project_root:
     ]
     for candidate in candidates:
         if is_valid_root(candidate):
-            project_root = candidate
+            project_root = normalize_project_root(candidate)
             print(f"[CodeShare] Method 7 (Common paths) succeeded: {project_root}")
             break
 
@@ -166,15 +187,18 @@ sys.path.insert(0, project_root)
 print(f"[CodeShare] Resolved project root: {project_root}")
 print(f"[CodeShare] sys.path: {sys.path[:3]}")
 
-# 调试：如果在解析的路径下找不到 core 文件夹，输出目录内容
-if not os.path.isdir(os.path.join(project_root, 'core')):
-    print(f"[CodeShare] ERROR: 'core' directory not found in resolved root '{project_root}'!")
+# 调试：如果在解析的路径下找不到入口模块，输出目录内容
+if not is_valid_root(project_root):
+    print(f"[CodeShare] ERROR: app entry not found in resolved root '{project_root}'!")
     try:
         print(f"[CodeShare] Contents of '{project_root}': {os.listdir(project_root)}")
     except Exception as e:
         print(f"[CodeShare] Cannot list contents of '{project_root}': {e}")
 
-from core.code_share_app import CodeShareApp
+try:
+    from core.code_share_app import CodeShareApp
+except ImportError:
+    from code_share_app import CodeShareApp
 import argparse
 
 if __name__ == '__main__':
