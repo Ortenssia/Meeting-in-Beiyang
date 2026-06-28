@@ -249,14 +249,34 @@ class ProfileView:
         self.req_input = TagInput("必选兴趣（如：计算机）")
         self.opt_input = TagInput("可选兴趣（如：唱歌）")
 
-        self.min_match = ft.Dropdown(
-            label="最低匹配标签数",
-            value="1",
-            on_select=lambda _e: self._auto_save("conditions"),
-            border_radius=12,
-            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            options=[ft.dropdown.Option(str(i)) for i in range(1, 11)],
+        # Minimum match count counter component
+        self.min_match_value = ft.Text("1", size=14, weight=ft.FontWeight.BOLD)
+        self.min_match_row = ft.Row(
+            [
+                ft.Text("最少匹配标签数", size=T.FS_BODY, color=ft.Colors.ON_SURFACE, weight=ft.FontWeight.W_500),
+                ft.Container(expand=True),
+                ft.Row(
+                    [
+                        ft.IconButton(
+                            icon=ft.Icons.REMOVE_CIRCLE_OUTLINED,
+                            icon_color=ft.Colors.DEEP_PURPLE_400,
+                            icon_size=20,
+                            on_click=self._on_min_match_decrement,
+                            tooltip="减少",
+                        ),
+                        self.min_match_value,
+                        ft.IconButton(
+                            icon=ft.Icons.ADD_CIRCLE_OUTLINED,
+                            icon_color=ft.Colors.DEEP_PURPLE_400,
+                            icon_size=20,
+                            on_click=self._on_min_match_increment,
+                            tooltip="增加",
+                        ),
+                    ],
+                    spacing=4,
+                )
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
 
         self.auto_accept = ft.Switch(
@@ -264,18 +284,13 @@ class ProfileView:
             on_change=lambda _e: self._auto_save("conditions"),
             active_color=ft.Colors.DEEP_PURPLE_500,
         )
-        self.profile_update_mode = ft.Dropdown(
-            label="好友资料更新方式",
-            value="auto",
-            on_select=lambda _e: self._auto_save("profile_update_mode"),
-            border_radius=12,
-            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            options=[
-                ft.dropdown.Option("auto", "自动更新 — 好友改资料后自动同步"),
-                ft.dropdown.Option("manual", "手动更新 — 仅在好友列表提示，点击后更新"),
-            ],
-            helper_text="选择好友更新资料时是否自动拉取新头像 and 简介",
+
+        # Profile update mode cards component
+        self._update_mode_value = "auto"
+        self._update_mode_row = ft.Row(spacing=10, expand=True)
+        self._update_mode_container = ft.Container(
+            content=self._update_mode_row,
+            margin=ft.Margin.only(top=4),
         )
 
         # Inline save feedback (replaces the old status + save button).
@@ -302,7 +317,7 @@ class ProfileView:
         )
 
         self.cover_container = ft.Container(
-            height=80,
+            height=100,
             border_radius=T.R_LG,
             gradient=T.GRADIENT_PRIMARY,
             border=T.border_all(1, ft.Colors.with_opacity(0.1, ft.Colors.WHITE)),
@@ -349,7 +364,7 @@ class ProfileView:
                 self.cover_container,
                 ft.Container(
                     content=self.avatar_holder,
-                    top=40,
+                    top=60,
                     left=24,
                 ),
                 ft.Container(
@@ -361,11 +376,11 @@ class ProfileView:
                         spacing=1,
                         tight=True,
                     ),
-                    top=82,
+                    top=104,
                     left=112,
                 )
             ],
-            height=130,
+            height=150,
         )
 
         # Inline save indicator row (replaces the big save button)
@@ -429,12 +444,12 @@ class ProfileView:
                             ),
                             self.req_input,
                             self.opt_input,
-                            self.min_match,
+                            self.min_match_row,
                             self.auto_accept,
                         ),
                         T.surface_card(
                             T.section_title("资料同步偏好"),
-                            self.profile_update_mode,
+                            self._update_mode_container,
                         ),
                     ],
                     spacing=T.SP_MD,
@@ -662,11 +677,12 @@ class ProfileView:
             cond = profile.get("conditions", {})
             self.req_input.set_tags(cond.get("required_tags", []))
             self.opt_input.set_tags(cond.get("optional_tags", []))
-            self.min_match.value = str(cond.get("min_match_count", 1))
+            self.min_match_value.value = str(cond.get("min_match_count", 1))
             self.auto_accept.value = cond.get("auto_accept", False)
             # Profile update mode is an app-level setting, not part of conditions.
             mode = self.app.friend_db.get_app_setting("profile_update_mode", "auto")
-            self.profile_update_mode.value = mode if mode in ("auto", "manual") else "auto"
+            self._update_mode_value = mode if mode in ("auto", "manual") else "auto"
+            self._build_update_mode_selector()
 
             # Load settings values
             info = self.app.get_local_device_info()
@@ -766,14 +782,14 @@ class ProfileView:
             "conditions": {
                 "required_tags": self.req_input.get_tags(),
                 "optional_tags": self.opt_input.get_tags(),
-                "min_match_count": int(self.min_match.value or "1"),
+                "min_match_count": int(self.min_match_value.value or "1"),
                 "auto_accept": self.auto_accept.value,
             },
         }
         try:
             ok = self.app.save_profile(profile)
             # Persist profile update mode separately (app setting, not profile field).
-            mode = self.profile_update_mode.value or "auto"
+            mode = getattr(self, "_update_mode_value", "auto")
             self.app.friend_db.set_app_setting("profile_update_mode", mode)
             if ok:
                 self._save_status.value = "✓ 签名已保存"
@@ -833,7 +849,7 @@ class ProfileView:
             "conditions": {
                 "required_tags": self.req_input.get_tags(),
                 "optional_tags": self.opt_input.get_tags(),
-                "min_match_count": int(self.min_match.value or "1"),
+                "min_match_count": int(self.min_match_value.value or "1"),
                 "auto_accept": self.auto_accept.value,
             },
         }
@@ -845,7 +861,7 @@ class ProfileView:
                 self.page.update()
 
             ok = self.app.save_profile(profile)
-            mode = self.profile_update_mode.value or "auto"
+            mode = getattr(self, "_update_mode_value", "auto")
             self.app.friend_db.set_app_setting("profile_update_mode", mode)
             if ok:
                 self._save_status.value = "✓ 已保存"
@@ -876,6 +892,117 @@ class ProfileView:
                 pass
 
         threading.Thread(target=_clear_status, daemon=True).start()
+
+    def _on_min_match_decrement(self, _e):
+        val = int(self.min_match_value.value or "1")
+        if val > 1:
+            val -= 1
+            self.min_match_value.value = str(val)
+            if self.page:
+                self.page.update()
+            self._auto_save("conditions")
+
+    def _on_min_match_increment(self, _e):
+        val = int(self.min_match_value.value or "1")
+        if val < 10:
+            val += 1
+            self.min_match_value.value = str(val)
+            if self.page:
+                self.page.update()
+            self._auto_save("conditions")
+
+    def _build_update_mode_selector(self):
+        current_mode = getattr(self, "_update_mode_value", "auto")
+        is_auto = (current_mode == "auto")
+        
+        auto_card = ft.GestureDetector(
+            on_tap=lambda _: self._set_update_mode("auto"),
+            mouse_cursor=ft.MouseCursor.CLICK,
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(
+                                    ft.Icons.SYNC_ROUNDED, 
+                                    color=ft.Colors.WHITE if is_auto else ft.Colors.DEEP_PURPLE_400, 
+                                    size=16
+                                ),
+                                ft.Text(
+                                    "自动同步", 
+                                    size=13, 
+                                    weight=ft.FontWeight.BOLD,
+                                    color=ft.Colors.WHITE if is_auto else ft.Colors.ON_SURFACE
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                        ft.Text(
+                            "好友更新资料后在后台自动更新你的本地缓存",
+                            size=10,
+                            color=ft.Colors.with_opacity(0.8, ft.Colors.WHITE) if is_auto else ft.Colors.ON_SURFACE_VARIANT,
+                        )
+                    ],
+                    spacing=4,
+                    tight=True,
+                ),
+                bgcolor=ft.Colors.DEEP_PURPLE_500 if is_auto else ft.Colors.SURFACE_CONTAINER,
+                border=T.border_all(1.5, ft.Colors.DEEP_PURPLE_400 if is_auto else ft.Colors.with_opacity(0.1, ft.Colors.ON_SURFACE)),
+                border_radius=10,
+                padding=12,
+                expand=True,
+            )
+        )
+
+        is_manual = (current_mode == "manual")
+        manual_card = ft.GestureDetector(
+            on_tap=lambda _: self._set_update_mode("manual"),
+            mouse_cursor=ft.MouseCursor.CLICK,
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(
+                                    ft.Icons.TOUCH_APP_ROUNDED, 
+                                    color=ft.Colors.WHITE if is_manual else ft.Colors.DEEP_PURPLE_400, 
+                                    size=16
+                                ),
+                                ft.Text(
+                                    "手动请求", 
+                                    size=13, 
+                                    weight=ft.FontWeight.BOLD,
+                                    color=ft.Colors.WHITE if is_manual else ft.Colors.ON_SURFACE
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                        ft.Text(
+                            "有更新时显示红点提示，由你决定何时手动同步",
+                            size=10,
+                            color=ft.Colors.with_opacity(0.8, ft.Colors.WHITE) if is_manual else ft.Colors.ON_SURFACE_VARIANT,
+                        )
+                    ],
+                    spacing=4,
+                    tight=True,
+                ),
+                bgcolor=ft.Colors.DEEP_PURPLE_500 if is_manual else ft.Colors.SURFACE_CONTAINER,
+                border=T.border_all(1.5, ft.Colors.DEEP_PURPLE_400 if is_manual else ft.Colors.with_opacity(0.1, ft.Colors.ON_SURFACE)),
+                border_radius=10,
+                padding=12,
+                expand=True,
+            )
+        )
+
+        self._update_mode_row.controls = [auto_card, manual_card]
+        return self._update_mode_row
+
+    def _set_update_mode(self, mode):
+        self._update_mode_value = mode
+        self._build_update_mode_selector()
+        if self.page:
+            self.page.update()
+        self._auto_save("profile_update_mode")
 
     def _build_theme_selector(self):
         if not hasattr(self, "_theme_buttons"):
