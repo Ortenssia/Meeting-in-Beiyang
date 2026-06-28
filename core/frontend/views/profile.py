@@ -480,7 +480,7 @@ class ProfileView:
             content=profile_content,
             alignment=ft.alignment.Alignment.TOP_CENTER,
             expand=True,
-            padding=ft.padding.symmetric(horizontal=16),
+            padding=ft.Padding.symmetric(horizontal=16),
             width=700,
         )
 

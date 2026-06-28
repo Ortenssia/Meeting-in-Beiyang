@@ -235,7 +235,7 @@ class BeiyangApp:
         # system status bar so it doesn't overlap app content.
         is_mobile = str(page.platform) in ("PagePlatform.ANDROID", "PagePlatform.IOS")
         if is_mobile:
-            page.padding = ft.padding.only(top=40, left=0, right=0, bottom=0)
+            page.padding = ft.Padding.only(top=40, left=0, right=0, bottom=0)
         else:
             page.padding = 0
             # Window size only meaningful on desktop; skip on mobile.
