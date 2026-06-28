@@ -478,7 +478,7 @@ class ProfileView:
 
         return ft.Container(
             content=profile_content,
-            alignment=ft.alignment.top_center,
+            alignment=ft.alignment.Alignment.TOP_CENTER,
             expand=True,
             padding=ft.padding.symmetric(horizontal=16),
             width=700,
