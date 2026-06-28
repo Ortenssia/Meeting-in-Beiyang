@@ -183,6 +183,9 @@ class ProfileView:
         self._draft_bg = ""
         self._draft_user_id = ""
 
+        self.profile_display_name = ft.Text("", size=T.FS_TITLE, weight=ft.FontWeight.W_800)
+        self.profile_display_id = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
+
         self.name_in = ft.TextField(
             label="我的昵称",
             on_change=self._on_name_change,
@@ -191,6 +194,7 @@ class ProfileView:
             border_radius=12,
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            expand=True,
         )
         self.user_id_in = ft.TextField(
             label="用户ID（修改后好友需重新搜索）",
@@ -200,6 +204,7 @@ class ProfileView:
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
             helper="留空则自动生成；修改后旧ID将不再被好友识别",
+            expand=True,
         )
         self.avatar_in = ft.TextField(
             label="自定义头像路径",
@@ -338,19 +343,29 @@ class ProfileView:
         return self._built
 
     def _create_view(self):
-        # Twitter-style profile cover stack
+        # Twitter-style profile cover stack with left-aligned avatar and name next to it
         header_stack = ft.Stack(
             [
                 self.cover_container,
                 ft.Container(
                     content=self.avatar_holder,
                     top=40,
-                    left=0,
-                    right=0,
-                    alignment=ft.alignment.Alignment.CENTER,
+                    left=24,
                 ),
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            self.profile_display_name,
+                            self.profile_display_id,
+                        ],
+                        spacing=1,
+                        tight=True,
+                    ),
+                    top=82,
+                    left=112,
+                )
             ],
-            height=115,
+            height=130,
         )
 
         # Inline save indicator row (replaces the big save button)
@@ -379,8 +394,11 @@ class ProfileView:
                     [
                         T.surface_card(
                             T.section_title("基本资料"),
-                            self.name_in,
-                            self.user_id_in,
+                            ft.Row(
+                                [self.name_in, self.user_id_in],
+                                spacing=T.SP_MD,
+                                vertical_alignment=ft.CrossAxisAlignment.START,
+                            ),
                             self._path_row("头像", self.avatar_in, "选择图片"),
                             self.default_avatars_row,
                         ),
@@ -438,7 +456,7 @@ class ProfileView:
             )
         )
 
-        return ft.Column(
+        profile_content = ft.Column(
             [
                 ft.Row(
                     [
@@ -456,6 +474,14 @@ class ProfileView:
             ],
             spacing=T.SP_SM,
             expand=True,
+        )
+
+        return ft.Container(
+            content=profile_content,
+            alignment=ft.alignment.top_center,
+            expand=True,
+            padding=ft.padding.symmetric(horizontal=16),
+            width=700,
         )
 
     def _path_row(self, label, control, pick_label):
@@ -620,6 +646,8 @@ class ProfileView:
                 self._avatar_name = profile.get("avatar", "")
             self.name_in.value = profile.get("name", "")
             self.user_id_in.value = profile.get("user_id", "")
+            self.profile_display_name.value = profile.get("name", "")
+            self.profile_display_id.value = f"@{profile.get('user_id', '')}"
             self.bio_in.value = profile.get("bio", "")
             self.bg_in.value = profile.get("background", "")
             # Sync draft values so _auto_save uses the loaded data.
@@ -695,6 +723,7 @@ class ProfileView:
 
     def _on_name_change(self, e):
         self._draft_name = e.control.value or ""
+        self.profile_display_name.value = self._draft_name
         # Update avatar preview dynamically as the name changes.
         avatar_path = (self.avatar_in.value or "").strip()
         self._avatar_name = (
@@ -819,6 +848,8 @@ class ProfileView:
             if ok:
                 self._save_status.value = "✓ 已保存"
                 self._save_status.color = ft.Colors.GREEN_400
+                self.profile_display_name.value = name
+                self.profile_display_id.value = f"@{profile['user_id']}"
             else:
                 self._save_status.value = "✗ 保存失败"
                 self._save_status.color = ft.Colors.RED_400
