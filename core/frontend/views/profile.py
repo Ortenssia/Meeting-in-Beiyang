@@ -477,11 +477,13 @@ class ProfileView:
         )
 
         return ft.Container(
-            content=profile_content,
+            content=ft.Container(
+                content=profile_content,
+                width=700,
+            ),
             alignment=ft.alignment.Alignment.TOP_CENTER,
             expand=True,
             padding=ft.Padding.symmetric(horizontal=16),
-            width=700,
         )
 
     def _path_row(self, label, control, pick_label):

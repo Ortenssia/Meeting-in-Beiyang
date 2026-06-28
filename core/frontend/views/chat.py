@@ -577,33 +577,57 @@ class ChatView:
 
                 threading.Thread(target=worker, daemon=True).start()
 
+            # File Type Icon resolution
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in (".zip", ".rar", ".7z", ".tar", ".gz"):
+                file_icon = ft.Icons.FOLDER_ZIP_ROUNDED
+                icon_bg = ft.Colors.AMBER_500
+            elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+                file_icon = ft.Icons.IMAGE_ROUNDED
+                icon_bg = ft.Colors.BLUE_500
+            elif ext in (".mp4", ".avi", ".mkv", ".mov", ".flv"):
+                file_icon = ft.Icons.VIDEO_LIBRARY_ROUNDED
+                icon_bg = ft.Colors.RED_500
+            elif ext in (".mp3", ".wav", ".flac", ".ogg", ".m4a"):
+                file_icon = ft.Icons.AUDIO_FILE_ROUNDED
+                icon_bg = ft.Colors.TEAL_500
+            elif ext in (".txt", ".md", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"):
+                file_icon = ft.Icons.ARTICLE_ROUNDED
+                icon_bg = ft.Colors.BLUE_GREY_500
+            else:
+                file_icon = ft.Icons.INSERT_DRIVE_FILE_ROUNDED
+                icon_bg = ft.Colors.DEEP_PURPLE_500
+
+            icon_container = ft.Container(
+                content=ft.Icon(file_icon, color=ft.Colors.WHITE, size=22),
+                bgcolor=icon_bg,
+                width=40,
+                height=40,
+                border_radius=8,
+                alignment=ft.alignment.Alignment.CENTER,
+            )
+
             status_label = ft.Text(
                 status_text,
-                size=T.FS_CAPTION,
-                color=(
-                    ft.Colors.with_opacity(0.7, ft.Colors.WHITE)
-                    if is_self else ft.Colors.ON_SURFACE_VARIANT
-                ),
+                size=11,
+                color=ft.Colors.ON_SURFACE_VARIANT,
                 overflow=ft.TextOverflow.ELLIPSIS,
                 max_lines=1,
-                width=220,
+                width=160,
             )
             detail_label = ft.Text(
                 "",
-                size=11,
-                color=(
-                    ft.Colors.with_opacity(0.55, ft.Colors.WHITE)
-                    if is_self else ft.Colors.ON_SURFACE_VARIANT
-                ),
+                size=10,
+                color=ft.Colors.ON_SURFACE_VARIANT,
                 overflow=ft.TextOverflow.ELLIPSIS,
                 max_lines=1,
-                width=220,
+                width=160,
             )
             progress_bar = ft.ProgressBar(
                 value=pb_val,
-                color=pb_color,
-                bgcolor=ft.Colors.with_opacity(0.15, ft.Colors.ON_SURFACE),
-                height=4,
+                color=ft.Colors.DEEP_PURPLE_400 if is_self else ft.Colors.BLUE_400,
+                bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.ON_SURFACE),
+                height=3,
             )
 
             def toggle_pause():
@@ -629,104 +653,103 @@ class ChatView:
 
             pause_button = ft.IconButton(
                 icon=ft.Icons.PAUSE_ROUNDED,
-                icon_color=ft.Colors.WHITE,
-                icon_size=18,
+                icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                icon_size=16,
                 tooltip="暂停传输",
                 on_click=lambda _: toggle_pause(),
             )
 
-            bubble_content = ft.Column(
+            top_row = ft.Row(
                 [
+                    icon_container,
+                    ft.Column(
+                        [
+                            ft.Text(
+                                filename, 
+                                size=13, 
+                                weight=ft.FontWeight.BOLD, 
+                                color=ft.Colors.ON_SURFACE,
+                                overflow=ft.TextOverflow.ELLIPSIS, 
+                                max_lines=1,
+                                width=150,
+                            ),
+                            status_label,
+                            detail_label,
+                        ],
+                        spacing=1,
+                        expand=True,
+                    ),
                     ft.Row(
                         [
-                            ft.Icon(ft.Icons.FILE_PRESENT_ROUNDED, color=icon_color, size=32),
-                            ft.Column(
-                                [
-                                    ft.Text(
-                                        filename, 
-                                        size=T.FS_TEXT, 
-                                        weight=ft.FontWeight.BOLD, 
-                                        color=ft.Colors.WHITE if is_self else ft.Colors.ON_SURFACE,
-                                        overflow=ft.TextOverflow.ELLIPSIS, 
-                                        max_lines=1,
-                                        width=220,
-                                    ),
-                                    status_label,
-                                    detail_label,
-                                ],
-                                spacing=2,
-                                expand=True,
-                            ),
-                            pause_button if (
-                                "正在" in file_status and file_id and is_self
-                            ) else ft.Container(),
+                            pause_button if ("正在" in file_status and file_id and is_self) else ft.Container(),
                             ft.IconButton(
                                 icon=ft.Icons.CANCEL_OUTLINED,
-                                icon_color=ft.Colors.RED_400 if is_self else ft.Colors.RED_300,
-                                icon_size=18,
-                                tooltip="取消传输",
+                                icon_color=ft.Colors.RED_400,
+                                icon_size=16,
+                                tooltip="取消",
                                 on_click=lambda _, fid=file_id: self.app.cancel_file_transfer(fid) if fid else None,
                             ) if ("正在" in file_status and file_id) else ft.Container(),
                             ft.IconButton(
                                 icon=ft.Icons.REFRESH_ROUNDED,
-                                icon_color=ft.Colors.WHITE if is_self else ft.Colors.DEEP_PURPLE_400,
-                                icon_size=18,
-                                tooltip="重试/续传",
+                                icon_color=ft.Colors.DEEP_PURPLE_400,
+                                icon_size=16,
+                                tooltip="重试",
                                 on_click=lambda _e: retry_file(),
                             ) if ("失败" in file_status and is_self) else ft.Container(),
                             ft.PopupMenuButton(
                                 items=[
                                     ft.PopupMenuItem(
-                                        content=ft.Row(
-                                            [
-                                                ft.Icon(ft.Icons.OPEN_IN_NEW_ROUNDED, size=16, color=ft.Colors.DEEP_PURPLE_400),
-                                                ft.Text("打开文件", size=13, weight=ft.FontWeight.W_500),
-                                            ],
-                                            spacing=10,
-                                        ),
+                                        content=ft.Row([
+                                            ft.Icon(ft.Icons.OPEN_IN_NEW_ROUNDED, size=14, color=ft.Colors.DEEP_PURPLE_400),
+                                            ft.Text("打开文件", size=12),
+                                        ], spacing=6),
                                         on_click=lambda _: open_file()
                                     ),
                                     ft.PopupMenuItem(
-                                        content=ft.Row(
-                                            [
-                                                ft.Icon(ft.Icons.FOLDER_OPEN_ROUNDED, size=16, color=ft.Colors.DEEP_PURPLE_400),
-                                                ft.Text("打开所在文件夹", size=13, weight=ft.FontWeight.W_500),
-                                            ],
-                                            spacing=10,
-                                        ),
+                                        content=ft.Row([
+                                            ft.Icon(ft.Icons.FOLDER_OPEN_ROUNDED, size=14, color=ft.Colors.DEEP_PURPLE_400),
+                                            ft.Text("打开文件夹", size=12),
+                                        ], spacing=6),
                                         on_click=lambda _: open_folder()
                                     ),
                                     ft.PopupMenuItem(
-                                        content=ft.Row(
-                                            [
-                                                ft.Icon(ft.Icons.COPY_ALL_ROUNDED, size=16, color=ft.Colors.DEEP_PURPLE_400),
-                                                ft.Text("复制文件路径", size=13, weight=ft.FontWeight.W_500),
-                                            ],
-                                            spacing=10,
-                                        ),
+                                        content=ft.Row([
+                                            ft.Icon(ft.Icons.COPY_ALL_ROUNDED, size=14, color=ft.Colors.DEEP_PURPLE_400),
+                                            ft.Text("复制路径", size=12),
+                                        ], spacing=6),
                                         on_click=lambda _: copy_path()
                                     ),
                                     ft.PopupMenuItem(
-                                        content=ft.Row(
-                                            [
-                                                ft.Icon(ft.Icons.UNARCHIVE_ROUNDED, size=16, color=ft.Colors.DEEP_PURPLE_400),
-                                                ft.Text("解压到当前目录", size=13, weight=ft.FontWeight.W_500),
-                                            ],
-                                            spacing=10,
-                                        ),
+                                        content=ft.Row([
+                                            ft.Icon(ft.Icons.UNARCHIVE_ROUNDED, size=14, color=ft.Colors.DEEP_PURPLE_400),
+                                            ft.Text("解压 ZIP", size=12),
+                                        ], spacing=6),
                                         on_click=lambda _: decompress_zip()
                                     ) if filename.lower().endswith(".zip") else ft.PopupMenuItem(visible=False),
                                 ],
-                                icon=ft.Icons.MORE_HORIZ_ROUNDED,
-                                icon_color=icon_color,
-                                icon_size=18,
+                                icon=ft.Icons.MORE_VERT_ROUNDED,
+                                icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                                icon_size=16,
                             )
                         ],
-                        spacing=T.SP_SM,
-                    ),
-                    progress_bar,
+                        spacing=0,
+                        alignment=ft.MainAxisAlignment.END,
+                    )
                 ],
-                spacing=T.SP_SM,
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+            bubble_content = ft.Column(
+                [
+                    top_row,
+                    ft.Container(
+                        content=progress_bar,
+                        margin=ft.Margin.only(top=6),
+                    ) if "正在" in file_status else ft.Container()
+                ],
+                spacing=0,
+                tight=True,
             )
         else:
             # Check if Python Code (Challenge 1: Code Sharing)
@@ -813,19 +836,26 @@ class ChatView:
                     spacing=4,
                 )
 
+        if is_file_msg:
+            bubble_bg = ft.Colors.SURFACE_CONTAINER_LOW
+            bubble_border = T.border_all(1, ft.Colors.with_opacity(0.15, ft.Colors.DEEP_PURPLE_400 if is_self else ft.Colors.ON_SURFACE))
+        else:
+            bubble_bg = None if is_self else ft.Colors.SURFACE_CONTAINER_HIGH
+            bubble_border = T.border_all(1, ft.Colors.with_opacity(0.05, ft.Colors.ON_SURFACE)) if not is_self else None
+
         bubble = ft.Container(
             content=bubble_content,
-            width=420 if is_file_msg else None,
+            width=320 if is_file_msg else None,
             gradient=T.GRADIENT_PRIMARY if is_self and not is_file_msg else None,
-            bgcolor=ft.Colors.with_opacity(0.18, ft.Colors.DEEP_PURPLE_400) if is_self and is_file_msg else (None if is_self else ft.Colors.SURFACE_CONTAINER_HIGH),
+            bgcolor=bubble_bg,
             border_radius=T.radius_only(
                 top_left=16, top_right=16,
                 bottom_right=4 if is_self else 16,
                 bottom_left=16 if is_self else 4,
             ),
-            padding=T.pad_symmetric(horizontal=14, vertical=10),
+            padding=T.pad_symmetric(horizontal=12, vertical=12),
             shadow=ft.BoxShadow(blur_radius=8, color=ft.Colors.with_opacity(0.04, ft.Colors.BLACK), offset=ft.Offset(0, 2)),
-            border=T.border_all(1, ft.Colors.with_opacity(0.05, ft.Colors.ON_SURFACE)) if not is_self else None,
+            border=bubble_border,
         )
         if is_file_msg:
             bubble = ft.GestureDetector(

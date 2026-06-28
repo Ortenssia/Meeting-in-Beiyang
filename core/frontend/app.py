@@ -478,17 +478,15 @@ class BeiyangApp:
 
         def accept(_e):
             dlg.open = False
-            self.page.overlay.remove(dlg)
+            self.page.update()
             self.message_service.accept_file_offer(file_id)
             self.show_toast(f"正在接收来自 {from_name} 的文件")
-            self.page.update()
 
         def decline(_e):
             dlg.open = False
-            self.page.overlay.remove(dlg)
+            self.page.update()
             self.message_service.decline_file_offer(file_id)
             self.show_toast(f"已拒绝 {from_name} 的文件")
-            self.page.update()
 
         dlg = ft.AlertDialog(
             modal=True,
