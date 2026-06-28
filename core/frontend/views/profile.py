@@ -544,7 +544,7 @@ class ProfileView:
         return ft.Container(
             content=dashboard_content,
             expand=True,
-            padding=ft.padding.only(left=20, right=20, top=10, bottom=20),
+            padding=ft.Padding.only(left=20, right=20, top=10, bottom=20),
         )
 
     def _path_row(self, label, control, pick_label):
