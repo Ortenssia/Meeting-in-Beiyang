@@ -219,14 +219,15 @@ class MomentsView:
         import threading
         def _do_pick():
             from tkinter import filedialog
-            root = self.app.get_tk_root()
-            if root:
-                root.attributes("-topmost", True)
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
             file_path = filedialog.askopenfilename(
                 title="选择分享图片",
                 parent=root,
                 filetypes=[("图片文件", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp")],
             )
+            root.destroy()
             if file_path:
                 self._apply_picked_image(file_path)
 

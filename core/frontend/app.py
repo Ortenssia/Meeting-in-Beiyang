@@ -1015,13 +1015,3 @@ class BeiyangApp:
         if self.message_service and self.connection_manager:
             for f in self.connection_manager.get_online_friends():
                 self.message_service.sync_moments_with_friend(f["name"])
-
-    def get_tk_root(self):
-        if not hasattr(self, "_tk_root") or self._tk_root is None:
-            try:
-                import tkinter as tk
-                self._tk_root = tk.Tk()
-                self._tk_root.withdraw()
-            except Exception:
-                self._tk_root = None
-        return self._tk_root

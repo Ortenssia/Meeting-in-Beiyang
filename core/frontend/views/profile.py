@@ -644,14 +644,15 @@ class ProfileView:
         def _do_pick():
             from tkinter import filedialog
 
-            root = self.app.get_tk_root()
-            if root:
-                root.attributes("-topmost", True)
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
             file_path = filedialog.askopenfilename(
                 title="选择图片",
                 parent=root,
                 filetypes=[("图片文件", "*.png;*.jpg;*.jpeg;*.bmp")],
             )
+            root.destroy()
             if file_path:
                 self._open_crop_editor(file_path, target)
 
@@ -1589,14 +1590,15 @@ class ProfileView:
         def _do_pick():
             from tkinter import filedialog
 
-            root = self.app.get_tk_root()
-            if root:
-                root.attributes("-topmost", True)
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
             selected = filedialog.askdirectory(
                 title="选择接收文件保存目录",
                 initialdir=self.app.get_receive_dir(),
                 parent=root,
             )
+            root.destroy()
             if selected:
                 self._apply_receive_dir(selected)
 
