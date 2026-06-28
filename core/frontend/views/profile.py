@@ -358,32 +358,37 @@ class ProfileView:
         return self._built
 
     def _create_view(self):
-        # Twitter-style profile cover stack with left-aligned avatar and name next to it
-        header_stack = ft.Stack(
-            [
-                self.cover_container,
-                ft.Container(
-                    content=self.avatar_holder,
-                    top=60,
-                    left=24,
-                ),
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            self.profile_display_name,
-                            self.profile_display_id,
-                        ],
-                        spacing=1,
-                        tight=True,
+        # Premium profile identity card for the left column
+        identity_card = ft.Container(
+            content=ft.Stack(
+                [
+                    self.cover_container,
+                    ft.Container(
+                        content=self.avatar_holder,
+                        top=60,
+                        left=24,
                     ),
-                    top=104,
-                    left=112,
-                )
-            ],
-            height=150,
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                self.profile_display_name,
+                                self.profile_display_id,
+                            ],
+                            spacing=1,
+                            tight=True,
+                        ),
+                        top=104,
+                        left=112,
+                    )
+                ],
+                height=150,
+            ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            border_radius=T.R_LG,
+            border=T.border_all(1, ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
         )
 
-        # Inline save indicator row (replaces the big save button)
+        # Inline save indicator row
         save_indicator = ft.Row(
             [
                 self._save_spinner,
@@ -393,112 +398,153 @@ class ProfileView:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        # Re-organize with beautiful tabs below the banner
-        tab_bar = ft.TabBar(
-            tabs=[
-                ft.Tab(label="个人主页", icon=ft.Icons.ACCOUNT_BOX_ROUNDED),
-                ft.Tab(label="交友匹配", icon=ft.Icons.DIVERSITY_3_ROUNDED),
-                ft.Tab(label="系统设置", icon=ft.Icons.SETTINGS_ROUNDED),
-            ]
+        # Left Column: Identity Card, Theme Customization, System Info
+        left_panel = ft.Column(
+            [
+                identity_card,
+                T.surface_card(
+                    T.section_title("个性化主题"),
+                    ft.Text("点击选择系统主题色：", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
+                    self._theme_selector_row,
+                ),
+                T.surface_card(
+                    T.section_title("系统信息"),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=ft.Colors.DEEP_PURPLE_400, size=20),
+                            ft.Text("相识北洋", size=14, weight=ft.FontWeight.W_800),
+                        ],
+                        spacing=T.SP_SM,
+                    ),
+                    ft.Text("版本 3.0.0", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text("P2P 局域网无网社交平台", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text("洪泛中继路由 · 离线消息漫游", size=10, color=ft.Colors.ON_SURFACE_VARIANT),
+                )
+            ],
+            width=320,
+            spacing=16,
         )
 
-        tab_view = ft.TabBarView(
-            expand=True,
-            controls=[
-                ft.Column(
-                    [
-                        T.surface_card(
-                            T.section_title("基本资料"),
-                            ft.Row(
-                                [self.name_in, self.user_id_in],
-                                spacing=T.SP_MD,
-                                vertical_alignment=ft.CrossAxisAlignment.START,
-                            ),
-                            self._path_row("头像", self.avatar_in, "选择图片"),
-                            self.default_avatars_row,
-                        ),
-                        T.surface_card(
-                            T.section_title("我的兴趣标签"),
-                            self.tags_input,
-                        ),
-                        T.surface_card(
-                            T.section_title("个人简介"),
-                            ft.Row(
-                                [self.bio_in, self.bio_save_btn],
-                                spacing=T.SP_SM,
-                                vertical_alignment=ft.CrossAxisAlignment.START,
-                            ),
-                        ),
-                    ],
-                    spacing=T.SP_MD,
-                    scroll=ft.ScrollMode.AUTO,
+        # Right Column: Detailed form sections and configurations
+        right_panel = ft.Column(
+            [
+                T.surface_card(
+                    T.section_title("基本资料"),
+                    ft.Row(
+                        [self.name_in, self.user_id_in],
+                        spacing=T.SP_MD,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    ),
+                    self._path_row("头像路径", self.avatar_in, "选择图片"),
+                    self.default_avatars_row,
                 ),
-                ft.Column(
-                    [
-                        T.surface_card(
-                            T.section_title("自动同意匹配条件"),
-                            ft.Text(
-                                "配置必选与可选交友标签以开启自动匹配通过：",
-                                size=T.FS_CAPTION,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                            ),
-                            self.req_input,
-                            self.opt_input,
-                            self.min_match_row,
+                T.surface_card(
+                    T.section_title("个性展示"),
+                    self.tags_input,
+                    ft.Container(height=4),
+                    ft.Row(
+                        [self.bio_in, self.bio_save_btn],
+                        spacing=T.SP_SM,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    ),
+                ),
+                T.surface_card(
+                    T.section_title("自动同意匹配条件"),
+                    ft.Text(
+                        "配置必选与可选交友标签以开启自动匹配通过：",
+                        size=T.FS_CAPTION,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    self.req_input,
+                    self.opt_input,
+                    ft.Row(
+                        [
+                            ft.Container(content=self.min_match_row, expand=True),
                             self.auto_accept,
-                        ),
-                        T.surface_card(
-                            T.section_title("资料同步偏好"),
-                            self._update_mode_container,
-                        ),
-                    ],
-                    spacing=T.SP_MD,
-                    scroll=ft.ScrollMode.AUTO,
+                        ],
+                        spacing=20,
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    )
                 ),
-                self._build_settings_tab(),
-            ]
-        )
-
-        self.tabs = ft.Tabs(
-            length=3,
+                T.surface_card(
+                    T.section_title("网络与设备"),
+                    self._setting_row("本机主机名", self.settings_device_name),
+                    ft.Row(
+                        [
+                            ft.Text("TCP 监听端口", size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT, width=100),
+                            self.settings_tcp_port,
+                            ft.IconButton(
+                                icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
+                                icon_color=ft.Colors.DEEP_PURPLE_400,
+                                on_click=self._save_tcp,
+                                tooltip="保存端口"
+                            ),
+                        ],
+                        spacing=T.SP_SM,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    self.settings_tcp_hint,
+                    self._setting_row("UDP 广播端口", self.settings_udp_port),
+                ),
+                T.surface_card(
+                    T.section_title("文件接收与背景"),
+                    self._setting_row("保存位置", self.settings_receive_dir),
+                    ft.Row(
+                        [
+                            ft.ElevatedButton(
+                                "选择保存目录",
+                                icon=ft.Icons.FOLDER_OPEN_ROUNDED,
+                                on_click=self._choose_receive_dir,
+                                bgcolor=ft.Colors.DEEP_PURPLE_500,
+                                color=ft.Colors.WHITE,
+                                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+                            ),
+                        ]
+                    ),
+                    ft.Divider(height=1, color=ft.Colors.with_opacity(0.1, ft.Colors.ON_SURFACE)),
+                    T.section_title("自定义背景"),
+                    self._path_row("背景图片", self.bg_in, "选择"),
+                ),
+                T.surface_card(
+                    T.section_title("资料同步偏好"),
+                    self._update_mode_container,
+                ),
+            ],
+            spacing=T.SP_MD,
+            scroll=ft.ScrollMode.AUTO,
             expand=True,
-            content=ft.Column(
-                controls=[
-                    tab_bar,
-                    tab_view,
-                ],
-                expand=True,
-            )
         )
 
-        profile_content = ft.Column(
+        dashboard_content = ft.Column(
             [
                 ft.Row(
                     [
-                        ft.Text(
-                            "个人资料", size=T.FS_HEADER, weight=ft.FontWeight.W_800
-                        ),
+                        ft.Text("个人资料与设置", size=T.FS_HEADER, weight=ft.FontWeight.W_800),
                         ft.Container(expand=1),
                         save_indicator,
                     ],
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                header_stack,
                 ft.Container(height=4),
-                self.tabs,
+                ft.Row(
+                    [
+                        left_panel,
+                        right_panel,
+                    ],
+                    spacing=20,
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                    expand=True,
+                ),
             ],
             spacing=T.SP_SM,
             expand=True,
         )
 
         return ft.Container(
-            content=ft.Container(
-                content=profile_content,
-                width=700,
-            ),
-            alignment=ft.alignment.Alignment.TOP_CENTER,
+            content=dashboard_content,
             expand=True,
-            padding=ft.Padding.symmetric(horizontal=16),
+            padding=ft.padding.only(left=20, right=20, top=10, bottom=20),
         )
 
     def _path_row(self, label, control, pick_label):

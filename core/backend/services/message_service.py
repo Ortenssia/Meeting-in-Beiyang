@@ -1402,7 +1402,8 @@ class MessageService:
     # ------------------------------------------------------------------ #
 
     def _handle_file_offer(self, from_ip: str, data: Dict[str, Any]):
-        """接收文件元信息。avatars are auto-accepted; chat files ask the user."""
+        """接收文件元信息。avatars are auto-accepted; chat files ask the user
+        but start buffering data immediately so chunks are not lost."""
         my_name = self.friend_db.get_my_profile().get("name", "")
         to_name = data.get("to_name", "")
         if to_name and to_name != my_name:
@@ -1415,23 +1416,24 @@ class MessageService:
 
         purpose = data.get("purpose", "chat_file")
 
-        # Avatars are always auto-accepted (small, system-managed).
-        if purpose == "avatar":
-            self._accept_file_offer_internal(from_ip, data)
-            return
+        # Always create the incoming state so chunks can be buffered.
+        # For chat files, mark as pending — the file will only be
+        # finalised when the user accepts.
+        self._accept_file_offer_internal(from_ip, data)
 
-        # Chat files require user consent.
+        if purpose == "avatar":
+            return  # auto-accepted, no dialog needed
+
+        # Mark as pending user confirmation.
+        with self._file_lock:
+            state = self._incoming_files.get(file_id)
+            if state:
+                state["pending_accept"] = True
+
         filename = self._safe_filename(data.get("filename", "received.bin"))
         file_size = int(data.get("size", 0) or 0)
-
         with self._file_offer_lock:
-            self._pending_file_offers[file_id] = {
-                "from_ip": from_ip,
-                "from_name": from_name,
-                "filename": filename,
-                "size": file_size,
-                "data": dict(data),
-            }
+            self._pending_file_offers[file_id] = True
 
         if self.on_file_offer_received:
             try:
@@ -1440,29 +1442,52 @@ class MessageService:
                 logger.debug("[MessageService] on_file_offer_received error", exc_info=True)
 
     def accept_file_offer(self, file_id: str) -> bool:
-        """User accepted a pending file offer — start receiving."""
+        """User accepted — finalise if file is already complete."""
         with self._file_offer_lock:
-            offer = self._pending_file_offers.pop(file_id, None)
-        if not offer:
-            return False
-        self._accept_file_offer_internal(offer["from_ip"], offer["data"])
+            if file_id not in self._pending_file_offers:
+                return False
+            del self._pending_file_offers[file_id]
+
+        with self._file_lock:
+            state = self._incoming_files.get(file_id)
+            if not state:
+                return False
+            state["pending_accept"] = False
+            is_complete = state.get("_all_chunks_received", False)
+
+        if is_complete:
+            # All chunks arrived while waiting for user decision.
+            # Finalise now.
+            self._finalise_incoming_file(file_id)
         return True
 
     def decline_file_offer(self, file_id: str) -> bool:
-        """User declined a pending file offer."""
+        """User declined — clean up and notify sender."""
         with self._file_offer_lock:
-            offer = self._pending_file_offers.pop(file_id, None)
-        if not offer:
-            return False
-        # Notify the sender.
-        decline_msg = {
-            "type": self.FILE_DECLINE,
-            "file_id": file_id,
-            "from_name": self.friend_db.get_my_profile().get("name", ""),
-        }
-        self._send_data_to_friend_with_fallback(
-            offer["from_name"], decline_msg, offer["from_ip"]
-        )
+            if file_id not in self._pending_file_offers:
+                return False
+            del self._pending_file_offers[file_id]
+
+        from_name = ""
+        with self._file_lock:
+            state = self._incoming_files.pop(file_id, None)
+            if state:
+                from_name = state.get("from_name", "")
+                self._close_incoming_handle(state)
+                part_path = state.get("part_path", "")
+                if part_path and os.path.exists(part_path):
+                    try:
+                        os.remove(part_path)
+                    except Exception:
+                        pass
+
+        if from_name:
+            decline_msg = {
+                "type": self.FILE_DECLINE,
+                "file_id": file_id,
+                "from_name": self.friend_db.get_my_profile().get("name", ""),
+            }
+            self._send_data_to_friend_with_fallback(from_name, decline_msg, "")
         return True
 
     def _accept_file_offer_internal(self, from_ip: str, data: Dict[str, Any]):
@@ -1563,12 +1588,6 @@ class MessageService:
         with self._file_lock:
             state = self._incoming_files.get(file_id)
         if not state:
-            # Silently drop chunks for files without state (offer not yet
-            # accepted, or already declined/completed).  Only warn when the
-            # chunk is genuinely unexpected.
-            with self._file_offer_lock:
-                if file_id in self._pending_file_offers:
-                    return  # user hasn't decided yet — drop silently
             logger.warning("[MessageService] 收到未知文件分块: %s", file_id)
             return
 
@@ -1695,7 +1714,6 @@ class MessageService:
 
     def _handle_file_complete(self, from_ip: str, data: Dict[str, Any]):
         """完成文件接收、校验并写入聊天记录。"""
-        my_name = self.friend_db.get_my_profile().get("name", "")
         file_id = data.get("file_id", "")
         if not file_id:
             return
@@ -1707,17 +1725,40 @@ class MessageService:
             return
 
         from_name = data.get("from_name") or state.get("from_name", "")
+        from_ip = state.get("from_ip", from_ip)
+
         if state.get("already_complete"):
-            with self._file_lock:
-                self._incoming_files.pop(file_id, None)
             self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
             return
 
+        # If the user hasn't accepted yet, defer finalisation but still
+        # ACK so the sender doesn't time out.
+        if state.get("pending_accept"):
+            state["_all_chunks_received"] = True
+            state["_pending_complete_data"] = dict(data)
+            self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
+            return
+
+        self._finalise_incoming_file(file_id, data)
+
+    def _finalise_incoming_file(
+        self, file_id: str, data: Dict[str, Any] = None
+    ):
+        """Verify, rename and record a fully-received file."""
+        with self._file_lock:
+            state = self._incoming_files.get(file_id)
+        if not state:
+            return
+
+        if data is None:
+            data = state.get("_pending_complete_data", {})
+        from_name = data.get("from_name") or state.get("from_name", "")
+        from_ip = state.get("from_ip", "")
+
         part_path = state["part_path"]
         final_path = state["final_path"]
-        # Close the write handle before sha256/replace so pending writes
-        # flush to disk and Windows lets us rename/remove the file.
         self._close_incoming_handle(state)
+
         expected_count = int(state.get("chunk_count", 0) or 0)
         if expected_count and len(state["received"]) < expected_count:
             logger.warning("[MessageService] 文件未收齐: %s", state["filename"])
@@ -1727,9 +1768,6 @@ class MessageService:
             return
 
         expected_hash = data.get("sha256") or state.get("sha256", "")
-        # Use the incremental hash computed while receiving chunks.
-        # This is O(1) instead of O(file_size) — critical for large
-        # files where a full-file SHA256 would exceed FILE_ACK_TIMEOUT.
         incremental = state.get("_sha256_state")
         actual_hash = (
             incremental.hexdigest()
@@ -1752,7 +1790,11 @@ class MessageService:
         os.replace(part_path, final_path)
         with self._file_lock:
             self._incoming_files.pop(file_id, None)
-        timestamp = data.get("timestamp") or state.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))
+
+        my_name = self.friend_db.get_my_profile().get("name", "")
+        timestamp = data.get("timestamp") or state.get(
+            "timestamp", time.strftime("%Y-%m-%d %H:%M:%S")
+        )
         filename = state.get("filename", os.path.basename(final_path))
         purpose = data.get("purpose") or state.get("purpose", "chat_file")
         avatar_owner = data.get("avatar_owner") or state.get("avatar_owner", from_name)
@@ -2462,25 +2504,6 @@ class MessageService:
         _sha256 = data.get("sha256", "")
         if not file_id:
             return
-
-        # If the offer is still pending user accept/decline, reply with
-        # completed_chunks=0 so the sender proceeds; chunks will be held
-        # until the user decides.
-        with self._file_offer_lock:
-            if file_id in self._pending_file_offers:
-                payload = {
-                    "type": self.FILE_RESUME_RESP,
-                    "file_id": file_id,
-                    "completed_chunks": 0,
-                    "supports_ack": True,
-                    "supports_binary": True,
-                }
-                self._send_data_to_friend_with_fallback(
-                    self._pending_file_offers[file_id]["from_name"],
-                    payload,
-                    from_ip,
-                )
-                return
 
         with self._file_lock:
             state = self._incoming_files.get(file_id)
