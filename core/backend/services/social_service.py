@@ -68,6 +68,22 @@ class SocialService:
                 "can_chat": False,
             })
 
+        # Deduplicate by stable identity: prefer the entry with the most
+        # recent last_seen timestamp (or 127.0.0.1 for same-machine).
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for card in cards:
+            uid = card.get("user_id") or card.get("device_id") or card["name"]
+            existing = deduped.get(uid)
+            if not existing:
+                deduped[uid] = card
+            elif card.get("ip") == "127.0.0.1":
+                deduped[uid] = card  # prefer loopback for same-machine
+            elif existing.get("ip") != "127.0.0.1":
+                # Keep whichever was seen more recently
+                # (last_seen not available in card, so keep first non-loopback)
+                pass
+        cards = list(deduped.values())
+
         return sorted(cards, key=lambda item: (item["status"] != "none", item["name"]))
 
     def get_friend_cards(self) -> List[Dict[str, Any]]:

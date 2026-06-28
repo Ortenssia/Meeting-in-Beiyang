@@ -53,6 +53,45 @@ def _discover_project_root(explicit: Optional[str] = None) -> Path:
     return Path.cwd().resolve()
 
 
+def _android_writable_dir() -> Optional[Path]:
+    """Return a writable directory on Android, or None on other platforms."""
+    # Buildozer / p4a sets these environment variables.
+    for key in (
+        "BEIYANG_DATA_DIR",
+        "ANDROID_APP_PATH",
+        "EXTERNAL_STORAGE",
+    ):
+        val = os.environ.get(key)
+        if val:
+            return Path(val).expanduser()
+    # Flet on Android: the app's private files dir at <home>/files
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if home:
+        candidate = Path(home) / "beiyang_data"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except Exception:
+            pass
+    return None
+
+
+def _is_android() -> bool:
+    """Best-effort detection of the Android platform."""
+    if hasattr(os, "getandroidapplication"):
+        return True
+    if "ANDROID_ARGUMENT" in os.environ or "ANDROID_APP_PATH" in os.environ:
+        return True
+    if os.environ.get("PYTHONHOME", "").startswith("/data/data/"):
+        return True
+    try:
+        from android.storage import app_storage_path  # type: ignore
+        return True
+    except ImportError:
+        pass
+    return False
+
+
 @dataclass(frozen=True)
 class AppPaths:
     """Resolved filesystem and Flet asset paths for one app launch."""
@@ -73,6 +112,33 @@ class AppPaths:
             data_dir = Path(data_override).expanduser()
         else:
             data_dir = assets_dir / "data"
+
+        # On Android the assets tree may be read-only; relocate writable
+        # directories into the app's private storage.
+        if _is_android():
+            writable_base = _android_writable_dir()
+            if writable_base is not None:
+                if not data_override and not os.environ.get("BEIYANG_DATA_DIR"):
+                    data_dir = writable_base / "data"
+                if not os.environ.get("BEIYANG_RECEIVED_DIR"):
+                    received_files_dir = writable_base / DEFAULT_RECEIVE_DIR_NAME
+                else:
+                    received_files_dir = Path(
+                        os.environ["BEIYANG_RECEIVED_DIR"]
+                    ).expanduser()
+                if not os.environ.get("BEIYANG_AVATAR_DIR"):
+                    received_avatars_dir = writable_base / DEFAULT_AVATAR_CACHE_DIR_NAME
+                else:
+                    received_avatars_dir = Path(
+                        os.environ["BEIYANG_AVATAR_DIR"]
+                    ).expanduser()
+                return cls(
+                    project_root=root,
+                    assets_dir=assets_dir,
+                    data_dir=data_dir,
+                    received_files_dir=received_files_dir,
+                    received_avatars_dir=received_avatars_dir,
+                )
 
         receive_override = os.environ.get("BEIYANG_RECEIVED_DIR")
         if receive_override:

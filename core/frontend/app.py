@@ -5,6 +5,7 @@ Owns the SocialRuntime lifecycle, wires runtime callbacks into UI refreshes,
 and hosts the custom FloatingNavigationBar + per-screen views.
 """
 import threading
+import time
 from typing import Optional, List, Dict, Any
 
 import flet as ft
@@ -20,7 +21,6 @@ from .views.friends import FriendsView
 from .views.chat import ChatView
 from .views.moments import MomentsView
 from .views.profile import ProfileView
-from .views.settings import SettingsView
 
 
 class FloatingNavBar(ft.Container):
@@ -127,6 +127,8 @@ class BeiyangApp:
         self.nav: Optional[FloatingNavBar] = None
         self.views: dict = {}
         self._unread_chats = set()
+        self._open_profile_dlg: Optional[ft.AlertDialog] = None
+        self._open_profile_dlg_name: str = ""
 
         # Initialize a hidden Tkinter root once for fast file dialogs
         try:
@@ -160,12 +162,34 @@ class BeiyangApp:
         self.runtime.on_group_message_received = lambda gid, s, c, ts: self._safe(
             lambda: self._on_group_message(gid, s, c, ts))
         self.runtime.on_moments_changed = lambda: self._safe(self._on_moments_changed)
+        self.message_service.on_friend_profile_update_available = (
+            lambda name: self._safe(lambda: self._on_profile_update_available(name))
+        )
+        self.message_service.on_friend_profile_updated = (
+            lambda name: self._safe(lambda: self._on_profile_updated(name))
+        )
+        self.message_service.on_file_received = (
+            lambda name, path, ts: self._safe(
+                lambda: self._on_file_received(name, path, ts)
+            )
+        )
+        self.message_service.on_file_progress = (
+            lambda fid, peer, name, done, total, sending, confirmed=0: self._safe(
+                lambda: self.views["chat"].on_file_progress(
+                    fid, peer, name, done, total, sending, confirmed=confirmed
+                )
+            )
+        )
+        self.message_service.on_file_offer_received = self._on_file_offer_received
 
         # initial status fetch
         self._update_status_indicators()
 
+        # apply active theme & background image on startup
+        self.update_theme_and_background()
+
         # initial content
-        self.show_view("discover")
+        self.show_view("chat")
 
     def _init_services(self):
         self.runtime = SocialRuntime(
@@ -188,32 +212,43 @@ class BeiyangApp:
     def _build_shell(self, page: ft.Page):
         page.title = "相识北洋"
         page.theme_mode = ft.ThemeMode.SYSTEM
-        
-        # Global FilePickers registered once as background services (do NOT add to page.overlay to prevent client rendering "Unknown control" error)
+
+        # FilePicker is a Service in Flet 0.85+, not a visual overlay control.
         self.profile_file_picker = ft.FilePicker()
         self.chat_file_picker = ft.FilePicker()
-        
+        page.services.append(self.profile_file_picker)
+        page.services.append(self.chat_file_picker)
+
         # Register local custom Noto Sans SC font from assets
         page.fonts = {
             "Noto Sans SC": self.paths.font_asset
         }
-        
+
         # Premium Deep Purple seed theme with custom Noto Sans SC font
         page.theme = ft.Theme(
             color_scheme_seed=ft.Colors.DEEP_PURPLE,
             visual_density=ft.VisualDensity.COMFORTABLE,
             font_family="Noto Sans SC",
         )
-        page.padding = 0
-        page.window_width = 460
-        page.window_height = 820
-        page.window_min_width = 380
-        page.window_min_height = 640
-        
-        # Set window icon
-        icon_path = self.paths.assets_dir / "app_icon.ico"
-        if icon_path.exists():
-            page.window.icon = str(icon_path.resolve())
+
+        # Safe-area aware padding: on Android/iOS reserve space for the
+        # system status bar so it doesn't overlap app content.
+        is_mobile = str(page.platform) in ("PagePlatform.ANDROID", "PagePlatform.IOS")
+        if is_mobile:
+            page.padding = ft.padding.only(top=40, left=0, right=0, bottom=0)
+        else:
+            page.padding = 0
+            # Window size only meaningful on desktop; skip on mobile.
+            page.window_width = 460
+            page.window_height = 820
+            page.window_min_width = 380
+            page.window_min_height = 640
+
+        # Set window icon (desktop only — .ico is Windows-specific)
+        if not is_mobile:
+            icon_path = self.paths.assets_dir / "app_icon.ico"
+            if icon_path.exists():
+                page.window.icon = str(icon_path.resolve())
 
         # Initialize network diagnostic status indicators
         self.udp_status_dot = ft.Container(
@@ -276,7 +311,6 @@ class BeiyangApp:
             "chat": ChatView(self),
             "moments": MomentsView(self),
             "profile": ProfileView(self),
-            "settings": SettingsView(self),
         }
 
         # Use our custom floating bottom dock
@@ -285,12 +319,20 @@ class BeiyangApp:
             on_change=self._on_nav_change,
         )
 
-        page.add(
-            ft.Column(
+        self._stack = ft.Stack(expand=True)
+        self.root_bg = ft.Image(
+            src="",
+            fit=ft.BoxFit.COVER,
+            opacity=0.08,
+            expand=True,
+            visible=False,
+        )
+        self.root_container = ft.Container(
+            content=ft.Column(
                 [
                     self.top_header,
                     ft.Container(
-                        content=ft.Stack(expand=True),
+                        content=self._stack,
                         expand=True,
                         padding=T.pad_only(left=T.SP_LG, right=T.SP_LG, top=T.SP_LG),
                     ),
@@ -298,10 +340,18 @@ class BeiyangApp:
                 ],
                 spacing=0,
                 expand=True,
+            ),
+            expand=True,
+        )
+        page.add(
+            ft.Stack(
+                [
+                    self.root_bg,
+                    self.root_container,
+                ],
+                expand=True,
             )
         )
-        # the stack will hold view roots; we swap them by index
-        self._stack = page.controls[0].controls[1].content
 
     # -- navigation --------------------------------------------------------
 
@@ -328,13 +378,13 @@ class BeiyangApp:
             self.nav.selected_index = [k for _, k, _ in T.TABS].index(key)
 
         view = self.views[key]
+        self._stack.controls = [view.build()]
         if key == "chat" and kwargs.get("friend"):
             is_group = kwargs.get("is_group", False)
             group_id = kwargs.get("group_id", "")
             view.open_chat(kwargs["friend"], is_group=is_group, group_id=group_id)
         else:
             view.on_enter()
-        self._stack.controls = [view.build()]
         self.page.update()
 
     # -- runtime callback handlers (all UI-side, run on Flet thread) -------
@@ -415,6 +465,107 @@ class BeiyangApp:
         if "moments" in self.views:
             self.views["moments"].on_moments_changed()
 
+    def _on_file_offer_received(self, from_name, filename, size, file_id):
+        """Show accept/decline dialog for an incoming file transfer."""
+        if not self.page:
+            return
+
+        def _format_sz(sz):
+            for unit in ("B", "KiB", "MiB", "GiB"):
+                if sz < 1024 or unit == "GiB":
+                    return f"{sz:.0f} {unit}" if unit == "B" else f"{sz:.1f} {unit}"
+                sz /= 1024
+
+        def accept(_e):
+            dlg.open = False
+            self.page.overlay.remove(dlg)
+            self.message_service.accept_file_offer(file_id)
+            self.show_toast(f"正在接收来自 {from_name} 的文件")
+            self.page.update()
+
+        def decline(_e):
+            dlg.open = False
+            self.page.overlay.remove(dlg)
+            self.message_service.decline_file_offer(file_id)
+            self.show_toast(f"已拒绝 {from_name} 的文件")
+            self.page.update()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("📁 收到文件", weight=ft.FontWeight.BOLD),
+            content=ft.Column(
+                [
+                    ft.Text(f"{from_name} 向你发送文件：", size=T.FS_BODY),
+                    ft.Text(filename, size=T.FS_TITLE, weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.DEEP_PURPLE_400),
+                    ft.Text(f"大小: {_format_sz(size)}", size=T.FS_CAPTION,
+                            color=ft.Colors.ON_SURFACE_VARIANT),
+                ],
+                spacing=T.SP_SM,
+                tight=True,
+                width=300,
+            ),
+            actions=[
+                ft.TextButton("拒绝", on_click=decline,
+                              style=ft.ButtonStyle(color=ft.Colors.RED_400)),
+                ft.ElevatedButton("接收", on_click=accept,
+                                  bgcolor=ft.Colors.DEEP_PURPLE_500,
+                                  color=ft.Colors.WHITE),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
+    def _on_file_received(self, name, path, timestamp):
+        # Avatar transfers also arrive through the file channel. Once the DB
+        # has been updated by MessageService, refresh avatar consumers.
+        if "friends" in self.views:
+            self.views["friends"].refresh()
+        chat = self.views.get("chat")
+        if chat and chat.current_friend:
+            chat.refresh_header()
+        if self.page:
+            self.page.update()
+
+    def _on_profile_update_available(self, name):
+        mode = (self.friend_db.get_app_setting("profile_update_mode", "auto") or "auto")
+        if mode == "manual":
+            if name:
+                self.show_toast(f"{name} 的资料有更新（手动模式）")
+            if "friends" in self.views:
+                self.views["friends"].refresh()
+            return
+
+        # Auto mode — pull immediately.
+        if name:
+            self.show_toast(f"{name} 的资料有更新，正在自动同步...")
+            self.request_friend_profile_update(name, silent=True)
+        if "friends" in self.views:
+            self.views["friends"].refresh()
+
+    def _on_profile_updated(self, name):
+        if name:
+            self.show_toast(f"{name} 的资料已更新")
+        self._on_friends()
+        chat = self.views.get("chat")
+        if chat:
+            chat.refresh_header()
+        # If a profile dialog is open for this friend, refresh it in-place
+        if self._open_profile_dlg and self._open_profile_dlg_name == name:
+            try:
+                self._open_profile_dlg.open = False
+                self.page.update()
+                self.page.overlay.remove(self._open_profile_dlg)
+            except Exception:
+                pass
+            self._open_profile_dlg = None
+            self._open_profile_dlg_name = ""
+            self.show_friend_profile(name)
+        if self.page:
+            self.page.update()
+
     def _on_friend_request(self, profile, is_match, from_ip=None):
         # Flet dialogs must be opened on the UI thread
         profile = dict(profile or {})
@@ -458,7 +609,7 @@ class BeiyangApp:
     def get_my_profile(self):
         p = self.friend_db.get_my_profile()
         p["ip"] = Helpers.get_default_ip()
-        if self.device_name:
+        if self.device_name and not p.get("name"):
             p["name"] = self.device_name
         return p
 
@@ -476,9 +627,73 @@ class BeiyangApp:
 
     def save_profile(self, profile):
         if self.runtime:
-            self.runtime.save_profile(profile)
+            ok = self.runtime.save_profile(profile)
             self.device_name = self.runtime.device_name
-            return True
+            if ok:
+                self.update_theme_and_background()
+                if self.message_service:
+                    self.friend_db.set_app_setting("my_profile_updated_at", str(time.time()))
+                    threading.Thread(
+                        target=self.message_service.broadcast_profile_update_notice,
+                        daemon=True,
+                    ).start()
+                    self._on_friends()
+            return ok
+        return False
+
+    def update_theme_and_background(self):
+        if not self.page or not self.friend_db:
+            return
+        
+        # 1. Update Theme Color
+        theme_color = self.friend_db.get_app_setting("theme_color", "DEEP_PURPLE")
+        import core.frontend.theme as T
+        import os
+        if theme_color in T.THEME_COLORS:
+            color_details = T.THEME_COLORS[theme_color]
+            self.page.theme = ft.Theme(
+                color_scheme_seed=color_details["seed"],
+                visual_density=ft.VisualDensity.COMFORTABLE,
+                font_family="Noto Sans SC",
+            )
+            T.GRADIENT_PRIMARY.colors = color_details["gradient"]
+
+        # 2. Update Background Image
+        profile = self.friend_db.get_my_profile()
+        bg_path = profile.get("background", "").strip()
+        if bg_path and os.path.exists(bg_path):
+            try:
+                import base64
+                with open(bg_path, "rb") as f:
+                    bg_bytes = f.read()
+                self.root_bg.src_base64 = base64.b64encode(bg_bytes).decode()
+                self.root_bg.visible = True
+            except Exception as e:
+                print(f"[BeiyangApp] failed to load global background: {e}")
+                self.root_bg.visible = False
+        else:
+            self.root_bg.visible = False
+        
+        self.page.update()
+
+    def has_friend_profile_update(self, name):
+        return bool(
+            self.message_service
+            and self.message_service.has_pending_profile_update(name)
+        )
+
+    def get_profile_update_mode(self) -> str:
+        if self.friend_db:
+            mode = self.friend_db.get_app_setting("profile_update_mode", "auto")
+            return mode if mode in ("auto", "manual") else "auto"
+        return "auto"
+
+    def request_friend_profile_update(self, name, silent=False):
+        if self.message_service:
+            ok = self.message_service.request_friend_profile(name)
+            if not silent:
+                self.show_toast("已请求更新资料" if ok else "请求更新失败，对方可能不在线")
+            return ok
         return False
 
     def scan_for_people(self):
@@ -563,10 +778,24 @@ class BeiyangApp:
             return self.message_service.send_message(friend_name, text)
         return False
 
-    def send_file_to_friend(self, friend_name, file_path):
+    def send_file_to_friend(self, friend_name, file_path, file_id=""):
         if self.message_service:
-            return self.message_service.send_file(friend_name, file_path)
+            return self.message_service.send_file(
+                friend_name, file_path, file_id=file_id
+            )
         return False
+
+    def pause_file_transfer(self, file_id):
+        return bool(
+            self.message_service
+            and self.message_service.pause_file_transfer(file_id)
+        )
+
+    def resume_file_transfer(self, file_id):
+        return bool(
+            self.message_service
+            and self.message_service.resume_file_transfer(file_id)
+        )
 
     def cancel_file_transfer(self, file_id):
         if self.message_service:
@@ -633,13 +862,31 @@ class BeiyangApp:
             self.page.snack_bar.open = True
             self.page.update()
 
+    def _on_update_profile_click(self, e, dlg, name, update_btn, update_status, actions_row):
+        """Handle 'update profile' button click — keep dialog open, show progress."""
+        update_btn.disabled = True
+        update_btn.text = "更新中..."
+        update_btn.icon = ft.Icons.HOURGLASS_EMPTY_ROUNDED
+        update_status.value = "⏳ 正在请求更新..."
+        update_status.color = ft.Colors.AMBER_400
+        self.page.update()
+        # Send the sync request; _on_profile_updated callback will refresh the dialog
+        ok = self.request_friend_profile_update(name, silent=True)
+        if not ok:
+            update_status.value = "❌ 请求失败，对方可能不在线"
+            update_status.color = ft.Colors.RED_400
+            update_btn.text = "重试"
+            update_btn.icon = ft.Icons.REFRESH_ROUNDED
+            update_btn.disabled = False
+            self.page.update()
+
     def show_friend_profile(self, name):
         if not self.page or not self.friend_db:
             return
-        
+
         my_profile = self.friend_db.get_my_profile()
         is_me = (name == self.device_name or name == my_profile.get("name", ""))
-        
+
         if is_me:
             profile = my_profile
             category = "自己"
@@ -654,7 +901,8 @@ class BeiyangApp:
         port = profile.get("port", "") if not is_me else ""
         bio = profile.get("bio", "这个用户很懒，什么都没写。")
         tags = profile.get("tags", [])
-        
+        has_update = (not is_me) and self.has_friend_profile_update(name)
+
         import json
         if isinstance(tags, str):
             try:
@@ -673,13 +921,34 @@ class BeiyangApp:
                 )
             )
 
+        # Build the "loading" state for the update button
+        update_status = ft.Text("", size=11, color=ft.Colors.GREEN_400, weight=ft.FontWeight.BOLD)
+        update_btn = ft.ElevatedButton(
+            "更新资料",
+            icon=ft.Icons.REFRESH_ROUNDED,
+            on_click=lambda e: self._on_update_profile_click(e, dlg, name, update_btn, update_status, actions_row),
+            bgcolor=ft.Colors.DEEP_PURPLE_500,
+            color=ft.Colors.WHITE,
+        )
+
         def close_dlg(e):
             dlg.open = False
+            self._open_profile_dlg = None
+            self._open_profile_dlg_name = ""
             self.page.update()
             try:
                 self.page.overlay.remove(dlg)
             except Exception:
                 pass
+
+        actions_row = ft.Row(
+            [
+                *([update_btn] if has_update else []),
+                ft.TextButton("关闭", on_click=close_dlg),
+            ],
+            alignment=ft.MainAxisAlignment.END,
+            spacing=8,
+        )
 
         dlg = ft.AlertDialog(
             title=ft.Row(
@@ -716,18 +985,20 @@ class BeiyangApp:
                     ft.Container(height=4),
                     T.section_title("兴趣标签"),
                     ft.Row(tags_chips, wrap=True) if tags_chips else ft.Text("暂无标签", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
+                    update_status,
                 ],
                 spacing=T.SP_SM,
                 tight=True,
                 width=300,
             ),
-            actions=[
-                ft.TextButton("关闭", on_click=close_dlg),
-            ],
+            actions=[actions_row],
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self.page.overlay.append(dlg)
         dlg.open = True
+        # Track this dialog for potential refresh
+        self._open_profile_dlg = dlg
+        self._open_profile_dlg_name = name
         self.page.update()
 
     def create_group(self, group_name: str, members: List[str]) -> str:

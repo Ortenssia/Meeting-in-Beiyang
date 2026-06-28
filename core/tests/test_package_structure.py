@@ -18,6 +18,7 @@ from core.frontend.app import BeiyangApp
 from core.frontend.views.discover import DiscoverView
 from core.frontend.views.friends import FriendsView
 from core.frontend.views.chat import ChatView
+from core.frontend.views.profile import TagInput
 from core.ops.logging_config import NOISY_FRAMEWORK_LOGGERS, configure_logging
 
 
@@ -170,6 +171,12 @@ class _FriendsAppStub:
     def has_unread_chat(self, _name):
         return False
 
+    def has_friend_profile_update(self, _name):
+        return False
+
+    def get_profile_update_mode(self):
+        return "auto"
+
 
 def test_friend_card_popup_menu_uses_current_flet_api():
     view = FriendsView(_FriendsAppStub())
@@ -182,6 +189,24 @@ def test_friend_card_popup_menu_uses_current_flet_api():
         "管理分类",
         "删除好友",
     ]
+
+
+def test_profile_tag_input_adds_current_text_before_save():
+    tags = TagInput("输入兴趣")
+
+    tags.input.value = "编程，篮球"
+    assert tags.get_tags() == ["编程", "篮球"]
+    assert tags.input.value == ""
+
+    class Event:
+        pass
+
+    event = Event()
+    event.control = tags.input
+    tags.input.value = "编程, 摄影"
+    tags._on_input_change(event)
+    tags.input.value = ""
+    assert tags.get_tags() == ["编程", "篮球", "摄影"]
 
 
 def test_avatar_circle_accepts_local_image_path(tmp_path):
@@ -250,7 +275,7 @@ class _ChatAppStub:
     def show_toast(self, _text):
         pass
 
-    def send_file_to_friend(self, friend_name, file_path):
+    def send_file_to_friend(self, friend_name, file_path, file_id=""):
         self.sent_files.append((friend_name, file_path))
         return True
 
@@ -276,6 +301,43 @@ def test_chat_file_status_replaces_existing_bubble_in_place():
     )
 
     assert len(view._msg_list.controls) == 1
+
+
+def test_active_file_bubble_has_determinate_progress_and_pause_button():
+    import flet as ft
+
+    view = ChatView(_ChatAppStub())
+    view._msg_list = ft.Column()
+    view._append_bubble(
+        "Me",
+        view._file_message_content(
+            "正在发送文件",
+            "large.bin",
+            r"C:\Temp\large.bin",
+            "transfer-1",
+        ),
+        "12:00:00",
+        is_self=True,
+    )
+
+    pending = list(view._msg_list.controls)
+    pause_button = None
+    progress_bar = None
+    while pending:
+        control = pending.pop()
+        if isinstance(control, ft.IconButton) and control.tooltip == "暂停传输":
+            pause_button = control
+        if isinstance(control, ft.ProgressBar):
+            progress_bar = control
+        for attr in ("controls", "items"):
+            pending.extend(getattr(control, attr, []) or [])
+        content = getattr(control, "content", None)
+        if content is not None:
+            pending.append(content)
+
+    assert pause_button is not None
+    assert progress_bar is not None
+    assert progress_bar.value == 0.0
 
 
 def test_failed_file_bubble_retry_reuses_same_bubble(tmp_path):
@@ -315,6 +377,28 @@ def test_failed_file_bubble_retry_reuses_same_bubble(tmp_path):
 
     assert app.sent_files == [("Bob", str(file_path))]
     assert len(view._msg_list.controls) == 1
+
+
+def test_incoming_retry_completion_replaces_stale_progress_bubble():
+    import flet as ft
+
+    view = ChatView(_ChatAppStub())
+    view.current_friend = "Alice"
+    view._msg_list = ft.Column()
+
+    view.on_file_progress("old-transfer", "Alice", "driver.exe", 100, 1000, False)
+    view.on_file_progress("new-transfer", "Alice", "driver.exe", 520, 1000, False)
+
+    done_content = view._file_message_content(
+        "文件",
+        "driver.exe",
+        r"C:\Temp\driver.exe",
+        "new-transfer",
+    )
+    view.on_new_message("Alice", done_content, "2026-06-28 12:00:00")
+
+    assert len(view._msg_list.controls) == 1
+    assert view._transfer_widgets == {}
 
 
 def test_root_does_not_contain_python_application_code():

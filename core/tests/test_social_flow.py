@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.backend.services.message_service import MessageService
 from core.backend.services.friend_db import FriendDB
+from core.backend.shared.protocol import Protocol
 
 
 class MockConnectionManager:
@@ -33,12 +34,13 @@ class MockConnectionManager:
         return list(self.online_friends.keys())
 
     def send_to_friend(self, name, data_bytes):
-        # 解析长度前缀 + JSON 消息
+        # 解析长度前缀 + 协议消息（JSON 或二进制文件块）
         header_len = 4
         if len(data_bytes) >= header_len:
             length = struct.unpack('!I', data_bytes[:header_len])[0]
-            body = data_bytes[header_len:header_len+length].decode('utf-8')
-            self.sent_messages.append((name, json.loads(body)))
+            self.sent_messages.append(
+                (name, Protocol.parse_message(data_bytes[header_len:header_len+length]))
+            )
             return True
         return False
 
@@ -355,6 +357,110 @@ class TestSocialFlow:
         payload = json.loads(content.split("] ", 1)[1])
         assert payload["filename"] == "sample.txt"
         assert payload["path"] == str(sample)
+
+    def test_large_file_resumes_after_transient_disconnect(self, tmp_path):
+        class LoopbackConnectionManager:
+            def __init__(self, drop_chunk=None):
+                self.peer_service = None
+                self.online = True
+                self.drop_chunk = drop_chunk
+                self.dropped = False
+                self.reconnect_calls = 0
+                self.tcp_port = 7779
+                self.sent_types = []
+
+            def is_friend_online(self, _name):
+                return self.online
+
+            def get_online_friends(self):
+                return []
+
+            def send_to_friend(self, _name, packed):
+                if not self.online:
+                    return False
+                size = struct.unpack("!I", packed[:4])[0]
+                message = Protocol.parse_message(packed[4:4 + size])
+                self.sent_types.append(
+                    (
+                        message.get("type"),
+                        message.get("chunk_index"),
+                        message.get("next_chunk"),
+                        bool(message.get("binary", False)),
+                    )
+                )
+                if (
+                    message.get("type") == MessageService.FILE_CHUNK
+                    and message.get("chunk_index") == self.drop_chunk
+                    and not self.dropped
+                ):
+                    self.dropped = True
+                    self.online = False
+                    return False
+                self.peer_service.handle_message("127.0.0.1", message)
+                return True
+
+            def connect_to_friend(self, _ip, _port=0, _name=""):
+                self.reconnect_calls += 1
+                self.online = True
+                return True
+
+        sender_db = FriendDB(str(tmp_path / "sender.db"))
+        receiver_db = FriendDB(str(tmp_path / "receiver.db"))
+        sender_db.save_profile({"name": "Alice"})
+        receiver_db.save_profile({"name": "Bob"})
+        sender_db.add_friend("Bob", "127.0.0.1", 7779, [], "")
+        receiver_db.add_friend("Alice", "127.0.0.1", 7779, [], "")
+
+        sender_conn = LoopbackConnectionManager(drop_chunk=24)
+        receiver_conn = LoopbackConnectionManager()
+        sender = MessageService(
+            sender_conn,
+            sender_db,
+            receive_dir=str(tmp_path / "sender_files"),
+            avatar_dir=str(tmp_path / "sender_avatars"),
+        )
+        receiver_dir = tmp_path / "receiver_files"
+        receiver = MessageService(
+            receiver_conn,
+            receiver_db,
+            receive_dir=str(receiver_dir),
+            avatar_dir=str(tmp_path / "receiver_avatars"),
+        )
+        sender_conn.peer_service = receiver
+        receiver_conn.peer_service = sender
+        sender.FILE_ACK_TIMEOUT = 0.2
+        progress_updates = []
+        sender.on_file_progress = lambda *args: progress_updates.append(args)
+
+        payload = bytes(range(256)) * (12 * 1024)  # 3 MiB, several ACK windows
+        source = tmp_path / "large.bin"
+        source.write_bytes(payload)
+        try:
+            result = sender.send_file(
+                "Bob", str(source), file_id="large-transfer"
+            )
+            assert result is True, (sender_conn.sent_types, receiver_conn.sent_types)
+            assert sender_conn.dropped is True
+            assert sender_conn.reconnect_calls == 1
+            assert any(
+                item[0] == MessageService.FILE_CHUNK and item[3] is True
+                for item in sender_conn.sent_types
+            )
+            assert (receiver_dir / "large.bin").read_bytes() == payload
+            assert progress_updates[-1] == (
+                "large-transfer",
+                "Bob",
+                "large.bin",
+                len(payload),
+                len(payload),
+                True,
+            )
+            assert [item[3] for item in progress_updates] == sorted(
+                item[3] for item in progress_updates
+            )
+        finally:
+            sender_db.close()
+            receiver_db.close()
 
     def test_receive_file_writes_to_receive_dir(self, social_env):
         db, _conn_mgr, msg_service = social_env

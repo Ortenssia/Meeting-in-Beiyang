@@ -40,3 +40,20 @@ def test_file_transfer_state_resolves_active_file_id_by_filename():
     assert state.active_file_id_for("received.txt") == "incoming-id"
     assert state.active_file_id_for("sent.txt") == "sender-id"
     assert state.active_file_id_for("missing.txt") == ""
+
+
+def test_file_transfer_state_pauses_resumes_and_cancel_wakes_sender():
+    state = FileTransferState()
+    state.register_sender("file-1", "demo.bin", "Bob")
+
+    assert state.pause_sender("file-1") is True
+    assert state.sender_paused("file-1") is True
+    assert state.sender_pause_event("file-1").is_set() is False
+
+    assert state.resume_sender("file-1") is True
+    assert state.sender_paused("file-1") is False
+    assert state.sender_pause_event("file-1").is_set() is True
+
+    state.pause_sender("file-1")
+    state.mark_sender_cancelled("file-1")
+    assert state.sender_pause_event("file-1").is_set() is True

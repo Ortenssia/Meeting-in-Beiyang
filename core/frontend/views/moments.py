@@ -19,10 +19,9 @@ class MomentsView:
             multiline=True,
             min_lines=2,
             max_lines=5,
-            border_radius=12,
-            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            content_padding=T.pad_all(12),
+            border=ft.InputBorder.NONE,
+            bgcolor=ft.Colors.TRANSPARENT,
+            content_padding=T.pad_all(4),
         )
         self.media_btn = ft.IconButton(
             icon=ft.Icons.IMAGE_ROUNDED,
@@ -55,9 +54,9 @@ class MomentsView:
             publish_card = ft.Container(
                 content=ft.Column(
                     [
-                        ft.Text("发动态 ✍️", size=T.FS_TITLE, weight=ft.FontWeight.BOLD),
                         self.post_input,
                         self.image_preview,
+                        ft.Divider(height=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
                         ft.Row(
                             [
                                 self.media_row,
@@ -69,7 +68,7 @@ class MomentsView:
                     ],
                     spacing=T.SP_SM,
                 ),
-                padding=T.SP_MD,
+                padding=T.pad_symmetric(horizontal=16, vertical=12),
                 border_radius=T.R_MD,
                 bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
                 border=T.border_all(1, ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
@@ -80,7 +79,13 @@ class MomentsView:
                 [
                     ft.Row(
                         [
-                            ft.Text("北洋空间 🌌", size=T.FS_HEADER, weight=ft.FontWeight.W_800),
+                            ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=ft.Colors.DEEP_PURPLE_400, size=24),
+                                    ft.Text("北洋空间", size=T.FS_HEADER, weight=ft.FontWeight.W_800),
+                                ],
+                                spacing=8,
+                            ),
                             ft.IconButton(
                                 icon=ft.Icons.REFRESH_ROUNDED,
                                 tooltip="刷新动态",

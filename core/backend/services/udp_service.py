@@ -130,10 +130,26 @@ class UDPService:
         self._receive_thread: Optional[threading.Thread] = None
         self._cleanup_thread: Optional[threading.Thread] = None
 
+    # Interface name substrings that indicate a virtual / non-physical
+    # adapter whose subnet should NOT be unicast-scanned.
+    _VIRTUAL_IFACE_KW = (
+        "vpn", "tun", "tap", "docker", "vbox", "virtualbox",
+        "vmware", "loopback", "wsl", "hyper-v", "hamachi",
+        "radmin", "zerotier", "tailscale", "wireguard",
+        "utun", "utap", "ppp", "pptp", "l2tp", "sstp",
+    )
+
+    @classmethod
+    def _is_virtual_iface(cls, name: str) -> bool:
+        name_lower = name.lower()
+        return any(kw in name_lower for kw in cls._VIRTUAL_IFACE_KW)
+
     def _get_broadcast_targets(self) -> List[str]:
-        """获取所有潜在的广播目标 IP 地址，包含应对校园网的子网单播扫描。"""
-        # 127.0.0.1 and local interface IPs are required for same-machine
-        # multi-instance tests where each app listens on a different UDP port.
+        """获取所有潜在的广播目标 IP 地址，包含应对校园网的子网单播扫描。
+
+        虚拟网卡（VPN、Docker、WSL 等）的子网不会做单播扫描，
+        因为在虚拟子网里不可能发现真实的局域网用户。
+        """
         targets = ["127.0.0.1", "255.255.255.255"]
         try:
             ifaces = Helpers._detect_interfaces()
@@ -141,24 +157,25 @@ class UDPService:
                 bcast = iface.get("broadcast")
                 if bcast and bcast != "127.255.255.255" and bcast != "255.255.255.255":
                     targets.append(bcast)
-                    
-                # 校园网专属破局方案：对当前的 /24 子网进行主动的单播扫描！
-                # 因为很多校园网 AP 和交换机会屏蔽 `255.255.255.255` 和子网广播包，
-                # 但它们通常不会拦截普通的单播 (Unicast) UDP 数据。
+
                 ip = iface.get("ip")
                 mask = iface.get("mask")
                 if ip:
                     targets.append(ip)
-                
-                # 如果是常见的 255.255.255.0 子网，且不是本机回环
-                if ip and mask == "255.255.255.0" and not ip.startswith("127."):
+
+                # 校园网专属破局方案：对物理网卡的 /24 子网进行主动单播扫描。
+                # 虚拟网卡（Docker、VPN 等）子网不存在真实局域网用户，跳过。
+                if (
+                    ip
+                    and mask == "255.255.255.0"
+                    and not ip.startswith("127.")
+                    and not self._is_virtual_iface(iface.get("name", ""))
+                ):
                     parts = ip.split(".")
                     if len(parts) == 4:
                         prefix = f"{parts[0]}.{parts[1]}.{parts[2]}"
-                        # 将整个网段的 1~254 都加入目标列表
                         for i in range(1, 255):
-                            scan_ip = f"{prefix}.{i}"
-                            targets.append(scan_ip)
+                            targets.append(f"{prefix}.{i}")
         except Exception as e:
             print(f"[UDPService] Error getting targets: {e}")
         return list(set(targets))
@@ -166,6 +183,28 @@ class UDPService:
     # ================================================================== #
     #  生命周期
     # ================================================================== #
+
+    @staticmethod
+    def _acquire_android_multicast_lock():
+        """Acquire a WiFi MulticastLock on Android so UDP broadcasts are
+        received even when the device enters power-saving mode."""
+        try:
+            # Only attempt on Android; the jnius / pyjnius packages are
+            # available inside a p4a / Buildozer / Serious-Python APK.
+            from jnius import autoclass  # type: ignore
+        except ImportError:
+            return None
+        try:
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            Context = autoclass("android.content.Context")
+            wifi = activity.getSystemService(Context.WIFI_SERVICE)
+            lock = wifi.createMulticastLock("beiyang_udp_lock")
+            lock.setReferenceCounted(True)
+            lock.acquire()
+            return lock
+        except Exception:
+            return None
 
     def start(self):
         """
@@ -176,6 +215,10 @@ class UDPService:
         """
         if self.running:
             return
+
+        # On Android, acquire a WiFi MulticastLock before binding the socket
+        # so the radio stays awake for broadcast reception.
+        self.multicast_lock = self._acquire_android_multicast_lock()
 
         # 创建并配置 UDP socket
         try:
@@ -192,6 +235,13 @@ class UDPService:
             print(f"[UDPService] Error binding UDP socket on port {self.port}: {e}")
             self.sock = None
             self.running = False
+            # Release the MulticastLock on failure
+            if self.multicast_lock:
+                try:
+                    self.multicast_lock.release()
+                except Exception:
+                    pass
+                self.multicast_lock = None
             return
 
         # 广播线程：定时发送 PING
@@ -213,7 +263,7 @@ class UDPService:
         self._cleanup_thread.start()
 
     def stop(self):
-        """停止 UDP 服务并关闭 socket并释放锁。"""
+        """停止 UDP 服务并关闭 socket 并释放锁。"""
         self.running = False
         if self.sock:
             try:
@@ -221,6 +271,14 @@ class UDPService:
             except Exception:
                 pass
             self.sock = None
+        # Release Android MulticastLock if held.
+        if self.multicast_lock:
+            try:
+                if self.multicast_lock.isHeld():
+                    self.multicast_lock.release()
+            except Exception:
+                pass
+            self.multicast_lock = None
         
     # ================================================================== #
     #  后台工作线程
@@ -398,9 +456,33 @@ class UDPService:
         current_time = time.time()
         is_new = False
         is_update_notify = False
-        key = device_id or user_id or f"{device_name}@{ip}:{int(tcp_port or 0)}"
+        canonical = device_id or user_id
+        key = canonical or f"{device_name}@{ip}:{int(tcp_port or 0)}"
 
         with self._devices_lock:
+            # ── merge / deduplicate ──────────────────────────────
+            # When a PING arrives with a stable identity (device_id
+            # or user_id), look for any previous fallback-key entry
+            # for the same device_name and fold it into the new key.
+            # This prevents the same person appearing twice in the
+            # discover list (once under their stable id and once
+            # under "name@old-ip:port").
+            if canonical:
+                for existing_key, existing in list(self.devices.items()):
+                    if existing_key == key:
+                        continue
+                    if (
+                        existing.device_name == device_name
+                        and int(existing.tcp_port or 0) == int(tcp_port or 0)
+                        and not (existing.device_id or existing.user_id)
+                    ):
+                        # Stale fallback entry — merge into canonical key.
+                        self.devices[key] = existing
+                        self.devices[key].user_id = user_id
+                        self.devices[key].device_id = device_id
+                        del self.devices[existing_key]
+                        break
+
             if key in self.devices:
                 # 更新已有设备
                 old_device = self.devices[key]

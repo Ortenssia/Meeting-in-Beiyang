@@ -13,7 +13,8 @@ from core.config import get_app_paths
 from core.ops.bootstrap import prepare_runtime
 from core.ops.logging_config import configure_logging
 
-if __name__ == "__main__":
+def main():
+    """Start the desktop or packaged Flet application."""
     prepare_runtime()
 
     parser = argparse.ArgumentParser(description="相识北洋社交应用")
@@ -53,3 +54,7 @@ if __name__ == "__main__":
         name_override=args.name,
         app_paths=paths,
     ).run()
+
+
+if __name__ == "__main__":
+    main()

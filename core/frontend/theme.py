@@ -24,6 +24,49 @@ GRADIENT_PRIMARY = ft.LinearGradient(
     colors=[ft.Colors.DEEP_PURPLE_500, ft.Colors.PINK_500],
 )
 
+THEME_COLORS = {
+    "DEEP_PURPLE": {
+        "seed": ft.Colors.DEEP_PURPLE,
+        "gradient": [ft.Colors.DEEP_PURPLE_500, ft.Colors.PINK_500],
+        "name": "经典深紫",
+    },
+    "PINK": {
+        "seed": ft.Colors.PINK,
+        "gradient": [ft.Colors.PINK_500, ft.Colors.RED_400],
+        "name": "珊瑚粉黛",
+    },
+    "BLUE": {
+        "seed": ft.Colors.BLUE,
+        "gradient": [ft.Colors.BLUE_500, ft.Colors.CYAN_400],
+        "name": "天空湛蓝",
+    },
+    "GREEN": {
+        "seed": ft.Colors.GREEN,
+        "gradient": [ft.Colors.GREEN_600, ft.Colors.TEAL_400],
+        "name": "极光森绿",
+    },
+    "ORANGE": {
+        "seed": ft.Colors.ORANGE,
+        "gradient": [ft.Colors.ORANGE_500, ft.Colors.AMBER_400],
+        "name": "活力暖橙",
+    },
+    "INDIGO": {
+        "seed": ft.Colors.INDIGO,
+        "gradient": [ft.Colors.INDIGO_500, ft.Colors.PURPLE_400],
+        "name": "梦幻星空",
+    },
+    "TEAL": {
+        "seed": ft.Colors.TEAL,
+        "gradient": [ft.Colors.TEAL_600, ft.Colors.GREEN_400],
+        "name": "清新雅致",
+    },
+    "RED": {
+        "seed": ft.Colors.RED,
+        "gradient": [ft.Colors.RED_500, ft.Colors.ORANGE_400],
+        "name": "烈焰热情",
+    },
+}
+
 GRADIENT_SECONDARY = ft.LinearGradient(
     begin=ft.alignment.Alignment.TOP_LEFT,
     end=ft.alignment.Alignment.BOTTOM_RIGHT,
@@ -106,9 +149,8 @@ def avatar_circle(
         # Normalize all slashes to forward slashes first to prevent Windows path mismatch
         name = name.replace("\\", "/")
         name_lower = name.lower()
-        if name_lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp")):
+        if name_lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
             is_image = True
-            img_src = name
             if name.startswith("assets/"):
                 img_src = name[7:]
             elif os.path.isabs(name):
@@ -118,15 +160,25 @@ def avatar_circle(
                             img_src = image_file.read()
                     except Exception:
                         is_image = False
-                        img_src = None
                 else:
                     is_image = False
-                    img_src = None
+            else:
+                img_src = name
 
     r, g, b = avatar_color(name)
     initial = (name or "?").strip()[0].upper() if (name or "").strip() else "?"
     avatar_bg_color = f"#{r:02x}{g:02x}{b:02x}"
     
+    image_ctrl = None
+    if is_image:
+        image_ctrl = ft.Image(
+            src=img_src,
+            width=size - 3,
+            height=size - 3,
+            fit=ft.BoxFit.COVER,
+            border_radius=(size - 3) // 2,
+        )
+
     controls = [
         ft.Container(
             width=size,
@@ -141,12 +193,7 @@ def avatar_circle(
                 border_radius=(size - 3) // 2,
                 alignment=ft.alignment.Alignment.CENTER,
                 clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                content=ft.Image(
-                    src=img_src,
-                    width=size - 3,
-                    height=size - 3,
-                    fit=ft.BoxFit.COVER,
-                ) if is_image else ft.Text(
+                content=image_ctrl if is_image else ft.Text(
                     initial,
                     color=ft.Colors.WHITE,
                     size=int(size * 0.42),
@@ -223,12 +270,10 @@ FS_HEADER = 22
 
 # (label, screen key, icon)
 TABS: List[Tuple[str, str, str]] = [
-    ("发现", "discover", ft.Icons.RADAR_ROUNDED),
-    ("好友", "friends", ft.Icons.PEOPLE_ALT_ROUNDED),
     ("聊天", "chat", ft.Icons.CHAT_ROUNDED),
+    ("联系人", "friends", ft.Icons.PEOPLE_ALT_ROUNDED),
     ("空间", "moments", ft.Icons.DASHBOARD_ROUNDED),
     ("我的", "profile", ft.Icons.ACCOUNT_CIRCLE_ROUNDED),
-    ("设置", "settings", ft.Icons.SETTINGS_SUGGEST_ROUNDED),
 ]
 
 

@@ -18,13 +18,18 @@ class FileMessage:
     status: str
     filename: str
     path: str = ""
+    transfer_id: str = ""
 
 
-def encode_file_message(status: str, filename: str, path: str = "") -> str:
+def encode_file_message(
+    status: str, filename: str, path: str = "", transfer_id: str = ""
+) -> str:
     payload = {
         "filename": filename or DEFAULT_FILE_NAME,
         "path": path or "",
     }
+    if transfer_id:
+        payload["transfer_id"] = transfer_id
     return f"[{status}] " + json.dumps(payload, ensure_ascii=False)
 
 
@@ -34,16 +39,22 @@ def decode_file_message(content: str, default_dir: str = "") -> FileMessage:
     raw = content[idx + 1:].strip() if idx >= 0 else content.strip()
     filename = raw or DEFAULT_FILE_NAME
     file_path = ""
+    transfer_id = ""
 
     if raw.startswith("{"):
         try:
             payload = json.loads(raw)
             filename = payload.get("filename") or filename
             file_path = payload.get("path") or ""
+            transfer_id = payload.get("transfer_id") or ""
         except Exception:
             pass
 
     if not file_path and default_dir:
         file_path = os.path.join(default_dir, filename)
-    return FileMessage(status=status, filename=filename, path=file_path)
-
+    return FileMessage(
+        status=status,
+        filename=filename,
+        path=file_path,
+        transfer_id=transfer_id,
+    )

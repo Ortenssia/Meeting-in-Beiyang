@@ -2,6 +2,8 @@
 import os
 import time
 import threading
+import subprocess
+import uuid
 
 import flet as ft
 
@@ -25,11 +27,14 @@ class ChatView:
         self._header_name = None
         self._header_status = None
         self._scroll_generation = 0
+        self._transfer_widgets = {}
+        self._transfer_watchdogs = set()
         self.file_picker = getattr(app, "chat_file_picker", None) or ft.FilePicker()
         self.compress_checkbox = ft.Checkbox(
-            label="压缩发送",
+            label="压缩",
             value=False,
             fill_color=ft.Colors.DEEP_PURPLE_400,
+            scale=0.9,
         )
 
     # -- build -------------------------------------------------------------
@@ -37,14 +42,22 @@ class ChatView:
     def build(self):
         if self.current_friend:
             return self._build_window()
-        return self._build_list()
+        return self._build_tabs()
 
-    def _build_list(self):
+    def _build_tabs(self):
+        tab_bar = ft.TabBar(
+            tabs=[
+                ft.Tab(label="会话列表", icon=ft.Icons.CHAT_ROUNDED),
+                ft.Tab(label="雷达发现", icon=ft.Icons.RADAR_ROUNDED),
+            ]
+        )
+
+        self._list_col = ft.Column(spacing=T.SP_SM, expand=True, scroll=ft.ScrollMode.AUTO)
         self._list_root = ft.Column(
             [
                 ft.Row(
                     [
-                        ft.Text("消息列表", size=T.FS_HEADER, weight=ft.FontWeight.W_800),
+                        ft.Text("最近会话", size=T.FS_TITLE, weight=ft.FontWeight.BOLD),
                         ft.IconButton(
                             icon=ft.Icons.GROUP_ADD_ROUNDED,
                             icon_color=ft.Colors.DEEP_PURPLE_400,
@@ -54,12 +67,35 @@ class ChatView:
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
-                ft.Column(spacing=T.SP_SM, expand=True, scroll=ft.ScrollMode.AUTO),
+                self._list_col,
             ],
-            spacing=T.SP_SM, expand=True,
+            spacing=T.SP_SM,
+            expand=True,
+        )
+
+        discover_view = self.app.views.get("discover")
+
+        tab_view = ft.TabBarView(
+            expand=True,
+            controls=[
+                self._list_root,
+                discover_view.build(),
+            ]
+        )
+
+        self.tabs = ft.Tabs(
+            length=2,
+            expand=True,
+            content=ft.Column(
+                controls=[
+                    tab_bar,
+                    tab_view,
+                ],
+                expand=True,
+            )
         )
         self._render_list()
-        return self._list_root
+        return self.tabs
 
     def _build_window(self):
         if self.is_group:
@@ -181,14 +217,7 @@ class ChatView:
                     expand=True,
                 ),
                 ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Row([self.compress_checkbox], spacing=5),
-                            ft.Row([attach_btn, self._input, send_btn], spacing=T.SP_SM),
-                        ],
-                        spacing=2,
-                        tight=True,
-                    ),
+                    content=ft.Row([attach_btn, self.compress_checkbox, self._input, send_btn], spacing=T.SP_SM, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     padding=T.pad_only(bottom=T.SP_SM),
                 ),
             ],
@@ -216,40 +245,52 @@ class ChatView:
                 self.page.update()
 
     def refresh_header(self):
+        """Update the chat-window header (avatar + online status).
+
+        Returns early when nothing actually changed — rebuilding the avatar
+        widget tree would otherwise cause a visible flicker even though the
+        underlying image file is already on local disk.
+        """
         if not self.current_friend or not self._header_avatar:
             return
-            
+
         if self.is_group:
             group = self.app.friend_db.get_group(self.current_group_id)
             member_count = len(group.get("members", [])) if group else 0
-            self._header_avatar = ft.GestureDetector(
-                mouse_cursor=ft.MouseCursor.CLICK,
-                on_tap=lambda _: self.show_group_settings(self.current_group_id),
-                content=T.avatar_circle("group", T.AVATAR_MD)
-            )
-            self._header_status.value = f"{member_count} 个成员"
+            new_status = f"{member_count} 个成员"
+            if (getattr(self, "_last_group_members", 0) == member_count
+                    and self._header_status.value == new_status):
+                return  # nothing changed
+            self._last_group_members = member_count
+            self._header_avatar.content = T.avatar_circle("group", T.AVATAR_MD)
+            self._header_status.value = new_status
             self._header_status.color = ft.Colors.ON_SURFACE_VARIANT
             self._header_status.weight = ft.FontWeight.NORMAL
         else:
             online = self.current_friend in [
                 f.get("name") for f in self.app.get_online_friends()
             ]
-            self._header_avatar = ft.GestureDetector(
-                mouse_cursor=ft.MouseCursor.CLICK,
-                on_tap=lambda _: self.app.show_friend_profile(self.current_friend) if hasattr(self.app, "show_friend_profile") else None,
-                content=T.avatar_circle(
-                    self.app.get_avatar_for_name(self.current_friend),
-                    T.AVATAR_MD,
-                    online=online,
-                )
+            avatar_src = self.app.get_avatar_for_name(self.current_friend)
+            new_status = "在线" if online else "离线"
+            new_color = ft.Colors.GREEN_400 if online else ft.Colors.ON_SURFACE_VARIANT
+            new_weight = ft.FontWeight.BOLD if online else ft.FontWeight.NORMAL
+
+            # Skip the entire rebuild when nothing changed — same avatar
+            # source AND same online status.  This is the key flicker fix.
+            if (getattr(self, "_last_avatar_src", "") == avatar_src
+                    and getattr(self, "_last_online", None) == online
+                    and self._header_status.value == new_status):
+                return
+
+            self._last_avatar_src = avatar_src
+            self._last_online = online
+            self._header_avatar.content = T.avatar_circle(
+                avatar_src, T.AVATAR_MD, online=online,
             )
-            self._header_status.value = "在线" if online else "离线"
-            self._header_status.color = ft.Colors.GREEN_400 if online else ft.Colors.ON_SURFACE_VARIANT
-            self._header_status.weight = ft.FontWeight.BOLD if online else ft.FontWeight.NORMAL
-            
-        # Rebuild chat window header controls
-        header_row = self._window_root.controls[0].content
-        header_row.controls[1] = self._header_avatar
+            self._header_status.value = new_status
+            self._header_status.color = new_color
+            self._header_status.weight = new_weight
+
         if self.page:
             self.page.update()
 
@@ -282,7 +323,7 @@ class ChatView:
                         spacing=T.SP_SM,
                     ),
                     padding=T.SP_2XL, 
-                    alignment=ft.Alignment.CENTER, 
+                    alignment=ft.alignment.Alignment.CENTER,
                     expand=True,
                 )
             )
@@ -392,6 +433,7 @@ class ChatView:
         is_file_msg = False
         file_status = ""
         filename = ""
+        transfer_id = ""
         
         if content.startswith("[") and "]" in content:
             idx = content.find("]")
@@ -401,14 +443,15 @@ class ChatView:
                 is_file_msg = True
                 filename = file_info["filename"]
                 file_path = file_info["path"]
+                transfer_id = file_info["transfer_id"]
                 file_status = tag
 
         if is_file_msg:
             # Resolve file_id for active cancel action
-            file_id = ""
+            file_id = transfer_id
             if self.app.message_service:
                 with self.app.message_service._file_lock:
-                    file_id = self.app.message_service.file_transfer.active_file_id_for(filename)
+                    file_id = file_id or self.app.message_service.file_transfer.active_file_id_for(filename)
             
             # Styled File Card Redesign
             card_color = ft.Colors.with_opacity(0.08, ft.Colors.WHITE if is_self else ft.Colors.DEEP_PURPLE)
@@ -418,8 +461,8 @@ class ChatView:
             pb_color = ft.Colors.WHITE if is_self else ft.Colors.BLUE_400
             
             if "正在" in file_status:
-                pb_val = None  # Indeterminate progress
-                status_text = "📁 " + file_status
+                pb_val = 0.0
+                status_text = "📁 " + file_status + " · 0% · --/s"
             elif "失败" in file_status:
                 pb_val = 1.0
                 pb_color = ft.Colors.RED_400
@@ -435,7 +478,7 @@ class ChatView:
                 def worker():
                     if os.path.exists(file_path):
                         try:
-                            os.startfile(file_path)
+                            self._open_file_with_os(file_path)
                         except Exception as e:
                             self.show_toast(f"打开文件失败: {e}")
                     else:
@@ -448,17 +491,16 @@ class ChatView:
                     folder_path = os.path.dirname(file_path) or self.app.get_receive_dir()
                     if os.path.exists(file_path):
                         try:
-                            import subprocess
-                            subprocess.run(f'explorer /select,"{file_path.replace("/", "\\")}"')
+                            self._open_folder_with_os(file_path, folder_path)
                         except Exception:
                             try:
-                                os.startfile(folder_path)
+                                self._open_file_with_os(folder_path)
                             except Exception as e:
                                 self.show_toast(f"打开文件夹失败: {e}")
                     else:
                         if os.path.exists(folder_path):
                             try:
-                                os.startfile(folder_path)
+                                self._open_file_with_os(folder_path)
                             except Exception as e:
                                 self.show_toast(f"打开文件夹失败: {e}")
                         else:
@@ -467,12 +509,13 @@ class ChatView:
                 threading.Thread(target=worker, daemon=True).start()
 
             def copy_path():
-                def worker():
+                # set_clipboard must run on the UI thread
+                try:
                     if self.page:
                         self.page.set_clipboard(file_path)
                         self.show_toast("文件路径已复制")
-                import threading
-                threading.Thread(target=worker, daemon=True).start()
+                except Exception:
+                    pass
 
             def decompress_zip():
                 def worker():
@@ -497,8 +540,9 @@ class ChatView:
                     self.show_toast("原文件不存在，无法续传")
                     return
                 target_friend = self.current_friend
+                retry_id = str(uuid.uuid4())
                 pending_content = self._file_message_content(
-                    "正在发送文件", filename, file_path
+                    "正在发送文件", filename, file_path, retry_id
                 )
                 retry_row = self._replace_bubble(
                     row,
@@ -513,9 +557,13 @@ class ChatView:
                 def worker():
                     ok = False
                     if target_friend and not self.is_group:
-                        ok = self.app.send_file_to_friend(target_friend, file_path)
+                        ok = self.app.send_file_to_friend(
+                            target_friend, file_path, retry_id
+                        )
                     status = "文件" if ok else "文件发送失败"
-                    done_content = self._file_message_content(status, filename, file_path)
+                    done_content = self._file_message_content(
+                        status, filename, file_path, retry_id
+                    )
                     self._replace_bubble(
                         retry_row,
                         self.app.device_name,
@@ -523,10 +571,69 @@ class ChatView:
                         time.strftime("%H:%M:%S", time.localtime()),
                         is_self=True,
                     )
+                    self._transfer_widgets.pop(retry_id, None)
                     if self.page:
                         self.page.update()
 
                 threading.Thread(target=worker, daemon=True).start()
+
+            status_label = ft.Text(
+                status_text,
+                size=T.FS_CAPTION,
+                color=(
+                    ft.Colors.with_opacity(0.7, ft.Colors.WHITE)
+                    if is_self else ft.Colors.ON_SURFACE_VARIANT
+                ),
+                overflow=ft.TextOverflow.ELLIPSIS,
+                max_lines=1,
+                width=220,
+            )
+            detail_label = ft.Text(
+                "",
+                size=11,
+                color=(
+                    ft.Colors.with_opacity(0.55, ft.Colors.WHITE)
+                    if is_self else ft.Colors.ON_SURFACE_VARIANT
+                ),
+                overflow=ft.TextOverflow.ELLIPSIS,
+                max_lines=1,
+                width=220,
+            )
+            progress_bar = ft.ProgressBar(
+                value=pb_val,
+                color=pb_color,
+                bgcolor=ft.Colors.with_opacity(0.15, ft.Colors.ON_SURFACE),
+                height=4,
+            )
+
+            def toggle_pause():
+                widget = self._transfer_widgets.get(file_id)
+                if not widget:
+                    return
+                if widget.get("paused"):
+                    if self.app.resume_file_transfer(file_id):
+                        widget["paused"] = False
+                        widget["last_time"] = time.monotonic()
+                        widget["pause_button"].icon = ft.Icons.PAUSE_ROUNDED
+                        widget["pause_button"].tooltip = "暂停传输"
+                else:
+                    if self.app.pause_file_transfer(file_id):
+                        widget["paused"] = True
+                        widget["pause_button"].icon = ft.Icons.PLAY_ARROW_ROUNDED
+                        widget["pause_button"].tooltip = "继续传输"
+                        widget["status"].value = (
+                            f"⏸ 已暂停 · {widget.get('percent', 0):.0f}% · --/s"
+                        )
+                if self.page:
+                    self.page.update()
+
+            pause_button = ft.IconButton(
+                icon=ft.Icons.PAUSE_ROUNDED,
+                icon_color=ft.Colors.WHITE,
+                icon_size=18,
+                tooltip="暂停传输",
+                on_click=lambda _: toggle_pause(),
+            )
 
             bubble_content = ft.Column(
                 [
@@ -542,17 +649,17 @@ class ChatView:
                                         color=ft.Colors.WHITE if is_self else ft.Colors.ON_SURFACE,
                                         overflow=ft.TextOverflow.ELLIPSIS, 
                                         max_lines=1,
-                                        width=150
+                                        width=220,
                                     ),
-                                    ft.Text(
-                                        status_text, 
-                                        size=T.FS_CAPTION, 
-                                        color=ft.Colors.with_opacity(0.7, ft.Colors.WHITE) if is_self else ft.Colors.ON_SURFACE_VARIANT
-                                    ),
+                                    status_label,
+                                    detail_label,
                                 ],
                                 spacing=2,
                                 expand=True,
                             ),
+                            pause_button if (
+                                "正在" in file_status and file_id and is_self
+                            ) else ft.Container(),
                             ft.IconButton(
                                 icon=ft.Icons.CANCEL_OUTLINED,
                                 icon_color=ft.Colors.RED_400 if is_self else ft.Colors.RED_300,
@@ -617,7 +724,7 @@ class ChatView:
                         ],
                         spacing=T.SP_SM,
                     ),
-                    ft.ProgressBar(value=pb_val, color=pb_color, bgcolor=ft.Colors.with_opacity(0.15, ft.Colors.ON_SURFACE), height=3),
+                    progress_bar,
                 ],
                 spacing=T.SP_SM,
             )
@@ -708,7 +815,7 @@ class ChatView:
 
         bubble = ft.Container(
             content=bubble_content,
-            width=250 if is_file_msg else None,
+            width=420 if is_file_msg else None,
             gradient=T.GRADIENT_PRIMARY if is_self and not is_file_msg else None,
             bgcolor=ft.Colors.with_opacity(0.18, ft.Colors.DEEP_PURPLE_400) if is_self and is_file_msg else (None if is_self else ft.Colors.SURFACE_CONTAINER_HIGH),
             border_radius=T.radius_only(
@@ -737,17 +844,41 @@ class ChatView:
                          alignment=ft.MainAxisAlignment.END, vertical_alignment=ft.CrossAxisAlignment.END)
         else:
             row = ft.Row([avatar, bubble], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.END)
-            
+
+        if is_file_msg and file_id and "正在" in file_status:
+            self._transfer_widgets[file_id] = {
+                "row": row,
+                "progress": progress_bar,
+                "status": status_label,
+                "detail": detail_label,
+                "pause_button": pause_button,
+                "paused": False,
+                "percent": 0.0,
+                "last_completed": 0,
+                "last_time": time.monotonic(),
+                "speed": 0.0,
+                "sending": is_self,
+                "peer_name": from_name,
+                "filename": filename,
+            }
+            self._start_transfer_watchdog(file_id)
+
         self._msg_list.controls.append(row)
         self._scroll_bottom()
         return row
 
     def _file_info_from_content(self, content):
         decoded = decode_file_message(content, self.app.get_receive_dir())
-        return {"filename": decoded.filename, "path": decoded.path}
+        return {
+            "filename": decoded.filename,
+            "path": decoded.path,
+            "transfer_id": decoded.transfer_id,
+        }
 
-    def _file_message_content(self, status, filename, file_path):
-        return encode_file_message(status, filename, file_path)
+    def _file_message_content(
+        self, status, filename, file_path, transfer_id=""
+    ):
+        return encode_file_message(status, filename, file_path, transfer_id)
 
     def _replace_bubble(self, old_row, from_name, content, timestamp, is_self=False):
         if not self._msg_list:
@@ -788,6 +919,70 @@ class ChatView:
 
         threading.Thread(target=delayed_scroll, daemon=True).start()
 
+    # -- platform helpers --------------------------------------------------
+
+    @staticmethod
+    def _is_android() -> bool:
+        """Best-effort Android detection (matches paths._is_android)."""
+        if hasattr(os, "getandroidapplication"):
+            return True
+        if "ANDROID_ARGUMENT" in os.environ or "ANDROID_APP_PATH" in os.environ:
+            return True
+        return False
+
+    @classmethod
+    def _open_file_with_os(cls, file_path: str):
+        """Open a file with the OS default handler (cross-platform)."""
+        import platform
+        import subprocess
+        system = platform.system()
+        if cls._is_android():
+            # Android: use the Intent system via am
+            try:
+                subprocess.run(
+                    ["am", "start", "-a", "android.intent.action.VIEW",
+                     "-d", f"file://{file_path}",
+                     "-t", "*/*"],
+                    check=False,
+                )
+            except FileNotFoundError:
+                pass
+        elif system == "Windows":
+            os.startfile(file_path)
+        elif system == "Darwin":
+            subprocess.run(["open", file_path], check=True)
+        else:
+            # Linux
+            subprocess.run(["xdg-open", file_path], check=False)
+
+    @classmethod
+    def _open_folder_with_os(cls, file_path: str, folder_path: str):
+        """Open the file's containing folder (cross-platform)."""
+        import platform
+        import subprocess
+        system = platform.system()
+        if cls._is_android():
+            # Android: open the parent folder via content URI or fall back
+            # to opening the file itself (which is better than crashing).
+            try:
+                subprocess.run(
+                    ["am", "start", "-a", "android.intent.action.VIEW",
+                     "-d", f"file://{folder_path}"],
+                    check=False,
+                )
+            except FileNotFoundError:
+                cls._open_file_with_os(file_path)
+        elif system == "Windows":
+            subprocess.run(
+                f'explorer /select,"{file_path.replace("/", "\\")}"',
+                shell=True,
+            )
+        elif system == "Darwin":
+            subprocess.run(["open", "-R", file_path], check=True)
+        else:
+            # Linux
+            subprocess.run(["xdg-open", folder_path], check=False)
+
     # -- events ------------------------------------------------------------
 
     def _on_send(self, _e):
@@ -807,10 +1002,17 @@ class ChatView:
                 self.page.update()
         threading.Thread(target=task, daemon=True).start()
 
-    def _pick_file(self, _e):
+    async def _pick_file(self, _e):
+        # Try native tkinter file dialog first (desktop); fall back to
+        # Flet FilePicker on Android where tkinter is not available.
+        try:
+            import tkinter as tk
+        except ImportError:
+            await self._pick_file_flet()
+            return
+
         import threading
         def _do_pick():
-            import tkinter as tk
             from tkinter import filedialog
             root = tk.Tk()
             root.withdraw()
@@ -823,6 +1025,23 @@ class ChatView:
             if file_path:
                 self._send_file(file_path)
         threading.Thread(target=_do_pick, daemon=True).start()
+
+    async def _pick_file_flet(self):
+        """Use Flet FilePicker for platforms without tkinter (Android)."""
+        picker = getattr(self.app, "chat_file_picker", None)
+        if not picker:
+            picker = ft.FilePicker()
+            self.app.chat_file_picker = picker
+        # FilePicker is a Service in Flet 0.85+.
+        page = self.page
+        if page and picker not in page.services:
+            page.services.append(picker)
+
+        files = await picker.pick_files(
+            dialog_title="选择要发送的文件",
+        )
+        if files and files[0].path:
+            self._send_file(files[0].path)
 
     def _send_file(self, file_path):
         if not self.current_friend:
@@ -843,7 +1062,10 @@ class ChatView:
                 
         filename = os.path.basename(file_path)
         ts = time.strftime("%H:%M:%S", time.localtime())
-        sending_content = self._file_message_content("正在发送文件", filename, file_path)
+        transfer_id = str(uuid.uuid4()) if not self.is_group else ""
+        sending_content = self._file_message_content(
+            "正在发送文件", filename, file_path, transfer_id
+        )
         
         if self.is_group:
             sending_row = self._append_bubble(self.app.device_name, sending_content, ts, is_self=True)
@@ -877,13 +1099,19 @@ class ChatView:
             sending_row = self._append_bubble(self.app.device_name, sending_content, ts, is_self=True)
             if self.page:
                 self.page.update()
+            target_friend = self.current_friend
 
             def worker():
-                ok = self.app.send_file_to_friend(self.current_friend, file_path)
+                ok = self.app.send_file_to_friend(
+                    target_friend, file_path, transfer_id
+                )
                 done_ts = time.strftime("%H:%M:%S", time.localtime())
                 status = "文件" if ok else "文件发送失败"
-                content = self._file_message_content(status, filename, file_path)
+                content = self._file_message_content(
+                    status, filename, file_path, transfer_id
+                )
                 self._replace_bubble(sending_row, self.app.device_name, content, done_ts, is_self=True)
+                self._transfer_widgets.pop(transfer_id, None)
                 if self.page:
                     self.page.update()
             threading.Thread(target=worker, daemon=True).start()
@@ -918,11 +1146,231 @@ class ChatView:
 
     # -- incoming ----------------------------------------------------------
 
+    # Sliding window for real-time file-transfer speed (seconds).
+    _SPEED_WINDOW = 3.0
+
+    @staticmethod
+    def _format_bytes(value):
+        value = float(max(0, value or 0))
+        for unit in ("B", "KiB", "MiB", "GiB"):
+            if value < 1024 or unit == "GiB":
+                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            value /= 1024
+
+    @classmethod
+    def _format_speed(cls, bytes_per_second):
+        if not bytes_per_second or bytes_per_second <= 0:
+            return "0 B/s"
+        return f"{cls._format_bytes(bytes_per_second)}/s"
+
+    # ── transfer watchdog ──────────────────────────────────────────────
+
+    def _start_transfer_watchdog(self, file_id):
+        """Periodically refresh stalled transfers so speed decays toward 0."""
+        if not file_id or file_id in self._transfer_watchdogs:
+            return
+        self._transfer_watchdogs.add(file_id)
+
+        def watchdog():
+            try:
+                while True:
+                    time.sleep(0.8)
+                    widget = self._transfer_widgets.get(file_id)
+                    if not widget:
+                        return
+                    if widget.get("paused"):
+                        continue
+                    percent = float(widget.get("percent", 0.0) or 0.0)
+                    if percent >= 100:
+                        return
+                    idle = time.monotonic() - float(widget.get("last_data_ts", 0.0))
+                    if idle < 1.5:
+                        continue
+
+                    # Decay the displayed speed so the user sees it slowing.
+                    self._update_speed(widget, 0, widget.get("last_completed", 0))
+                    direction = "发送" if widget.get("sending") else "接收"
+                    widget["status"].value = (
+                        f"⏳ {direction}等待对端/网络 · {percent:.0f}% · "
+                        f"{self._format_speed(widget.get('speed', 0.0))}"
+                    )
+                    if self.page:
+                        try:
+                            self.page.update()
+                        except Exception:
+                            return
+            finally:
+                self._transfer_watchdogs.discard(file_id)
+
+        threading.Thread(target=watchdog, daemon=True).start()
+
+    # ── speed calculation (sliding-window, real-time) ───────────────────
+
+    @classmethod
+    def _update_speed(cls, widget: dict, completed: int, prev_completed: int):
+        """Recalculate instant speed using a sliding window of samples.
+
+        Stores ``_speed_samples`` as a deque of *(monotonic_ts, bytes)* in
+        *widget*.  Samples older than ``_SPEED_WINDOW`` seconds are pruned
+        on every call so the speed always reflects the recent throughput,
+        even when the transfer is idle (speed naturally decays to 0).
+        """
+        now = time.monotonic()
+        samples = widget.setdefault("_speed_samples", [])
+        # Append a new sample when bytes actually advanced.
+        if completed > prev_completed:
+            samples.append((now, completed))
+        # Prune samples older than the window.
+        cutoff = now - cls._SPEED_WINDOW
+        while len(samples) > 1 and samples[0][0] < cutoff:
+            samples.pop(0)
+        # Compute windowed speed.
+        if len(samples) >= 2:
+            window_dt = samples[-1][0] - samples[0][0]
+            window_db = samples[-1][1] - samples[0][1]
+            instant = window_db / max(0.05, window_dt)
+        elif completed > 0:
+            # Not enough history yet — fall back to average since start.
+            start_ts = widget.get("_start_ts", now)
+            elapsed = max(0.05, now - start_ts)
+            instant = completed / elapsed
+        else:
+            instant = 0.0
+        # Exponential moving average for display smoothness.
+        prev = float(widget.get("speed", 0.0) or 0.0)
+        alpha = 0.45  # higher = more responsive
+        widget["speed"] = instant if prev <= 0 else prev * (1 - alpha) + instant * alpha
+
+    # ── widget lookup ───────────────────────────────────────────────────
+
+    def _find_transfer_widget(self, peer_name="", filename="", sending=None):
+        for transfer_id, widget in list(self._transfer_widgets.items()):
+            if peer_name and widget.get("peer_name") != peer_name:
+                continue
+            if filename and widget.get("filename") != filename:
+                continue
+            if sending is not None and bool(widget.get("sending")) != bool(sending):
+                continue
+            return transfer_id, widget
+        return "", None
+
+    # ── progress callback (called by MessageService) ────────────────────
+
+    def on_file_progress(
+        self, file_id, peer_name, filename, completed, total, sending,
+        confirmed=0,
+    ):
+        """Update transfer widget for *file_id*.
+
+        *completed*  – bytes sent (sender) or written (receiver) so far.
+        *confirmed*  – bytes the remote side has acknowledged (sender only).
+        """
+        widget = self._transfer_widgets.get(file_id)
+        if not widget:
+            old_id, old_widget = self._find_transfer_widget(
+                peer_name=peer_name,
+                filename=filename,
+                sending=sending,
+            )
+            if old_widget:
+                self._transfer_widgets.pop(old_id, None)
+                self._transfer_widgets[file_id] = old_widget
+                widget = old_widget
+        if (
+            not widget
+            and not sending
+            and self.current_friend == peer_name
+            and not self.is_group
+            and self._msg_list is not None
+        ):
+            file_path = ""
+            service = self.app.message_service
+            if service:
+                with service._file_lock:
+                    state = service._incoming_files.get(file_id, {})
+                    file_path = state.get("final_path", "")
+            content = self._file_message_content(
+                "正在接收文件", filename, file_path, file_id
+            )
+            self._append_bubble(
+                peer_name,
+                content,
+                time.strftime("%H:%M:%S", time.localtime()),
+                is_self=False,
+            )
+            widget = self._transfer_widgets.get(file_id)
+            self._start_transfer_watchdog(file_id)
+
+        if not widget:
+            return
+
+        last_completed = int(widget.get("last_completed", 0) or 0)
+        if completed < last_completed:
+            return
+
+        # Record the moment we first see data so speed calculation has a
+        # meaningful baseline.
+        if last_completed == 0 and completed > 0:
+            widget.setdefault("_start_ts", time.monotonic())
+        if completed > last_completed:
+            widget["last_data_ts"] = time.monotonic()
+
+        # ── real-time speed (sliding window) ──
+        self._update_speed(widget, completed, last_completed)
+
+        progress = min(1.0, max(0.0, completed / total)) if total else 0.0
+        percent = progress * 100
+        widget["last_completed"] = int(completed)
+        widget["percent"] = percent
+        widget["progress"].value = progress
+
+        if not widget.get("paused"):
+            if sending and confirmed and confirmed > 0:
+                # Show both local-sent and remote-confirmed bytes so the
+                # user can see that the other side is keeping up.
+                action = "正在发送"
+                widget["status"].value = (
+                    f"📤 {action} · {percent:.0f}% · "
+                    f"{self._format_speed(widget.get('speed', 0.0))}"
+                )
+                widget["detail"].value = (
+                    f"已发 {self._format_bytes(completed)} · "
+                    f"已确认 {self._format_bytes(confirmed)} / {self._format_bytes(total)}"
+                )
+            else:
+                action = "正在发送" if sending else "正在接收"
+                widget["status"].value = (
+                    f"{'📤' if sending else '📥'} {action} · {percent:.0f}% · "
+                    f"{self._format_speed(widget.get('speed', 0.0))}"
+                )
+                widget["detail"].value = (
+                    f"{self._format_bytes(completed)} / {self._format_bytes(total)}"
+                )
+
     def on_new_message(self, from_name, content, timestamp):
         ts = timestamp
         if len(timestamp) >= 19:
             ts = timestamp[11:19]
         if self.current_friend == from_name and not self.is_group and self._msg_list is not None:
+            decoded = decode_file_message(content, self.app.get_receive_dir())
+            widget = None
+            if decoded.transfer_id:
+                widget = self._transfer_widgets.pop(decoded.transfer_id, None)
+            if not widget and decoded.filename:
+                old_id, widget = self._find_transfer_widget(
+                    peer_name=from_name,
+                    filename=decoded.filename,
+                    sending=False,
+                )
+                if widget:
+                    self._transfer_widgets.pop(old_id, None)
+            if widget:
+                self._replace_bubble(
+                    widget["row"], from_name, content, ts, is_self=False
+                )
+                if self.page:
+                    self.page.update()
+                return
             self._append_bubble(from_name, content, ts, is_self=False)
             if self.page:
                 self.page.update()

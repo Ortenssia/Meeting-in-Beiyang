@@ -1,0 +1,28 @@
+[project]
+name = "meeting-in-beiyang"
+version = "1.0.0"
+description = "相识北洋校园局域网社交应用"
+requires-python = ">=3.10"
+dependencies = [
+    "flet==0.85.3",
+    "plyer>=2.0.0",
+]
+
+[tool.flet]
+product = "相识北洋"
+org = "io.github.ortenssia"
+bundle_id = "io.github.ortenssia.meetinginbeiyang"
+
+[tool.flet.app]
+module = "main"
+
+[tool.flet.android]
+min_sdk_version = 24
+target_sdk_version = 35
+adaptive_icon_background = "#673AB7"
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.ACCESS_NETWORK_STATE" = true
+"android.permission.ACCESS_WIFI_STATE" = true
+"android.permission.CHANGE_WIFI_MULTICAST_STATE" = true

@@ -166,15 +166,36 @@ class ConnectionManager:
     def _accept_worker(self):
         """
         接受连接线程：循环 accept()，为每个新连接启动接收线程。
+
+        如果已有到该 IP 的已命名连接，直接关闭新连接。
+        TCP 双向通道只需一条，多余的入站连接是网络波动或双方同时
+        重连导致的重复握手。
         """
         while self._running:
             try:
                 client_sock, addr = self._server_socket.accept()
                 client_ip = addr[0]
+                client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+                # 已有到该 IP 的已命名连接 → 关闭重复入站连接
+                dup = False
+                with self._lock:
+                    for info in self.connections.values():
+                        if info.get("ip") == client_ip and not self._looks_like_ip(
+                            info.get("name", "")
+                        ):
+                            dup = True
+                            break
+                if dup:
+                    logger.debug("已有到 %s 的连接，关闭重复入站连接", client_ip)
+                    try:
+                        client_sock.close()
+                    except Exception:
+                        pass
+                    continue
 
                 logger.info("收到入站连接: %s", client_ip)
 
-                # 为该连接启动接收线程
                 recv_thread = threading.Thread(
                     target=self._receive_worker,
                     args=(client_sock, client_ip),
@@ -184,10 +205,8 @@ class ConnectionManager:
                 recv_thread.start()
 
             except socket.timeout:
-                # accept 超时是正常的，用于检查 _running 标志
                 continue
             except OSError:
-                # socket 已关闭
                 break
             except Exception as e:
                 if self._running:
@@ -303,19 +322,24 @@ class ConnectionManager:
         """
         主动向好友发起 TCP 连接，并加入连接池。
 
-        连接成功后会启动接收线程，并通过 on_friend_connected 回调通知上层。
-
-        Args:
-            ip:   好友 IP 地址。
-            port: 好友 TCP 端口，传入 0 或不传则使用默认端口 7779。
-            name: 好友名字（可选，若已知的话）。
+        若已有到该 IP:port 的已命名连接，直接返回 True 而不创建新连接。
+        TCP 是双向的，一个连接足够双方收发。
 
         Returns:
-            True 表示连接成功，False 表示失败。
+            True 表示连接成功（或已存在），False 表示失败。
         """
         friend_port = port if port > 0 else Protocol.DEFAULT_TCP_PORT
         if not self._running:
             return False
+
+        # 已有到该 IP:port 的已命名连接 → 不需要重复建连
+        if self.is_connected(ip, friend_port):
+            with self._lock:
+                key = self._endpoint_key(ip, friend_port)
+                existing = self.connections.get(key)
+                existing_name = existing.get("name", "") if existing else ""
+            if existing_name and not self._looks_like_ip(existing_name):
+                return True
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -324,9 +348,24 @@ class ConnectionManager:
             if not self._running:
                 sock.close()
                 return False
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.settimeout(None)  # 连接成功后恢复阻塞模式
 
             key = self._register_connection(sock, ip, name or ip, friend_port)
+
+            # _register_connection may have closed *sock* when the endpoint
+            # already had an alive connection (duplicate-connection guard).
+            # In that case the profile-exchange was already sent by the
+            # existing connection — just report success.
+            try:
+                sock.getpeername()
+            except OSError:
+                # sock was closed → connection already existed.
+                logger.info(
+                    "已连接到好友（复用已有连接）: %s (%s:%d)",
+                    name, ip, friend_port,
+                )
+                return True
 
             # 主动连接后立即交换身份，避免入站侧只能靠后续业务消息猜名字。
             profile_msg = Protocol.create_profile_exchange(
@@ -581,15 +620,48 @@ class ConnectionManager:
         return f"{ip}:{port}" if port > 0 else ip
 
     def _find_connection_key(self, ip_or_name: str) -> Optional[str]:
+        # 1) exact key match
         if ip_or_name in self.connections:
             return ip_or_name
+        # 2) match by registered name
         for key, info in self.connections.items():
             if info.get("name") == ip_or_name:
                 return key
+        # 3) match by IP only (handles bare IP and "ip:port" strings)
+        candidate_ip = ip_or_name
+        if ":" in ip_or_name:
+            candidate_ip = ip_or_name.rsplit(":", 1)[0]
+        for key, info in self.connections.items():
+            if info.get("ip") == candidate_ip:
+                return key
+        # 4) match by original string as IP
         for key, info in self.connections.items():
             if info.get("ip") == ip_or_name:
                 return key
         return None
+
+    @staticmethod
+    def _socket_alive(sock: Optional[socket.socket]) -> bool:
+        """Return True if *sock* appears to still be a usable TCP connection."""
+        if sock is None:
+            return False
+        try:
+            # getpeername succeeds for connected sockets and raises for
+            # sockets that have been closed or lost the peer.
+            sock.getpeername()
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _looks_like_ip(value: str) -> bool:
+        """Return True when *value* is a bare IP address rather than a nickname."""
+        if not value:
+            return True
+        parts = value.split(".")
+        if len(parts) != 4:
+            return False
+        return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
 
     def _register_connection(
         self,
@@ -598,9 +670,17 @@ class ConnectionManager:
         name: str,
         port: int = 0,
     ) -> str:
+        """Register (or update) a TCP connection in the pool.
+
+        Duplicate connections to the same endpoint are prevented upstream by
+        ``_accept_worker`` and ``connect_to_friend``.  When a key collision
+        does occur (rare race), the *new* duplicate socket is closed and
+        the existing entry is kept.
+        """
         key = self._endpoint_key(ip, port)
         should_notify = False
         with self._lock:
+            # Remove any port-less stub that references the same socket.
             for existing_key, info in list(self.connections.items()):
                 if info.get("socket") is sock and existing_key != key:
                     del self.connections[existing_key]
@@ -611,22 +691,37 @@ class ConnectionManager:
                     and info.get("name") == (name or ip)
                     and not int(info.get("port", 0) or 0)
                 ):
+                    # Port-less entry for same IP+name — discard it.
                     try:
-                        old_sock = info.get("socket")
-                        if old_sock and old_sock is not sock:
-                            old_sock.close()
+                        old = info.get("socket")
+                        if old and old is not sock:
+                            old.close()
                     except Exception:
                         pass
                     del self.connections[existing_key]
+
+            old_name = ""
             if key not in self.connections:
                 should_notify = True
             else:
-                old_sock = self.connections[key].get("socket")
+                existing = self.connections[key]
+                old_name = existing.get("name", "")
+                old_sock = existing.get("socket")
                 if old_sock and old_sock is not sock:
+                    # Duplicate — close the new socket, keep the existing one.
                     try:
-                        old_sock.close()
+                        sock.close()
                     except Exception:
                         pass
+                    # Still upgrade the name if this was an IP→name transition.
+                    new_name = name or ip
+                    if new_name and new_name != old_name and self._looks_like_ip(old_name):
+                        existing["name"] = new_name
+                        if self.on_friend_connected:
+                            should_notify = True
+                    if not should_notify:
+                        return key
+
             existing_lock = self.connections.get(key, {}).get("send_lock")
             self.connections[key] = {
                 "socket": sock,

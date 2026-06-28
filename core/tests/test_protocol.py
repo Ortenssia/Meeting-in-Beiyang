@@ -167,6 +167,15 @@ class TestProtocol:
         assert chunk_data["chunk_index"] == 2
         assert chunk_data["data_b64"] == "YWJj"
 
+        binary_chunk = Protocol.create_binary_file_chunk(
+            "file-id", 3, b"\x00raw\xffbytes"
+        )
+        binary_chunk_data = Protocol.parse_message(binary_chunk[4:])
+        assert binary_chunk_data["type"] == Protocol.FILE_CHUNK
+        assert binary_chunk_data["binary"] is True
+        assert binary_chunk_data["chunk_index"] == 3
+        assert binary_chunk_data["data"] == b"\x00raw\xffbytes"
+
         complete = Protocol.create_file_complete(
             "file-id",
             "UserA",

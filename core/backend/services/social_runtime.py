@@ -7,7 +7,9 @@ relationship storage, message relay, and file transfer are wired together.
 """
 
 from dataclasses import dataclass
+import random
 import threading
+import time
 from typing import Callable, Optional
 
 from core.config import AppPaths, get_app_paths
@@ -170,7 +172,7 @@ class SocialRuntime:
         if not self.friend_db:
             return False
         if not self.friend_db.save_profile(profile):
-            raise RuntimeError("保存个人资料失败")
+            return False
         saved = self.friend_db.get_my_profile()
         self.device_name = saved.get("name", self.device_name)
         self.user_id = saved.get("user_id", "")
@@ -186,12 +188,15 @@ class SocialRuntime:
             self.connection_manager.my_user_id = self.user_id
             self.connection_manager.my_device_id = self.device_id
 
-        if self.message_service and self.connection_manager:
-            for friend in self.connection_manager.get_online_friends():
-                friend_name = friend.get("name")
-                if friend_name:
-                    self.message_service._send_avatar_to_friend(friend_name)
-            self.message_service._send_heartbeat_to_all()
+        try:
+            if self.message_service and self.connection_manager:
+                for friend in self.connection_manager.get_online_friends():
+                    friend_name = friend.get("name")
+                    if friend_name:
+                        self.message_service._send_avatar_to_friend(friend_name)
+                self.message_service._send_heartbeat_to_all()
+        except Exception:
+            pass
         return True
 
     def set_tcp_port(self, port: int):
@@ -323,7 +328,12 @@ class SocialRuntime:
             self.on_online_changed()
         if self.on_friends_changed:
             self.on_friends_changed()
-        if self.message_service:
+        # If the "name" is still a raw IP address, PROFILE_EXCHANGE hasn't
+        # arrived yet.  Flushing pending messages / syncing groups with an
+        # IP placeholder would only produce unnecessary failures; the real
+        # sync will happen when _register_connection fires the callback
+        # again after upgrading the name.
+        if self.message_service and not self.connection_manager._looks_like_ip(name):
             thread = None
 
             def flush_pending():
@@ -331,6 +341,7 @@ class SocialRuntime:
                     self.message_service.flush_pending_messages(name)
                     self.message_service.sync_groups_with_friend(name)
                     self.message_service.sync_moments_with_friend(name)
+                    self.message_service.send_profile_update_notice(name)
                 finally:
                     with self._flush_threads_lock:
                         self._flush_threads.discard(thread)
@@ -416,6 +427,12 @@ class SocialRuntime:
 
         def connect():
             try:
+                # Random backoff (100–800 ms) to prevent both sides from
+                # reconnecting in the same instant after a network blip.
+                # The side that fires first becomes the initiator; the
+                # other side's _accept_worker will see the existing
+                # connection and discard the duplicate accept.
+                time.sleep(0.1 + random.random() * 0.7)
                 if not self._stopping and not self.connection_manager.is_connected(ip, port):
                     self.connection_manager.connect_to_friend(ip, port, name)
             finally:

@@ -1250,42 +1250,79 @@ class FriendDB:
     def save_profile(self, profile: Dict[str, Any]) -> bool:
         """
         保存本机个人资料及好友条件。
+
+        整个写入过程（读取已有数据 → 写入新数据 → 保存条件）在同一把锁
+        内完成，避免并发 save_profile 造成数据覆盖或条件与资料不一致。
         """
         try:
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT * FROM my_profile LIMIT 1")
-            existing = cursor.fetchone()
-            existing_user_id = existing["user_id"] if existing and "user_id" in existing.keys() else ""
-            existing_device_id = existing["device_id"] if existing and "device_id" in existing.keys() else ""
-            user_id = profile.get("user_id") or existing_user_id or self._new_id("user")
-            device_id = profile.get("device_id") or existing_device_id or self._new_id("device")
-            name = profile.get("name", "Unknown")
-            tags = profile.get("tags", [])
-            bio = profile.get("bio", "")
-            avatar = profile.get("avatar", "")
-            background = profile.get("background", "")
-            conditions = profile.get("conditions", {})
+            required_tags = profile.get("conditions", {}).get("required_tags", [])
+            optional_tags = profile.get("conditions", {}).get("optional_tags", [])
+            min_match = profile.get("conditions", {}).get("min_match_count", 1)
+            auto_accept = profile.get("conditions", {}).get("auto_accept", False)
 
             with self._lock:
                 cursor = self.conn.cursor()
-                # 更新个人资料（单行）
+
+                # 读取已存在的 user_id / device_id（避免每次保存都重新生成）
+                cursor.execute("SELECT * FROM my_profile LIMIT 1")
+                existing = cursor.fetchone()
+                existing_user_id = (
+                    existing["user_id"]
+                    if existing and "user_id" in existing.keys()
+                    else ""
+                )
+                existing_device_id = (
+                    existing["device_id"]
+                    if existing and "device_id" in existing.keys()
+                    else ""
+                )
+                user_id = (
+                    profile.get("user_id")
+                    or existing_user_id
+                    or self._new_id("user")
+                )
+                device_id = (
+                    profile.get("device_id")
+                    or existing_device_id
+                    or self._new_id("device")
+                )
+                name = profile.get("name", "Unknown")
+                tags = profile.get("tags", [])
+                bio = profile.get("bio", "")
+                avatar = profile.get("avatar", "")
+                background = profile.get("background", "")
+
+                # 更新个人资料（单行 —— DELETE + INSERT）
                 cursor.execute("DELETE FROM my_profile")
                 cursor.execute(
-                    "INSERT INTO my_profile (user_id, device_id, name, tags, bio, avatar, background) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO my_profile (user_id, device_id, name, tags,"
+                    " bio, avatar, background) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
-                        user_id, device_id, name,
-                        json.dumps(tags, ensure_ascii=False), bio, avatar,
+                        user_id,
+                        device_id,
+                        name,
+                        json.dumps(tags, ensure_ascii=False),
+                        bio,
+                        avatar,
                         background,
                     ),
                 )
-                self.conn.commit()
 
-            # 保存条件
-            required_tags = conditions.get("required_tags", [])
-            optional_tags = conditions.get("optional_tags", [])
-            min_match = conditions.get("min_match_count", 1)
-            auto_accept = conditions.get("auto_accept", False)
-            self.save_conditions(required_tags, optional_tags, min_match, auto_accept)
+                # ---- 好友匹配条件（在同一事务中保存，保证原子性）---- #
+                cursor.execute("DELETE FROM friend_conditions")
+                cursor.execute(
+                    "INSERT INTO friend_conditions"
+                    " (required_tags, optional_tags, min_match_count, auto_accept)"
+                    " VALUES (?, ?, ?, ?)",
+                    (
+                        json.dumps(required_tags, ensure_ascii=False),
+                        json.dumps(optional_tags, ensure_ascii=False),
+                        min_match,
+                        1 if auto_accept else 0,
+                    ),
+                )
+
+                self.conn.commit()
 
             return True
         except Exception as e:

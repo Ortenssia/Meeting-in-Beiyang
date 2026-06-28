@@ -2,6 +2,7 @@
 import flet as ft
 
 from .. import theme as T
+from .discover import DiscoverView
 
 CATEGORIES = ["全部", "同学", "朋友", "自定义"]
 
@@ -10,6 +11,8 @@ class FriendsView:
     def __init__(self, app):
         self.app = app
         self.page = app.page
+        self.discover_view = DiscoverView(app)
+        self.root = None
         self.search = ft.TextField(
             label="搜索好友", 
             prefix_icon=ft.Icons.SEARCH_ROUNDED,
@@ -34,6 +37,29 @@ class FriendsView:
         self.list_col = ft.Column(spacing=T.SP_SM, expand=True, scroll=ft.ScrollMode.AUTO)
 
     def build(self):
+        if not self.root:
+            self.root = ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.PEOPLE_ROUNDED, color=ft.Colors.DEEP_PURPLE_400, size=24),
+                                    ft.Text("联系人", size=T.FS_HEADER, weight=ft.FontWeight.W_800),
+                                ],
+                                spacing=8,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    self._build_friends_tab(),
+                ],
+                spacing=T.SP_MD,
+                expand=True,
+            )
+        return self.root
+
+    def _build_friends_tab(self):
         return ft.Column(
             [
                 ft.Row(
@@ -66,6 +92,7 @@ class FriendsView:
 
     def on_enter(self):
         self.refresh()
+        self.discover_view.on_enter()
 
     # -- refresh -----------------------------------------------------------
 
@@ -99,7 +126,7 @@ class FriendsView:
                         spacing=T.SP_SM,
                     ),
                     padding=T.SP_2XL, 
-                    alignment=ft.Alignment.CENTER, 
+                    alignment=ft.alignment.Alignment.CENTER,
                     expand=True,
                 )
             )
@@ -116,7 +143,9 @@ class FriendsView:
         tags = data.get("tags") or []
         category = data.get("category") or "朋友"
         unread = self.app.has_unread_chat(name)
-        
+        profile_pending = self.app.has_friend_profile_update(name)
+        update_mode = self.app.get_profile_update_mode()
+
         endpoint = f"{data.get('ip', '')}:{data.get('port', '')}".strip(":")
         sub = f"IP: {endpoint}" if endpoint else "离线缓存状态"
 
@@ -184,6 +213,8 @@ class FriendsView:
                                         ft.Text(name, size=T.FS_TEXT, weight=ft.FontWeight.BOLD),
                                         ft.Container(width=4),
                                         status_badge,
+                                        ft.Container(width=4),
+                                        self._profile_update_badge(name, profile_pending, update_mode),
                                     ],
                                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 ),
@@ -222,6 +253,71 @@ class FriendsView:
                 shadow=T.SHADOW_CARD,
             )
         )
+
+    # -- profile update indicator ------------------------------------------
+
+    def _profile_update_badge(self, name: str, pending: bool, mode: str):
+        """Return a small badge when the friend has a pending profile update.
+
+        Colour is deliberately different from the red unread-message badge so
+        users can distinguish "new profile" from "new message" at a glance.
+
+        In **manual** mode the badge is tappable — tapping it pulls the
+        friend's updated profile immediately.
+        """
+        if not pending:
+            return ft.Container(width=0)
+        if mode == "manual":
+            return ft.GestureDetector(
+                mouse_cursor=ft.MouseCursor.CLICK,
+                on_tap=lambda _e, n=name: self._pull_profile_update(n),
+                content=ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Container(
+                                width=6, height=6, border_radius=3,
+                                bgcolor=ft.Colors.BLUE_400,
+                            ),
+                            ft.Text(
+                                "资料更新",
+                                size=10,
+                                color=ft.Colors.BLUE_400,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                        ],
+                        spacing=4,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    padding=T.pad_symmetric(horizontal=8, vertical=4),
+                    bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.BLUE),
+                    border_radius=99,
+                ),
+            )
+        # Auto mode — show a subtle indicator (the update is being pulled).
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        width=4, height=4, border_radius=2,
+                        bgcolor=ft.Colors.BLUE_300,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            width=18, height=18,
+            border_radius=9,
+            bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.BLUE),
+            tooltip=f"{name} 的资料正在自动同步",
+        )
+
+    def _pull_profile_update(self, name: str):
+        """Manually pull a friend's updated profile."""
+        ok = self.app.request_friend_profile_update(name, silent=True)
+        if ok:
+            self.app.show_toast(f"正在同步 {name} 的资料...")
+        else:
+            self.app.show_toast(f"{name} 当前离线，无法同步资料")
+        self.refresh()
 
     # -- events ------------------------------------------------------------
 

@@ -182,7 +182,7 @@ class DiscoverView:
                         spacing=T.SP_SM,
                     ),
                     padding=T.SP_2XL,
-                    alignment=ft.Alignment.CENTER,
+                    alignment=ft.alignment.Alignment.CENTER,
                     height=180,
                 )
             )

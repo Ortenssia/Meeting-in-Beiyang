@@ -20,6 +20,7 @@
 """
 
 import base64
+import hashlib
 import json
 import os
 import time
@@ -35,6 +36,7 @@ from core.backend.services.file_transfer_state import (
     FILE_CANCEL,
     FILE_RESUME_REQ,
     FILE_RESUME_RESP,
+    FILE_DECLINE,
     FileTransferState,
 )
 from core.backend.shared.file_message import encode_file_message
@@ -57,9 +59,14 @@ class MessageService:
     FRIEND_REQUEST = "FRIEND_REQUEST"
     FRIEND_ACCEPT = "FRIEND_ACCEPT"
     HEARTBEAT = "HEARTBEAT"
+    PROFILE_UPDATE_NOTICE = "PROFILE_UPDATE_NOTICE"
+    PROFILE_SYNC_REQ = "PROFILE_SYNC_REQ"
+    PROFILE_SYNC_RESP = "PROFILE_SYNC_RESP"
     FILE_OFFER = "FILE_OFFER"
     FILE_CHUNK = "FILE_CHUNK"
+    FILE_CHUNK_ACK = "FILE_CHUNK_ACK"
     FILE_COMPLETE = "FILE_COMPLETE"
+    FILE_COMPLETE_ACK = "FILE_COMPLETE_ACK"
 
     GROUP_CREATE = "GROUP_CREATE"
     GROUP_CHAT = "GROUP_CHAT"
@@ -74,7 +81,10 @@ class MessageService:
 
     # 心跳间隔（秒）
     HEARTBEAT_INTERVAL = 15
-    FILE_CHUNK_SIZE = 48 * 1024
+    FILE_CHUNK_SIZE = 256 * 1024
+    FILE_ACK_INTERVAL = 32
+    FILE_ACK_TIMEOUT = 30.0
+    FILE_MAX_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -119,8 +129,19 @@ class MessageService:
         self.on_message_received: Optional[Callable[[str, str, str], None]] = None
         self.on_friend_request: Optional[Callable[..., None]] = None
         self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
+        self.on_friend_profile_update_available: Optional[Callable[[str], None]] = None
+        self.on_friend_profile_updated: Optional[Callable[[str], None]] = None
         self.on_file_received: Optional[Callable[[str, str, str], None]] = None
-        self.on_file_progress: Optional[Callable[[str, str, int, int], None]] = None
+        self.on_file_progress: Optional[
+            Callable[[str, str, str, int, int, bool, int], None]
+        ] = None
+        self.on_file_offer_received: Optional[
+            Callable[[str, str, int, str], None]
+        ] = None  # (from_name, filename, size, file_id)
+
+        # Pending file offers awaiting user accept/decline.
+        self._pending_file_offers: Dict[str, Dict[str, Any]] = {}
+        self._file_offer_lock = threading.Lock()
 
         # 心跳定时器
         self._heartbeat_timer: Optional[threading.Timer] = None
@@ -137,10 +158,20 @@ class MessageService:
         self._file_resume_events = self.file_transfer.resume_events
         self._file_resume_progress = self.file_transfer.resume_progress
         self._file_lock = self.file_transfer.lock
+        self._file_ack_events: Dict[str, threading.Event] = {}
+        self._file_ack_progress: Dict[str, int] = {}
+        self._file_ack_errors: Dict[str, str] = {}
+        self._file_ack_capable: Dict[str, bool] = {}
+        self._file_binary_capable: Dict[str, bool] = {}
+        self._file_complete_events: Dict[str, threading.Event] = {}
+        self._file_complete_results: Dict[str, tuple[bool, str]] = {}
+        self._completed_file_transfers: Dict[str, Dict[str, Any]] = {}
+        self._file_progress_last_emit: Dict[str, float] = {}
 
         self.FILE_CANCEL = FILE_CANCEL
         self.FILE_RESUME_REQ = FILE_RESUME_REQ
         self.FILE_RESUME_RESP = FILE_RESUME_RESP
+        self.FILE_DECLINE = FILE_DECLINE
         os.makedirs(self.receive_dir, exist_ok=True)
         os.makedirs(self.avatar_dir, exist_ok=True)
         self.runtime = None
@@ -317,6 +348,7 @@ class MessageService:
         # 如果尚未建立连接，尝试先连接再发送
         try:
             self.connection_manager.connect_to_friend(target_ip, target_port, target_name)
+            time.sleep(0.3)  # allow the handshake to settle
             sent = self._send_data_to_friend(target_name, request_msg)
             if sent:
                 self.friend_db.upsert_friend_request(
@@ -337,6 +369,11 @@ class MessageService:
     def send_friend_accept(self, friend_name: str, friend_ip: str = "") -> bool:
         """
         接受好友请求后，向对方发送 FRIEND_ACCEPT 消息。
+
+        投递策略（按优先级）：
+          1. 尝试通过已注册的连接（按好友名查找）。
+          2. 尝试通过 IP:port 端点查找。
+          3. 若仍未找到连接，主动向对方 IP:port 建立出站连接后发送。
 
         Args:
             friend_name: 已接受的好友名称。
@@ -362,16 +399,54 @@ class MessageService:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         }
 
+        port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
+        target_ip = friend_ip or friend.get("ip", "")
+
+        # 1) Try name-based lookup
         if self._send_data_to_friend(friend_name, accept_msg):
             self._send_avatar_to_friend(friend_name)
             return True
-        if friend_ip:
-            port = friend.get("port", Protocol.DEFAULT_TCP_PORT)
-            endpoint = f"{friend_ip}:{port}" if port else friend_ip
-            sent = self._send_data_to_friend(endpoint, accept_msg)
-            if sent:
+
+        # 2) Try endpoint-based lookup (listening port)
+        if target_ip:
+            endpoint = f"{target_ip}:{port}" if port else target_ip
+            if self._send_data_to_friend(endpoint, accept_msg):
                 self._send_avatar_to_friend(endpoint)
-            return sent
+                return True
+
+        # 3) Establish a fresh outbound connection and deliver over it
+        if target_ip:
+            try:
+                logger.info(
+                    "[MessageService] 无现有连接可发送 FRIEND_ACCEPT，"
+                    "尝试主动连接 %s:%s",
+                    target_ip,
+                    port,
+                )
+                conn_ok = self.connection_manager.connect_to_friend(
+                    target_ip, port, friend_name
+                )
+                if conn_ok:
+                    time.sleep(0.3)  # allow the handshake to settle
+                    if self._send_data_to_friend(friend_name, accept_msg):
+                        self._send_avatar_to_friend(friend_name)
+                        return True
+                    # endpoint fallback after connecting
+                    if self._send_data_to_friend(endpoint, accept_msg):
+                        self._send_avatar_to_friend(endpoint)
+                        return True
+            except Exception as e:
+                logger.error(
+                    "[MessageService] 主动连接 %s:%s 失败: %s",
+                    target_ip,
+                    port,
+                    e,
+                )
+
+        logger.warning(
+            "[MessageService] 无法发送 FRIEND_ACCEPT 给 %s",
+            friend_name,
+        )
         return False
 
     def send_file(
@@ -382,6 +457,7 @@ class MessageService:
         avatar_owner: str = "",
         avatar_user_id: str = "",
         require_online: bool = True,
+        file_id: str = "",
     ) -> bool:
         """
         向在线好友发送文件。
@@ -402,7 +478,7 @@ class MessageService:
         filename = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        file_id = str(uuid.uuid4())
+        file_id = file_id or str(uuid.uuid4())
         sha256 = self._sha256_file(file_path)
         chunk_count = (file_size + self.FILE_CHUNK_SIZE - 1) // self.FILE_CHUNK_SIZE
 
@@ -422,75 +498,6 @@ class MessageService:
             "avatar_user_id": avatar_user_id or my_user_id,
         }
         
-        with self._file_lock:
-            self.file_transfer.register_sender(file_id, filename, to_name)
-            
-        if not self._send_data_to_friend(to_name, offer):
-            with self._file_lock:
-                self.file_transfer.pop_sender(file_id)
-            return False
-
-        # Breakpoint Resume negotiation
-        completed_chunks = 0
-        if purpose != "avatar":
-            resume_event = threading.Event()
-            with self._file_lock:
-                self._file_resume_events[file_id] = resume_event
-            
-            resume_req = {
-                "type": self.FILE_RESUME_REQ,
-                "file_id": file_id,
-                "filename": filename,
-                "sha256": sha256,
-            }
-            self._send_data_to_friend(to_name, resume_req)
-            
-            # Wait for receiver response (up to 1 second)
-            resume_event.wait(timeout=1.0)
-            with self._file_lock:
-                self._file_resume_events.pop(file_id, None)
-                completed_chunks = self._file_resume_progress.pop(file_id, 0)
-                
-        if completed_chunks > 0:
-            logger.info("[MessageService] 断点续传文件: %s, 从分块 %s 开始", filename, completed_chunks)
-
-        with open(file_path, "rb") as src:
-            if completed_chunks > 0:
-                src.seek(completed_chunks * self.FILE_CHUNK_SIZE)
-                
-            for index in range(completed_chunks, chunk_count):
-                chunk = src.read(self.FILE_CHUNK_SIZE)
-                if not chunk:
-                    break
-                    
-                # Cancel Check
-                with self._file_lock:
-                    if self.file_transfer.sender_cancelled(file_id):
-                        logger.info("[MessageService] 文件发送被用户取消: %s", filename)
-                        cancel_msg = {
-                            "type": self.FILE_CANCEL,
-                            "file_id": file_id,
-                        }
-                        self._send_data_to_friend(to_name, cancel_msg)
-                        return False
-                        
-                chunk_msg = {
-                    "type": self.FILE_CHUNK,
-                    "file_id": file_id,
-                    "chunk_index": index,
-                    "data_b64": base64.b64encode(chunk).decode("ascii"),
-                }
-                if not self._send_data_to_friend(to_name, chunk_msg):
-                    logger.warning("[MessageService] 文件分块发送失败: %s #%s", filename, index)
-                    with self._file_lock:
-                        self.file_transfer.pop_sender(file_id)
-                    return False
-                if self.on_file_progress:
-                    try:
-                        self.on_file_progress(to_name, filename, index + 1, chunk_count)
-                    except Exception:
-                        logger.debug("[MessageService] on_file_progress 回调异常", exc_info=True)
-
         complete = {
             "type": self.FILE_COMPLETE,
             "file_id": file_id,
@@ -504,20 +511,347 @@ class MessageService:
             "avatar_owner": avatar_owner or my_name,
             "avatar_user_id": avatar_user_id or my_user_id,
         }
+
+        ack_event = threading.Event()
+        complete_event = threading.Event()
         with self._file_lock:
-            self.file_transfer.pop_sender(file_id)
-        if not self._send_data_to_friend(to_name, complete):
+            self.file_transfer.register_sender(file_id, filename, to_name)
+            self._active_senders[file_id]["size"] = file_size
+            self._file_ack_events[file_id] = ack_event
+            self._file_complete_events[file_id] = complete_event
+
+        try:
+            for attempt in range(1, self.FILE_MAX_ATTEMPTS + 1):
+                if attempt > 1:
+                    logger.warning(
+                        "[MessageService] 重试文件传输 %s (%s/%s)",
+                        filename,
+                        attempt,
+                        self.FILE_MAX_ATTEMPTS,
+                    )
+                    if not self._reconnect_file_peer(to_name):
+                        continue
+
+                if not self._send_data_to_friend(to_name, offer):
+                    continue
+
+                completed_chunks, reliable, binary_chunks = self._negotiate_file_resume(
+                    to_name, file_id, filename, sha256, chunk_count, purpose
+                )
+                if completed_chunks:
+                    logger.info(
+                        "[MessageService] 断点续传文件: %s, 从分块 %s 开始",
+                        filename,
+                        completed_chunks,
+                    )
+
+                if not self._send_file_chunks(
+                    to_name,
+                    file_id,
+                    filename,
+                    file_path,
+                    completed_chunks,
+                    chunk_count,
+                    file_size,
+                    reliable,
+                    binary_chunks,
+                    ack_event,
+                ):
+                    with self._file_lock:
+                        cancelled = self.file_transfer.sender_cancelled(file_id)
+                    if cancelled:
+                        self._send_data_to_friend(
+                            to_name, {"type": self.FILE_CANCEL, "file_id": file_id}
+                        )
+                        return False
+                    continue
+
+                complete_event.clear()
+                with self._file_lock:
+                    self._file_complete_results.pop(file_id, None)
+                if not self._send_data_to_friend(to_name, complete):
+                    continue
+
+                if reliable:
+                    # Timeout scales with file size: base 30 s + 5 s per
+                    # 100 MiB.  The incremental SHA256 on the receiver
+                    # makes this rarely hit, but a dynamic ceiling protects
+                    # against slow storage / very large files.
+                    ack_timeout = max(
+                        30.0,
+                        30.0 + (file_size / (100 * 1024 * 1024)) * 5.0,
+                    )
+                    if not complete_event.wait(timeout=ack_timeout):
+                        logger.warning(
+                            "[MessageService] 等待文件完成确认超时 (%.0fs): %s",
+                            ack_timeout,
+                            filename,
+                        )
+                        continue
+                    with self._file_lock:
+                        complete_ok, error = self._file_complete_results.pop(
+                            file_id, (False, "接收端未确认")
+                        )
+                    if not complete_ok:
+                        logger.warning(
+                            "[MessageService] 接收端拒绝文件完成: %s (%s)",
+                            filename,
+                            error,
+                        )
+                        continue
+
+                if purpose != "avatar":
+                    self.friend_db.save_chat_message(
+                        from_name=my_name,
+                        to_name=to_name,
+                        content=self._file_message_content(
+                            filename, file_path, file_id
+                        ),
+                        timestamp=timestamp,
+                        msg_id=file_id,
+                    )
+                return True
+
+            logger.error(
+                "[MessageService] 文件传输在 %s 次尝试后失败: %s",
+                self.FILE_MAX_ATTEMPTS,
+                filename,
+            )
+            return False
+        finally:
+            with self._file_lock:
+                self.file_transfer.pop_sender(file_id)
+                self._file_ack_events.pop(file_id, None)
+                self._file_ack_progress.pop(file_id, None)
+                self._file_ack_errors.pop(file_id, None)
+                self._file_ack_capable.pop(file_id, None)
+                self._file_binary_capable.pop(file_id, None)
+                self._file_complete_events.pop(file_id, None)
+                self._file_complete_results.pop(file_id, None)
+                self._file_progress_last_emit.pop(file_id, None)
+
+    def _negotiate_file_resume(
+        self, to_name, file_id, filename, sha256, chunk_count, purpose
+    ) -> tuple[int, bool, bool]:
+        """Ask where to resume and which reliable/binary transfer features are supported."""
+        if purpose == "avatar":
+            return 0, False, False
+
+        resume_event = threading.Event()
+        with self._file_lock:
+            self._file_resume_events[file_id] = resume_event
+            self._file_resume_progress.pop(file_id, None)
+            self._file_ack_capable.pop(file_id, None)
+            self._file_binary_capable.pop(file_id, None)
+
+        sent = self._send_data_to_friend(
+            to_name,
+            {
+                "type": self.FILE_RESUME_REQ,
+                "file_id": file_id,
+                "filename": filename,
+                "sha256": sha256,
+            },
+        )
+        if sent:
+            resume_event.wait(timeout=3.0)
+        with self._file_lock:
+            self._file_resume_events.pop(file_id, None)
+            completed = int(self._file_resume_progress.pop(file_id, 0) or 0)
+            reliable = bool(self._file_ack_capable.pop(file_id, False))
+            binary_chunks = bool(self._file_binary_capable.pop(file_id, False))
+        return max(0, min(completed, chunk_count)), reliable, binary_chunks
+
+    def _send_file_chunks(
+        self,
+        to_name,
+        file_id,
+        filename,
+        file_path,
+        start_chunk,
+        chunk_count,
+        file_size,
+        reliable,
+        binary_chunks,
+        ack_event,
+    ) -> bool:
+        """Stream file chunks.
+
+        TCP already provides ordered reliable delivery and natural backpressure.
+        Mid-transfer ACKs are therefore treated as advisory receiver progress
+        only. Blocking every few chunks on an application ACK makes transfers
+        fragile on slower devices: a delayed UI/disk write or lost ACK can freeze
+        the sender at a small percentage even though the socket is healthy.
+        """
+        _ = reliable, ack_event
+        sent_bytes = start_chunk * self.FILE_CHUNK_SIZE
+        with open(file_path, "rb") as src:
+            src.seek(start_chunk * self.FILE_CHUNK_SIZE)
+            for index in range(start_chunk, chunk_count):
+                while True:
+                    with self._file_lock:
+                        if self.file_transfer.sender_cancelled(file_id):
+                            return False
+                        pause_event = self.file_transfer.sender_pause_event(
+                            file_id
+                        )
+                    if pause_event is None:
+                        return False
+                    if pause_event.wait(timeout=0.25):
+                        break
+
+                chunk = src.read(self.FILE_CHUNK_SIZE)
+                if not chunk:
+                    return False
+                if binary_chunks:
+                    sent = self._send_binary_chunk_to_friend(
+                        to_name, file_id, index, chunk
+                    )
+                else:
+                    chunk_msg = {
+                        "type": self.FILE_CHUNK,
+                        "file_id": file_id,
+                        "chunk_index": index,
+                        "data_b64": base64.b64encode(chunk).decode("ascii"),
+                    }
+                    sent = self._send_data_to_friend(to_name, chunk_msg)
+                if not sent:
+                    logger.warning(
+                        "[MessageService] 文件分块发送失败: %s #%s",
+                        filename,
+                        index,
+                    )
+                    return False
+
+                # Track bytes actually sent so the ACK handler can report
+                # both "sent" and "confirmed" progress to the UI.
+                sent_bytes = min(
+                    (index + 1) * self.FILE_CHUNK_SIZE, file_size
+                )
+                with self._file_lock:
+                    sender_state = self._active_senders.get(file_id, {})
+                    sender_state["_sent_bytes"] = sent_bytes
+
+                # Surface receiver-side errors promptly if an advisory ACK has
+                # reported one, but never block merely waiting for that ACK.
+                with self._file_lock:
+                    error = self._file_ack_errors.get(file_id, "")
+                if error:
+                    logger.warning(
+                        "[MessageService] 接收端报告文件写入失败: %s (%s)",
+                        filename,
+                        error,
+                    )
+                    return False
+
+                # How many bytes the receiver has acknowledged so far.
+                with self._file_lock:
+                    ack_chunks = int(
+                        self._file_ack_progress.get(file_id, 0) or 0
+                    )
+                confirmed = min(ack_chunks * self.FILE_CHUNK_SIZE, file_size)
+
+                self._emit_file_progress(
+                    file_id,
+                    to_name,
+                    filename,
+                    sent_bytes,
+                    file_size,
+                    True,
+                    force=(index + 1 == chunk_count),
+                    confirmed=confirmed,
+                )
+        return True
+
+    def _send_binary_chunk_to_friend(
+        self, to_name: str, file_id: str, chunk_index: int, chunk: bytes
+    ) -> bool:
+        """Send one file chunk as a raw binary protocol frame."""
+        try:
+            packed = Protocol.create_binary_file_chunk(file_id, chunk_index, chunk)
+            return bool(self.connection_manager.send_to_friend(to_name, packed))
+        except Exception as exc:
+            logger.error(
+                "[MessageService] 二进制文件分块发送异常: %s #%s: %s",
+                file_id,
+                chunk_index,
+                exc,
+            )
             return False
 
-        if purpose != "avatar":
-            self.friend_db.save_chat_message(
-                from_name=my_name,
-                to_name=to_name,
-                content=self._file_message_content(filename, file_path),
-                timestamp=timestamp,
-                msg_id=file_id,
+    def _emit_file_progress(
+        self,
+        file_id: str,
+        peer_name: str,
+        filename: str,
+        completed: int,
+        total: int,
+        sending: bool,
+        force: bool = False,
+        confirmed: int = 0,
+    ):
+        """Notify the UI of file-transfer progress.
+
+        Throttled to ~8 Hz (125 ms) unless *force* is True or the
+        percentage has crossed a 5‑point boundary since the last emit.
+
+        *confirmed* is the byte count the remote side has acknowledged
+        (meaningful for senders).  When non-zero the UI can show both
+        "sent" and "confirmed" progress side-by-side.
+        """
+        if not self.on_file_progress:
+            return
+        now = time.monotonic()
+        with self._file_lock:
+            last = self._file_progress_last_emit.get(file_id, {})
+            last_ts = float(last.get("ts", 0.0) or 0.0)
+            last_pct = int(last.get("pct", -1) or -1)
+            if not force:
+                if now - last_ts < 0.125:
+                    return
+                if total > 0:
+                    current_pct = int(completed / total * 100)
+                    if abs(current_pct - last_pct) < 5:
+                        return
+            self._file_progress_last_emit[file_id] = {
+                "ts": now,
+                "pct": int(completed / total * 100) if total else 0,
+            }
+        try:
+            self.on_file_progress(
+                file_id,
+                peer_name,
+                filename,
+                completed,
+                total,
+                sending,
+                confirmed=confirmed,
             )
-        return True
+        except Exception:
+            logger.debug("[MessageService] on_file_progress 回调异常", exc_info=True)
+
+    def _reconnect_file_peer(self, to_name: str) -> bool:
+        """Reconnect a dropped file-transfer peer using its saved endpoint."""
+        if self.connection_manager.is_friend_online(to_name):
+            return True
+        friend = self.friend_db.get_friend(to_name) or {}
+        ip = friend.get("ip", "")
+        port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
+        if not ip:
+            return False
+        try:
+            connected = self.connection_manager.connect_to_friend(ip, port, to_name)
+            if connected is False:
+                return False
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                if self.connection_manager.is_friend_online(to_name):
+                    return True
+                time.sleep(0.05)
+            return self.connection_manager.is_friend_online(to_name)
+        except Exception:
+            logger.warning("[MessageService] 文件传输重连失败: %s", to_name, exc_info=True)
+            return False
 
     # ================================================================== #
     #  接收消息处理
@@ -550,12 +884,22 @@ class MessageService:
             self._handle_friend_accept(from_ip, data)
         elif msg_type == self.HEARTBEAT:
             self._handle_heartbeat(from_ip, data)
+        elif msg_type == self.PROFILE_UPDATE_NOTICE:
+            self._handle_profile_update_notice(from_ip, data)
+        elif msg_type == self.PROFILE_SYNC_REQ:
+            self._handle_profile_sync_req(from_ip, data)
+        elif msg_type == self.PROFILE_SYNC_RESP:
+            self._handle_profile_sync_resp(from_ip, data)
         elif msg_type == self.FILE_OFFER:
             self._handle_file_offer(from_ip, data)
         elif msg_type == self.FILE_CHUNK:
             self._handle_file_chunk(from_ip, data)
+        elif msg_type == self.FILE_CHUNK_ACK:
+            self._handle_file_chunk_ack(from_ip, data)
         elif msg_type == self.FILE_COMPLETE:
             self._handle_file_complete(from_ip, data)
+        elif msg_type == self.FILE_COMPLETE_ACK:
+            self._handle_file_complete_ack(from_ip, data)
         elif msg_type == self.GROUP_CREATE:
             self._handle_group_create(from_ip, data)
         elif msg_type == self.GROUP_CHAT:
@@ -572,6 +916,8 @@ class MessageService:
             self._handle_moments_sync_resp(from_ip, data)
         elif msg_type == self.FILE_CANCEL:
             self._handle_file_cancel(from_ip, data)
+        elif msg_type == self.FILE_DECLINE:
+            self._handle_file_decline(from_ip, data)
         elif msg_type == self.FILE_RESUME_REQ:
             self._handle_file_resume_req(from_ip, data)
         elif msg_type == self.FILE_RESUME_RESP:
@@ -700,6 +1046,136 @@ class MessageService:
                     exclude_ip=from_ip,
                     exclude_name=original_message.get("from_name", ""),
                 )
+
+    # ------------------------------------------------------------------ #
+    #  PROFILE 同步处理
+    # ------------------------------------------------------------------ #
+
+    def _profile_update_key(self, name: str = "", user_id: str = "") -> str:
+        return user_id or name or "unknown"
+
+    def _my_profile_version(self) -> str:
+        version = self.friend_db.get_app_setting("my_profile_updated_at", "")
+        if not version:
+            version = str(time.time())
+            self.friend_db.set_app_setting("my_profile_updated_at", version)
+        return version
+
+    def broadcast_profile_update_notice(self) -> int:
+        """Tell online friends that my profile has changed; they choose when to pull it."""
+        sent = 0
+        for friend in self.connection_manager.get_online_friends():
+            friend_name = self._online_friend_name(friend)
+            if friend_name and self.send_profile_update_notice(friend_name):
+                sent += 1
+        return sent
+
+    def send_profile_update_notice(self, friend_name: str) -> bool:
+        profile = self.friend_db.get_my_profile()
+        version = self._my_profile_version()
+        payload = {
+            "type": self.PROFILE_UPDATE_NOTICE,
+            "from_name": profile.get("name", ""),
+            "user_id": profile.get("user_id", ""),
+            "version": version,
+        }
+        return self._send_data_to_friend(friend_name, payload)
+
+    def has_pending_profile_update(self, friend_name: str) -> bool:
+        friend = self.friend_db.get_friend(friend_name) or {}
+        friend_uid = friend.get("user_id", "")
+        # Try user_id-based key first, then name-based, then both
+        for key in (
+            [self._profile_update_key(friend.get("name", friend_name), friend_uid)]
+            + ([friend_name] if friend_name else [])
+            + ([friend_uid] if friend_uid and friend_uid != friend_name else [])
+        ):
+            pending = self.friend_db.get_app_setting(f"profile_pending:{key}", "")
+            synced = self.friend_db.get_app_setting(f"profile_synced:{key}", "")
+            if pending and pending != synced:
+                return True
+        return False
+
+    def request_friend_profile(self, friend_name: str) -> bool:
+        friend = self.friend_db.get_friend(friend_name) or {}
+        return self._send_data_to_friend(
+            friend_name,
+            {
+                "type": self.PROFILE_SYNC_REQ,
+                "from_name": self.friend_db.get_my_profile().get("name", ""),
+                "target_user_id": friend.get("user_id", ""),
+            },
+        )
+
+    def _handle_profile_update_notice(self, from_ip: str, data: Dict[str, Any]):
+        name = data.get("from_name", "") or self._get_friend_name_by_ip(from_ip)
+        user_id = data.get("user_id", "")
+        version = str(data.get("version", "") or "")
+        if not name or not version:
+            return
+        key = self._profile_update_key(name, user_id)
+        synced = self.friend_db.get_app_setting(f"profile_synced:{key}", "")
+        if version != synced:
+            # Store under the canonical key (user_id if available, else name)
+            self.friend_db.set_app_setting(f"profile_pending:{key}", version)
+            # Also store under the name-based key to ensure has_pending_profile_update
+            # can find it even if the local friend record lacks a user_id
+            if user_id and name and user_id != name:
+                self.friend_db.set_app_setting(f"profile_pending:{name}", version)
+                self.friend_db.set_app_setting(f"profile_pending:{user_id}", version)
+            if self.on_friend_profile_update_available:
+                self.on_friend_profile_update_available(name)
+
+    def _handle_profile_sync_req(self, from_ip: str, data: Dict[str, Any]):
+        profile = dict(self.friend_db.get_my_profile() or {})
+        requester = self._get_friend_name_by_ip(from_ip) or data.get("from_name", "")
+        payload = {
+            "type": self.PROFILE_SYNC_RESP,
+            "profile": {
+                "user_id": profile.get("user_id", ""),
+                "name": profile.get("name", ""),
+                "tags": profile.get("tags", []),
+                "bio": profile.get("bio", ""),
+                "background": profile.get("background", ""),
+            },
+            "version": self._my_profile_version(),
+        }
+        if requester:
+            self._send_data_to_friend_with_fallback(requester, payload, from_ip)
+            self._send_avatar_to_friend(requester)
+
+    def _handle_profile_sync_resp(self, from_ip: str, data: Dict[str, Any]):
+        profile = dict(data.get("profile") or {})
+        name = profile.get("name", "") or self._get_friend_name_by_ip(from_ip)
+        if not name:
+            return
+        friend = self.friend_db.get_friend(name) or {}
+        self.friend_db.add_friend(
+            name=name,
+            ip=friend.get("ip", from_ip) or from_ip,
+            port=int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT),
+            tags=profile.get("tags", []),
+            bio=profile.get("bio", ""),
+            category=friend.get("category", "朋友"),
+            user_id=profile.get("user_id", friend.get("user_id", "")),
+            status=friend.get("status", "accepted"),
+            avatar=friend.get("avatar", ""),
+            background=profile.get("background", friend.get("background", "")),
+        )
+        user_id = profile.get("user_id", "")
+        key = self._profile_update_key(name, user_id)
+        version = str(data.get("version", "") or "")
+        if version:
+            self.friend_db.set_app_setting(f"profile_synced:{key}", version)
+            self.friend_db.set_app_setting(f"profile_pending:{key}", version)
+            # Also sync under alternate keys to cover name-only lookups
+            if user_id and name and user_id != name:
+                self.friend_db.set_app_setting(f"profile_synced:{name}", version)
+                self.friend_db.set_app_setting(f"profile_pending:{name}", version)
+                self.friend_db.set_app_setting(f"profile_synced:{user_id}", version)
+                self.friend_db.set_app_setting(f"profile_pending:{user_id}", version)
+        if self.on_friend_profile_updated:
+            self.on_friend_profile_updated(name)
 
     # ------------------------------------------------------------------ #
     #  FRIEND_REQUEST 处理
@@ -926,7 +1402,7 @@ class MessageService:
     # ------------------------------------------------------------------ #
 
     def _handle_file_offer(self, from_ip: str, data: Dict[str, Any]):
-        """接收文件元信息并创建临时接收状态。"""
+        """接收文件元信息。avatars are auto-accepted; chat files ask the user."""
         my_name = self.friend_db.get_my_profile().get("name", "")
         to_name = data.get("to_name", "")
         if to_name and to_name != my_name:
@@ -938,7 +1414,63 @@ class MessageService:
             return
 
         purpose = data.get("purpose", "chat_file")
+
+        # Avatars are always auto-accepted (small, system-managed).
+        if purpose == "avatar":
+            self._accept_file_offer_internal(from_ip, data)
+            return
+
+        # Chat files require user consent.
         filename = self._safe_filename(data.get("filename", "received.bin"))
+        file_size = int(data.get("size", 0) or 0)
+
+        with self._file_offer_lock:
+            self._pending_file_offers[file_id] = {
+                "from_ip": from_ip,
+                "from_name": from_name,
+                "filename": filename,
+                "size": file_size,
+                "data": dict(data),
+            }
+
+        if self.on_file_offer_received:
+            try:
+                self.on_file_offer_received(from_name, filename, file_size, file_id)
+            except Exception:
+                logger.debug("[MessageService] on_file_offer_received error", exc_info=True)
+
+    def accept_file_offer(self, file_id: str) -> bool:
+        """User accepted a pending file offer — start receiving."""
+        with self._file_offer_lock:
+            offer = self._pending_file_offers.pop(file_id, None)
+        if not offer:
+            return False
+        self._accept_file_offer_internal(offer["from_ip"], offer["data"])
+        return True
+
+    def decline_file_offer(self, file_id: str) -> bool:
+        """User declined a pending file offer."""
+        with self._file_offer_lock:
+            offer = self._pending_file_offers.pop(file_id, None)
+        if not offer:
+            return False
+        # Notify the sender.
+        decline_msg = {
+            "type": self.FILE_DECLINE,
+            "file_id": file_id,
+            "from_name": self.friend_db.get_my_profile().get("name", ""),
+        }
+        self._send_data_to_friend_with_fallback(
+            offer["from_name"], decline_msg, offer["from_ip"]
+        )
+        return True
+
+    def _accept_file_offer_internal(self, from_ip: str, data: Dict[str, Any]):
+        """Create incoming file state (original _handle_file_offer logic)."""
+        from_name = data.get("from_name", "")
+        file_id = data.get("file_id", "")
+        filename = self._safe_filename(data.get("filename", "received.bin"))
+        purpose = data.get("purpose", "chat_file")
         if purpose == "avatar":
             final_path = self._unique_avatar_path(
                 filename,
@@ -960,6 +1492,9 @@ class MessageService:
             completed_chunks = existing_size // chunk_size
 
         with self._file_lock:
+            old_state = self._incoming_files.get(file_id)
+            if old_state:
+                self._close_incoming_handle(old_state)
             self._incoming_files[file_id] = {
                 "from_name": from_name,
                 "from_ip": from_ip,
@@ -975,13 +1510,49 @@ class MessageService:
                 "avatar_owner": data.get("avatar_owner", from_name),
                 "avatar_user_id": data.get("avatar_user_id", ""),
                 "received": set(range(completed_chunks)),
+                "next_expected": completed_chunks,
+                "_sha256_state": hashlib.sha256(),
             }
 
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
         if not os.path.exists(part_path):
             with open(part_path, "wb"):
                 pass
+        # For resumed transfers, pre-seed the incremental hasher with the
+        # existing .part data so the final hexdigest is correct without
+        # a slow full-file scan at FILE_COMPLETE time.
+        if completed_chunks > 0 and os.path.getsize(part_path) > 0:
+            with open(part_path, "rb") as pf:
+                while True:
+                    block = pf.read(1024 * 1024)
+                    if not block:
+                        break
+                    self._incoming_files[file_id]["_sha256_state"].update(block)
+        # Keep the part file open for the whole transfer so each chunk
+        # write is just a seek+write instead of an open/close syscall pair.
+        try:
+            handle = open(part_path, "r+b")
+            with self._file_lock:
+                state = self._incoming_files.get(file_id)
+                if state is not None:
+                    state["_file_handle"] = handle
+                else:
+                    handle.close()
+        except Exception:
+            logger.warning("[MessageService] 打开接收文件句柄失败: %s", part_path, exc_info=True)
         logger.info("[MessageService] 准备接收文件 %s from %s", filename, from_name)
+
+    @staticmethod
+    def _close_incoming_handle(state):
+        """Close the cached part-file handle held in *state*, if any."""
+        if not state:
+            return
+        handle = state.pop("_file_handle", None)
+        if handle:
+            try:
+                handle.close()
+            except Exception:
+                pass
 
     def _handle_file_chunk(self, from_ip: str, data: Dict[str, Any]):
         """写入一个文件分块。"""
@@ -992,38 +1563,135 @@ class MessageService:
         with self._file_lock:
             state = self._incoming_files.get(file_id)
         if not state:
+            # Silently drop chunks for files without state (offer not yet
+            # accepted, or already declined/completed).  Only warn when the
+            # chunk is genuinely unexpected.
+            with self._file_offer_lock:
+                if file_id in self._pending_file_offers:
+                    return  # user hasn't decided yet — drop silently
             logger.warning("[MessageService] 收到未知文件分块: %s", file_id)
             return
 
         try:
             index = int(data.get("chunk_index", -1))
-            raw = base64.b64decode(data.get("data_b64", "").encode("ascii"))
-        except Exception:
-            logger.warning("[MessageService] 文件分块解析失败: %s", file_id)
-            return
-
-        if index < 0:
-            return
-
-        with self._file_lock:
-            offset = index * int(state["chunk_size"])
-            with open(state["part_path"], "r+b") as dst:
-                dst.seek(offset)
-                dst.write(raw)
-            state["received"].add(index)
-            received_count = len(state["received"])
-            chunk_count = int(state.get("chunk_count", 0) or 0)
-
-        if self.on_file_progress:
-            try:
-                self.on_file_progress(
-                    state.get("from_name", ""),
-                    state.get("filename", ""),
-                    received_count,
-                    chunk_count,
+            if data.get("binary"):
+                raw_data = data.get("data", b"")
+                if not isinstance(raw_data, (bytes, bytearray)):
+                    raise ValueError("invalid binary chunk payload")
+                raw = bytes(raw_data)
+            else:
+                raw = base64.b64decode(
+                    data.get("data_b64", "").encode("ascii"), validate=True
                 )
-            except Exception:
-                logger.debug("[MessageService] on_file_progress 回调异常", exc_info=True)
+            chunk_size = int(state["chunk_size"])
+            chunk_count = int(state.get("chunk_count", 0) or 0)
+            expected_size = int(state.get("size", 0) or 0)
+            if index < 0 or (chunk_count and index >= chunk_count):
+                raise ValueError("invalid chunk index")
+            if len(raw) > chunk_size:
+                raise ValueError("chunk exceeds negotiated size")
+            offset = index * chunk_size
+            if expected_size and offset + len(raw) > expected_size:
+                raise ValueError("chunk exceeds file size")
+
+            with self._file_lock:
+                # Track actual bytes written (not chunk_count × chunk_size)
+                # so progress is accurate even for variable-size final chunks.
+                state.setdefault("_bytes_written", 0)
+                handle = state.get("_file_handle")
+                if handle is None:
+                    handle = open(state["part_path"], "r+b")
+                    state["_file_handle"] = handle
+                handle.seek(offset)
+                handle.write(raw)
+                actual_end = handle.tell()
+                state["_bytes_written"] = max(
+                    state["_bytes_written"], actual_end
+                )
+                state["received"].add(index)
+                # Incremental SHA256 — avoids a full-file hash at the end
+                # which can take many seconds for large files and cause
+                # the sender's FILE_COMPLETE_ACK timeout to fire.
+                state["_sha256_state"].update(raw)
+                next_expected = int(state.get("next_expected", 0) or 0)
+                while next_expected in state["received"]:
+                    next_expected += 1
+                state["next_expected"] = next_expected
+                ack_due = (
+                    next_expected == chunk_count
+                    or next_expected % self.FILE_ACK_INTERVAL == 0
+                )
+        except Exception as exc:
+            logger.warning(
+                "[MessageService] 文件分块写入失败: %s #%s: %s",
+                file_id,
+                data.get("chunk_index", "?"),
+                exc,
+            )
+            self._send_file_chunk_ack(state, file_id, ok=False, error=str(exc))
+            return
+
+        if ack_due:
+            self._send_file_chunk_ack(state, file_id, next_expected=next_expected)
+
+        total_size = int(state.get("size", 0) or 0)
+        # Use actual bytes written (accurate for variable-size last chunk).
+        completed_size = min(state.get("_bytes_written", 0), total_size)
+        self._emit_file_progress(
+            file_id,
+            state.get("from_name", ""),
+            state.get("filename", ""),
+            completed_size,
+            total_size,
+            False,
+            force=(chunk_count and state.get("next_expected", 0) >= chunk_count),
+        )
+
+    def _send_file_chunk_ack(
+        self, state, file_id: str, next_expected: int = 0, ok: bool = True, error: str = ""
+    ):
+        payload = {
+            "type": self.FILE_CHUNK_ACK,
+            "file_id": file_id,
+            "next_chunk": next_expected,
+            "ok": ok,
+            "error": error,
+        }
+        from_name = state.get("from_name", "")
+        from_ip = state.get("from_ip", "")
+        self._send_data_to_friend_with_fallback(from_name, payload, from_ip)
+
+    def _handle_file_chunk_ack(self, from_ip: str, data: Dict[str, Any]):
+        file_id = data.get("file_id", "")
+        if not file_id:
+            return
+        with self._file_lock:
+            next_chunk = int(data.get("next_chunk", 0) or 0)
+            self._file_ack_progress[file_id] = next_chunk
+            if not data.get("ok", True):
+                self._file_ack_errors[file_id] = data.get("error", "接收端写入失败")
+            event = self._file_ack_events.get(file_id)
+            if event:
+                event.set()
+            # Fetch sender-side file info for progress emission.
+            sender = self._active_senders.get(file_id, {})
+            peer = sender.get("to_name", "")
+            fname = sender.get("filename", "")
+            total = int(sender.get("size", 0) or 0)
+            sent = int(sender.get("_sent_bytes", 0) or 0)
+
+        if peer and total:
+            confirmed = min(next_chunk * self.FILE_CHUNK_SIZE, total)
+            self._emit_file_progress(
+                file_id,
+                peer,
+                fname,
+                sent,
+                total,
+                True,
+                force=True,
+                confirmed=confirmed,
+            )
 
     def _handle_file_complete(self, from_ip: str, data: Dict[str, Any]):
         """完成文件接收、校验并写入聊天记录。"""
@@ -1033,25 +1701,57 @@ class MessageService:
             return
 
         with self._file_lock:
-            state = self._incoming_files.pop(file_id, None)
+            state = self._incoming_files.get(file_id)
         if not state:
             logger.warning("[MessageService] 收到未知文件完成通知: %s", file_id)
             return
 
+        from_name = data.get("from_name") or state.get("from_name", "")
+        if state.get("already_complete"):
+            with self._file_lock:
+                self._incoming_files.pop(file_id, None)
+            self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
+            return
+
         part_path = state["part_path"]
         final_path = state["final_path"]
+        # Close the write handle before sha256/replace so pending writes
+        # flush to disk and Windows lets us rename/remove the file.
+        self._close_incoming_handle(state)
         expected_count = int(state.get("chunk_count", 0) or 0)
         if expected_count and len(state["received"]) < expected_count:
             logger.warning("[MessageService] 文件未收齐: %s", state["filename"])
+            self._send_file_complete_ack(
+                from_name, file_id, False, "文件分块未收齐", fallback=from_ip
+            )
             return
 
         expected_hash = data.get("sha256") or state.get("sha256", "")
-        if expected_hash and self._sha256_file(part_path) != expected_hash:
+        # Use the incremental hash computed while receiving chunks.
+        # This is O(1) instead of O(file_size) — critical for large
+        # files where a full-file SHA256 would exceed FILE_ACK_TIMEOUT.
+        incremental = state.get("_sha256_state")
+        actual_hash = (
+            incremental.hexdigest()
+            if incremental
+            else self._sha256_file(part_path)
+        )
+        if expected_hash and actual_hash != expected_hash:
             logger.warning("[MessageService] 文件校验失败: %s", state["filename"])
+            with self._file_lock:
+                self._incoming_files.pop(file_id, None)
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+            self._send_file_complete_ack(
+                from_name, file_id, False, "SHA-256 校验失败", fallback=from_ip
+            )
             return
 
         os.replace(part_path, final_path)
-        from_name = data.get("from_name") or state.get("from_name", "")
+        with self._file_lock:
+            self._incoming_files.pop(file_id, None)
         timestamp = data.get("timestamp") or state.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))
         filename = state.get("filename", os.path.basename(final_path))
         purpose = data.get("purpose") or state.get("purpose", "chat_file")
@@ -1070,9 +1770,10 @@ class MessageService:
                     self.on_file_received(avatar_owner or from_name, final_path, timestamp)
                 except Exception:
                     logger.debug("[MessageService] on_file_received 回调异常", exc_info=True)
+            self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
             return
 
-        content = self._file_message_content(filename, final_path)
+        content = self._file_message_content(filename, final_path, file_id)
 
         self.friend_db.save_chat_message(
             from_name=from_name,
@@ -1082,6 +1783,19 @@ class MessageService:
             msg_id=file_id,
         )
         logger.info("[MessageService] 文件接收完成: %s", final_path)
+        with self._file_lock:
+            self._completed_file_transfers[file_id] = {
+                "final_path": final_path,
+                "part_path": part_path,
+                "filename": filename,
+                "sha256": expected_hash,
+                "size": int(state.get("size", 0) or 0),
+                "chunk_size": int(state.get("chunk_size", self.FILE_CHUNK_SIZE)),
+                "purpose": purpose,
+            }
+            while len(self._completed_file_transfers) > 256:
+                self._completed_file_transfers.pop(next(iter(self._completed_file_transfers)))
+        self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
 
         if self.on_message_received:
             try:
@@ -1093,6 +1807,30 @@ class MessageService:
                 self.on_file_received(from_name, final_path, timestamp)
             except Exception:
                 logger.debug("[MessageService] on_file_received 回调异常", exc_info=True)
+
+    def _send_file_complete_ack(
+        self, to_name: str, file_id: str, ok: bool, error: str = "", fallback: str = ""
+    ):
+        payload = {
+            "type": self.FILE_COMPLETE_ACK,
+            "file_id": file_id,
+            "ok": ok,
+            "error": error,
+        }
+        self._send_data_to_friend_with_fallback(to_name, payload, fallback)
+
+    def _handle_file_complete_ack(self, from_ip: str, data: Dict[str, Any]):
+        file_id = data.get("file_id", "")
+        if not file_id:
+            return
+        with self._file_lock:
+            self._file_complete_results[file_id] = (
+                bool(data.get("ok", False)),
+                data.get("error", ""),
+            )
+            event = self._file_complete_events.get(file_id)
+            if event:
+                event.set()
 
     # ================================================================== #
     #  离线消息刷新
@@ -1187,8 +1925,10 @@ class MessageService:
     def _unique_receive_path(self, filename: str) -> str:
         return self.file_store.unique_receive_path(filename)
 
-    def _file_message_content(self, filename: str, path: str = "") -> str:
-        return encode_file_message("文件", filename, path)
+    def _file_message_content(
+        self, filename: str, path: str = "", transfer_id: str = ""
+    ) -> str:
+        return encode_file_message("文件", filename, path, transfer_id)
 
     def _unique_avatar_path(self, filename: str, owner_name: str = "", user_id: str = "") -> str:
         return self.file_store.unique_avatar_path(filename, owner_name, user_id)
@@ -1206,7 +1946,11 @@ class MessageService:
     def _send_avatar_to_friend(self, friend_name: str) -> bool:
         profile = self.friend_db.get_my_profile()
         avatar_path = (profile.get("avatar") or "").strip()
-        if not avatar_path or not os.path.isabs(avatar_path) or not os.path.isfile(avatar_path):
+        if avatar_path and not os.path.isabs(avatar_path):
+            candidate = get_app_paths().assets_dir / avatar_path.replace("\\", "/")
+            if candidate.is_file():
+                avatar_path = str(candidate)
+        if not avatar_path or not os.path.isfile(avatar_path):
             return False
         if not avatar_path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
             return False
@@ -1218,6 +1962,18 @@ class MessageService:
             avatar_user_id=profile.get("user_id", ""),
             require_online=False,
         )
+
+    def broadcast_avatar_update(self) -> int:
+        """Push the current avatar file to all online friends immediately."""
+        sent = 0
+        my_name = self.friend_db.get_my_profile().get("name", "")
+        for friend in self.connection_manager.get_online_friends():
+            friend_name = self._online_friend_name(friend)
+            if not friend_name or friend_name == my_name:
+                continue
+            if self._send_avatar_to_friend(friend_name):
+                sent += 1
+        return sent
 
     def _send_data_to_friend(self, friend_name: str, data: Dict[str, Any]) -> bool:
         """
@@ -1237,6 +1993,16 @@ class MessageService:
         except Exception as e:
             logger.error(f"[MessageService] 发送给 {friend_name} 失败: {e}")
             return False
+
+    def _send_data_to_friend_with_fallback(
+        self, friend_name: str, data: Dict[str, Any], fallback: str = ""
+    ) -> bool:
+        """Send to a peer by name, falling back to its endpoint/IP if needed."""
+        if friend_name and self._send_data_to_friend(friend_name, data):
+            return True
+        if fallback and fallback != friend_name:
+            return self._send_data_to_friend(fallback, data)
+        return False
 
     def _online_friend_name(self, friend: Any) -> str:
         if isinstance(friend, dict):
@@ -1592,6 +2358,22 @@ class MessageService:
         if updated and hasattr(self.runtime, "on_moments_changed") and self.runtime.on_moments_changed:
             self.runtime.on_moments_changed()
 
+    def pause_file_transfer(self, file_id: str) -> bool:
+        """Pause an active outgoing transfer without discarding its state."""
+        with self._file_lock:
+            paused = self.file_transfer.pause_sender(file_id)
+        if paused:
+            logger.info("[MessageService] 文件传输已暂停: %s", file_id)
+        return paused
+
+    def resume_file_transfer(self, file_id: str) -> bool:
+        """Resume an outgoing transfer paused by the user."""
+        with self._file_lock:
+            resumed = self.file_transfer.resume_sender(file_id)
+        if resumed:
+            logger.info("[MessageService] 文件传输已继续: %s", file_id)
+        return resumed
+
     def cancel_file_transfer(self, file_id: str):
         """取消正在进行的文件发送或接收。"""
         filename = ""
@@ -1605,15 +2387,16 @@ class MessageService:
         from_name = ""
         with self._file_lock:
             state = self._incoming_files.pop(file_id, None)
-            if state:
-                filename = state["filename"]
-                from_name = state["from_name"]
-                part_path = state["part_path"]
-                if os.path.exists(part_path):
-                    try:
-                        os.remove(part_path)
-                    except Exception:
-                        pass
+        if state:
+            self._close_incoming_handle(state)
+            filename = state["filename"]
+            from_name = state["from_name"]
+            part_path = state["part_path"]
+            if os.path.exists(part_path):
+                try:
+                    os.remove(part_path)
+                except Exception:
+                    pass
                         
         if to_name:
             cancel_msg = {
@@ -1637,20 +2420,36 @@ class MessageService:
         file_id = data.get("file_id", "")
         if not file_id:
             return
-            
+
         with self._file_lock:
             self.file_transfer.mark_sender_cancelled(file_id)
             self.file_transfer.pop_sender(file_id)
-                
+
         with self._file_lock:
             state = self._incoming_files.pop(file_id, None)
-            if state:
-                part_path = state["part_path"]
-                if os.path.exists(part_path):
-                    try:
-                        os.remove(part_path)
-                    except Exception:
-                        pass
+        if state:
+            self._close_incoming_handle(state)
+            part_path = state["part_path"]
+            if os.path.exists(part_path):
+                try:
+                    os.remove(part_path)
+                except Exception:
+                    pass
+
+    def _handle_file_decline(self, from_ip: str, data: Dict[str, Any]):
+        """对方拒绝了文件传输 — 取消发送。"""
+        file_id = data.get("file_id", "")
+        if not file_id:
+            return
+        with self._file_lock:
+            self.file_transfer.mark_sender_cancelled(file_id)
+            # Also set the complete result to "declined" so the sender's
+            # retry loop does not retry.
+            self._file_complete_results[file_id] = (False, "对方拒绝了文件")
+            self._file_ack_errors[file_id] = "对方拒绝了文件"
+            event = self._file_complete_events.get(file_id)
+            if event:
+                event.set()  # wake the sender's retry loop
                         
         logger.info("[MessageService] 对端已取消文件传输: %s", file_id)
         if hasattr(self.runtime, "on_friends_changed") and self.runtime.on_friends_changed:
@@ -1663,6 +2462,25 @@ class MessageService:
         _sha256 = data.get("sha256", "")
         if not file_id:
             return
+
+        # If the offer is still pending user accept/decline, reply with
+        # completed_chunks=0 so the sender proceeds; chunks will be held
+        # until the user decides.
+        with self._file_offer_lock:
+            if file_id in self._pending_file_offers:
+                payload = {
+                    "type": self.FILE_RESUME_RESP,
+                    "file_id": file_id,
+                    "completed_chunks": 0,
+                    "supports_ack": True,
+                    "supports_binary": True,
+                }
+                self._send_data_to_friend_with_fallback(
+                    self._pending_file_offers[file_id]["from_name"],
+                    payload,
+                    from_ip,
+                )
+                return
 
         with self._file_lock:
             state = self._incoming_files.get(file_id)
@@ -1677,14 +2495,27 @@ class MessageService:
             part_path = final_path + ".part"
         
         completed_chunks = 0
-        if os.path.exists(part_path):
+        if state and state.get("already_complete"):
+            completed_chunks = int(state.get("chunk_count", 0) or 0)
+        elif state:
+            completed_chunks = int(state.get("next_expected", 0) or 0)
+            if not state.get("received") and os.path.exists(part_path):
+                chunk_size = int(state.get("chunk_size", self.FILE_CHUNK_SIZE))
+                completed_chunks = os.path.getsize(part_path) // chunk_size
+        elif os.path.exists(part_path):
             existing_size = os.path.getsize(part_path)
-            completed_chunks = existing_size // self.FILE_CHUNK_SIZE
+            chunk_size = int(
+                state.get("chunk_size", self.FILE_CHUNK_SIZE)
+                if state else self.FILE_CHUNK_SIZE
+            )
+            completed_chunks = existing_size // chunk_size
             
         payload = {
             "type": self.FILE_RESUME_RESP,
             "file_id": file_id,
             "completed_chunks": completed_chunks,
+            "supports_ack": True,
+            "supports_binary": True,
         }
         
         friend_name = self._get_friend_name_by_ip(from_ip) or state_from_name
@@ -1700,6 +2531,10 @@ class MessageService:
             
         with self._file_lock:
             self._file_resume_progress[file_id] = completed_chunks
+            self._file_ack_capable[file_id] = bool(data.get("supports_ack", False))
+            self._file_binary_capable[file_id] = bool(
+                data.get("supports_binary", False)
+            )
             event = self._file_resume_events.get(file_id)
             if event:
                 event.set()

@@ -10,13 +10,16 @@ from core.backend.shared.file_message import decode_file_message, encode_file_me
 
 
 def test_file_message_roundtrip_with_path():
-    content = encode_file_message("文件发送失败", "large.bin", r"C:\Temp\large.bin")
+    content = encode_file_message(
+        "文件发送失败", "large.bin", r"C:\Temp\large.bin", "transfer-1"
+    )
 
     decoded = decode_file_message(content)
 
     assert decoded.status == "文件发送失败"
     assert decoded.filename == "large.bin"
     assert decoded.path == r"C:\Temp\large.bin"
+    assert decoded.transfer_id == "transfer-1"
 
 
 def test_file_message_decodes_legacy_plain_filename(tmp_path):
@@ -40,4 +43,3 @@ def test_file_store_hash_and_unique_paths(tmp_path):
     assert store.safe_filename("../bad:name.txt") == "bad_name.txt"
     assert store.sha256_bytes(payload) == FileStore.sha256_bytes(payload)
     assert store.unique_receive_path("note.txt").endswith("note_1.txt")
-

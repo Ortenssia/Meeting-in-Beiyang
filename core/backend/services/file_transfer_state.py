@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 FILE_CANCEL = "FILE_CANCEL"
 FILE_RESUME_REQ = "FILE_RESUME_REQ"
 FILE_RESUME_RESP = "FILE_RESUME_RESP"
+FILE_DECLINE = "FILE_DECLINE"
 
 
 class FileTransferState:
@@ -25,8 +26,12 @@ class FileTransferState:
         self.lock = threading.Lock()
 
     def register_sender(self, file_id: str, filename: str, to_name: str):
+        pause_event = threading.Event()
+        pause_event.set()
         self.active_senders[file_id] = {
             "cancelled": False,
+            "paused": False,
+            "pause_event": pause_event,
             "filename": filename,
             "to_name": to_name,
         }
@@ -35,6 +40,7 @@ class FileTransferState:
         sender = self.active_senders.get(file_id)
         if sender:
             sender["cancelled"] = True
+            sender["pause_event"].set()
         return sender
 
     def pop_sender(self, file_id: str) -> Optional[Dict[str, Any]]:
@@ -42,6 +48,29 @@ class FileTransferState:
 
     def sender_cancelled(self, file_id: str) -> bool:
         return bool(self.active_senders.get(file_id, {}).get("cancelled"))
+
+    def pause_sender(self, file_id: str) -> bool:
+        sender = self.active_senders.get(file_id)
+        if not sender or sender.get("cancelled"):
+            return False
+        sender["paused"] = True
+        sender["pause_event"].clear()
+        return True
+
+    def resume_sender(self, file_id: str) -> bool:
+        sender = self.active_senders.get(file_id)
+        if not sender or sender.get("cancelled"):
+            return False
+        sender["paused"] = False
+        sender["pause_event"].set()
+        return True
+
+    def sender_paused(self, file_id: str) -> bool:
+        return bool(self.active_senders.get(file_id, {}).get("paused"))
+
+    def sender_pause_event(self, file_id: str) -> Optional[threading.Event]:
+        sender = self.active_senders.get(file_id)
+        return sender.get("pause_event") if sender else None
 
     def active_file_id_for(self, filename: str) -> str:
         for file_id, state in self.incoming_files.items():

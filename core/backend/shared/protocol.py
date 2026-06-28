@@ -67,6 +67,7 @@ class Protocol:
 
     # 包头固定长度：4 字节无符号大端整数
     HEADER_LENGTH = 4
+    BINARY_CHUNK_MAGIC = b"BFCH1"
 
     # ================================================================== #
     #  UDP 数据包构造与解析
@@ -228,10 +229,60 @@ class Protocol:
         Returns:
             解析后的字典；解析失败返回空字典。
         """
+        binary = Protocol.parse_binary_file_chunk(data)
+        if binary:
+            return binary
         try:
             return json.loads(data.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             return {}
+
+    @staticmethod
+    def create_binary_file_chunk(file_id: str, chunk_index: int, data: bytes) -> bytes:
+        """Create a packed binary file chunk frame.
+
+        Frame body:
+            magic(5) + header_len(4) + UTF-8 JSON header + raw bytes
+        """
+        header = json.dumps(
+            {
+                "type": Protocol.FILE_CHUNK,
+                "binary": True,
+                "file_id": file_id,
+                "chunk_index": chunk_index,
+                "size": len(data),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        body = (
+            Protocol.BINARY_CHUNK_MAGIC
+            + struct.pack("!I", len(header))
+            + header
+            + data
+        )
+        return Protocol.pack_with_header(body)
+
+    @staticmethod
+    def parse_binary_file_chunk(data: bytes) -> Dict[str, Any]:
+        if not data.startswith(Protocol.BINARY_CHUNK_MAGIC):
+            return {}
+        prefix_len = len(Protocol.BINARY_CHUNK_MAGIC)
+        if len(data) < prefix_len + 4:
+            return {}
+        header_len = struct.unpack("!I", data[prefix_len:prefix_len + 4])[0]
+        header_start = prefix_len + 4
+        header_end = header_start + header_len
+        if header_end > len(data):
+            return {}
+        try:
+            header = json.loads(data[header_start:header_end].decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+        raw = data[header_end:]
+        if int(header.get("size", len(raw)) or 0) != len(raw):
+            return {}
+        header["data"] = raw
+        return header
 
     # -- 便捷方法：PROFILE_EXCHANGE ------------------------------------- #
 
