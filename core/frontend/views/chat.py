@@ -1456,6 +1456,8 @@ class ChatView:
             if service:
                 with service._file_lock:
                     state = service._incoming_files.get(file_id, {})
+                    if state.get("pending_accept"):
+                        return
                     file_path = state.get("final_path", "")
             content = self._file_message_content(
                 "正在接收文件", filename, file_path, file_id
@@ -1622,10 +1624,20 @@ class ChatView:
                 self.page.update()
 
         def decline(_e):
-            self.app.message_service.decline_file_offer(file_id)
-            self._pending_file_offers.pop(file_id, None)
+            content = self._file_message_content(
+                "已拒绝接收", filename, "", file_id
+            )
             if row and row in self._msg_list.controls:
-                self._msg_list.controls.remove(row)
+                self._replace_bubble(
+                    row,
+                    from_name,
+                    content,
+                    time.strftime("%H:%M:%S", time.localtime()),
+                    is_self=False,
+                )
+            self._pending_file_offers.pop(file_id, None)
+            self._mark_file_transfer_closed(file_id)
+            self.app.message_service.decline_file_offer(file_id)
             if self.page:
                 self.page.update()
 

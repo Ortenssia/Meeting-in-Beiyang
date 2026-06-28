@@ -41,7 +41,7 @@ from core.backend.services.file_transfer_state import (
     FileTransferState,
 )
 from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY, NetworkPolicy
-from core.backend.shared.file_message import encode_file_message
+from core.backend.shared.file_message import encode_file_message, decode_file_message
 from core.backend.shared.protocol import Protocol
 
 logger = logging.getLogger(__name__)
@@ -2537,6 +2537,26 @@ class MessageService:
             }
             self._send_data_to_friend(from_name, cancel_msg)
             
+        try:
+            old_content = self.friend_db.get_chat_message_content(file_id)
+            if old_content:
+                decoded = decode_file_message(old_content, self.receive_dir)
+                new_content = encode_file_message(
+                    "已取消",
+                    decoded.filename,
+                    decoded.path,
+                    file_id,
+                )
+                self.friend_db.update_chat_message_content(file_id, new_content)
+        except Exception:
+            logger.debug("Failed to update database message status on file cancel", exc_info=True)
+
+        if self.on_file_status_changed:
+            try:
+                self.on_file_status_changed(file_id, "已取消")
+            except Exception:
+                pass
+
         logger.info("[MessageService] 用户主动取消了文件传输: %s", filename)
         if hasattr(self.runtime, "on_friends_changed") and self.runtime.on_friends_changed:
             self.runtime.on_friends_changed()
@@ -2561,6 +2581,28 @@ class MessageService:
                     os.remove(part_path)
                 except Exception:
                     pass
+
+        try:
+            old_content = self.friend_db.get_chat_message_content(file_id)
+            if old_content:
+                decoded = decode_file_message(old_content, self.receive_dir)
+                new_content = encode_file_message(
+                    "对方已取消",
+                    decoded.filename,
+                    decoded.path,
+                    file_id,
+                )
+                self.friend_db.update_chat_message_content(file_id, new_content)
+        except Exception:
+            logger.debug("Failed to update database message status on file cancel", exc_info=True)
+
+        if self.on_file_status_changed:
+            try:
+                self.on_file_status_changed(file_id, "对方已取消")
+            except Exception:
+                pass
+
+        logger.info("[MessageService] 对端已取消文件传输: %s", file_id)
 
     def _handle_file_decline(self, from_ip: str, data: Dict[str, Any]):
         """对方拒绝了文件传输 — 取消发送。"""
