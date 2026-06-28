@@ -113,6 +113,23 @@ AVATAR_COLORS: List[Tuple[int, int, int]] = [
     (239, 68, 68),    # Red 500
     (132, 204, 22),   # Lime 500
 ]
+_AVATAR_IMAGE_CACHE = {}
+
+
+def _cached_image_bytes(path: str):
+    try:
+        stat = os.stat(path)
+        cache_key = (path, stat.st_mtime_ns, stat.st_size)
+        cached = _AVATAR_IMAGE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        with open(path, "rb") as image_file:
+            data = image_file.read()
+        _AVATAR_IMAGE_CACHE.clear()
+        _AVATAR_IMAGE_CACHE[cache_key] = data
+        return data
+    except Exception:
+        return None
 
 
 def avatar_color(name: str) -> Tuple[int, int, int]:
@@ -155,10 +172,8 @@ def avatar_circle(
                 img_src = name[7:]
             elif os.path.isabs(name):
                 if os.path.isfile(name):
-                    try:
-                        with open(name, "rb") as image_file:
-                            img_src = image_file.read()
-                    except Exception:
+                    img_src = _cached_image_bytes(name)
+                    if img_src is None:
                         is_image = False
                 else:
                     is_image = False
@@ -173,6 +188,7 @@ def avatar_circle(
     if is_image:
         image_ctrl = ft.Image(
             src=img_src or "avatar.png",
+            key=f"avatar:{name}:{size}",
             width=size - 3,
             height=size - 3,
             fit=ft.BoxFit.COVER,

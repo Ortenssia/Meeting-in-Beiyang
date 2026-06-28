@@ -13,12 +13,21 @@ class DummySocket:
     def __init__(self):
         self.closed = False
         self.sent = []
+        self.options = []
 
     def close(self):
         self.closed = True
 
     def sendall(self, data):
         self.sent.append(data)
+
+    def getpeername(self):
+        if self.closed:
+            raise OSError("closed")
+        return ("172.30.0.1", 7780)
+
+    def setsockopt(self, *args):
+        self.options.append(args)
 
 
 def test_register_connection_dedupes_temporary_ip_entry():
@@ -73,3 +82,15 @@ def test_registered_connection_has_send_lock_and_sends_through_it():
     assert ok is True
     assert sock.sent == [b"payload"]
     assert "send_lock" in manager.connections[key]
+
+
+def test_online_queries_prune_closed_socket_entries():
+    manager = ConnectionManager(my_name="Me", tcp_port=7779)
+    sock = DummySocket()
+
+    manager._register_connection(sock, "172.30.0.1", "Alice", 7780)
+    sock.close()
+
+    assert manager.is_friend_online("Alice") is False
+    assert manager.get_online_friends() == []
+    assert manager.get_connection_count() == 0

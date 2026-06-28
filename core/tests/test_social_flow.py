@@ -24,6 +24,7 @@ class MockConnectionManager:
         self.online_friends = {}  # name -> ip
         self.sent_messages = []   # list of (name, msg_dict)
         self.connect_calls = []
+        self.connect_success = True
         self.tcp_port = 7788
 
     def is_friend_online(self, name):
@@ -48,9 +49,12 @@ class MockConnectionManager:
 
     def connect_to_friend(self, ip, port=0, name=""):
         self.connect_calls.append((ip, port, name))
+        if not self.connect_success:
+            return False
         actual_name = name if name else (port if isinstance(port, str) else "")
         if actual_name:
             self.online_friends[actual_name] = ip
+        return True
 
 
 @pytest.fixture
@@ -96,7 +100,7 @@ class TestSocialFlow:
         # Alice 在线
         conn_mgr.online_friends["Alice"] = "192.168.1.5"
 
-        success = msg_service.send_message("Alice", "Hi Alice!")
+        success = msg_service.send_message("Alice", "Hi Alice!", msg_id="ui-msg-1")
         assert success is True
         
         # 验证消息直接通过 TCP 送达了
@@ -104,6 +108,7 @@ class TestSocialFlow:
         target, data = conn_mgr.sent_messages[0]
         assert target == "Alice"
         assert data["type"] == MessageService.CHAT_MESSAGE
+        assert data["msg_id"] == "ui-msg-1"
         assert data["content"] == "Hi Alice!"
 
         # 检查是否同时记入了聊天历史
@@ -111,6 +116,35 @@ class TestSocialFlow:
         assert len(history) == 1
         assert history[0]["content"] == "Hi Alice!"
         assert history[0]["direction"] == "send"
+        assert history[0]["msg_id"] == "ui-msg-1"
+
+    def test_receive_message_callback_includes_msg_id(self, social_env):
+        db, conn_mgr, msg_service = social_env
+        received = []
+        msg_service.on_message_received = (
+            lambda name, content, timestamp, msg_id:
+            received.append((name, content, timestamp, msg_id))
+        )
+
+        msg_service.handle_message(
+            "192.168.1.5",
+            {
+                "type": MessageService.CHAT_MESSAGE,
+                "msg_id": "incoming-msg-1",
+                "from_name": "Alice",
+                "to_name": "Me",
+                "content": "Hi Me!",
+                "timestamp": "2026-06-29 00:30:00",
+            },
+        )
+
+        assert received == [
+            ("Alice", "Hi Me!", "2026-06-29 00:30:00", "incoming-msg-1")
+        ]
+        history = db.get_chat_history("Alice")
+        assert len(history) == 1
+        assert history[0]["direction"] == "receive"
+        assert history[0]["msg_id"] == "incoming-msg-1"
 
     def test_send_message_offline_relay(self, social_env):
         db, conn_mgr, msg_service = social_env
@@ -120,6 +154,7 @@ class TestSocialFlow:
         # 在线的其他好友（作为中继节点）
         db.add_friend("Charlie", "192.168.1.7", 7779, ["kivy"], "Charlie Bio")
         conn_mgr.online_friends["Charlie"] = "192.168.1.7"
+        conn_mgr.connect_success = False
 
         # 发消息给离线的 Bob
         success = msg_service.send_message("Bob", "Hi Bob (offline)")
@@ -317,6 +352,7 @@ class TestSocialFlow:
         
         # 离线的目标好友
         db.add_friend("Bob", "192.168.1.6", 7779, ["kivy"], "Bob Bio")
+        conn_mgr.connect_success = False
         
         # 发送离线消息给 Bob，进入 pending 队列
         msg_service.send_message("Bob", "Hello Bob offline!")
@@ -614,6 +650,64 @@ class TestSocialFlow:
         assert target == "Alice"
         assert data["type"] == msg_service.FILE_RESUME_RESP
         assert data["completed_chunks"] == 1
+
+    def test_file_resume_response_falls_back_to_source_ip(self, tmp_path):
+        class FallbackConnectionManager:
+            tcp_port = 7779
+
+            def __init__(self):
+                self.sent = []
+
+            def is_friend_online(self, _name):
+                return True
+
+            def get_online_friends(self):
+                return []
+
+            def send_to_friend(self, target, packed):
+                size = struct.unpack("!I", packed[:4])[0]
+                message = Protocol.parse_message(packed[4:4 + size])
+                self.sent.append((target, message))
+                return target == "192.168.1.5"
+
+        db = FriendDB(str(tmp_path / "receiver.db"))
+        db.save_profile({"name": "Bob"})
+        conn = FallbackConnectionManager()
+        service = MessageService(
+            conn,
+            db,
+            receive_dir=str(tmp_path / "received"),
+            avatar_dir=str(tmp_path / "avatars"),
+        )
+        try:
+            service._handle_file_offer(
+                "192.168.1.5",
+                {
+                    "type": MessageService.FILE_OFFER,
+                    "file_id": "resume-fallback",
+                    "from_name": "Alice",
+                    "to_name": "Bob",
+                    "filename": "photo.png",
+                    "size": 1024,
+                    "chunk_size": 1024,
+                    "chunk_count": 1,
+                    "sha256": "",
+                },
+            )
+            service._handle_file_resume_req(
+                "192.168.1.5",
+                {
+                    "type": service.FILE_RESUME_REQ,
+                    "file_id": "resume-fallback",
+                    "filename": "photo.png",
+                    "sha256": "",
+                },
+            )
+
+            assert conn.sent[-1][0] == "192.168.1.5"
+            assert conn.sent[-1][1]["type"] == service.FILE_RESUME_RESP
+        finally:
+            db.close()
 
     def test_receive_avatar_file_updates_friend_avatar(self, social_env):
         db, _conn_mgr, msg_service = social_env

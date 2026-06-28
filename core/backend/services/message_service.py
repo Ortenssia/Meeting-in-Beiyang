@@ -40,6 +40,7 @@ from core.backend.services.file_transfer_state import (
     FILE_ACCEPT,
     FileTransferState,
 )
+from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY, NetworkPolicy
 from core.backend.shared.file_message import encode_file_message
 from core.backend.shared.protocol import Protocol
 
@@ -93,6 +94,7 @@ class MessageService:
         friend_db,
         receive_dir: Optional[str] = None,
         avatar_dir: Optional[str] = None,
+        network_policy: Optional[NetworkPolicy] = None,
     ):
         """
         初始化消息服务。
@@ -121,13 +123,19 @@ class MessageService:
         """
         self.connection_manager = connection_manager
         self.friend_db = friend_db
+        self.network_policy = network_policy or DEFAULT_NETWORK_POLICY
+        self.HEARTBEAT_INTERVAL = self.network_policy.message_heartbeat_interval
+        self.FILE_CHUNK_SIZE = self.network_policy.file_chunk_size
+        self.FILE_ACK_INTERVAL = self.network_policy.file_ack_interval
+        self.FILE_ACK_TIMEOUT = self.network_policy.file_ack_timeout
+        self.FILE_MAX_ATTEMPTS = self.network_policy.file_max_attempts
         paths = get_app_paths()
         self.receive_dir = str(paths.resolve_receive_dir(receive_dir))
         self.avatar_dir = str(paths.resolve_avatar_cache_dir(avatar_dir))
         self.file_store = FileStore(self.receive_dir, self.avatar_dir)
 
         # 回调函数（由上层 App 或 Screen 绑定）
-        self.on_message_received: Optional[Callable[[str, str, str], None]] = None
+        self.on_message_received: Optional[Callable[[str, str, str, str], None]] = None
         self.on_friend_request: Optional[Callable[..., None]] = None
         self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
         self.on_friend_profile_update_available: Optional[Callable[[str], None]] = None
@@ -209,7 +217,7 @@ class MessageService:
     #  发送消息
     # ================================================================== #
 
-    def send_message(self, to_name: str, content: str) -> bool:
+    def send_message(self, to_name: str, content: str, msg_id: str = "") -> bool:
         """
         向指定好友发送聊天消息。
 
@@ -229,7 +237,7 @@ class MessageService:
         my_profile = self.friend_db.get_my_profile()
         my_name = my_profile.get("name", "Unknown")
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        msg_id = str(uuid.uuid4())
+        msg_id = msg_id or str(uuid.uuid4())
 
         # 构造 CHAT_MESSAGE
         chat_msg = {
@@ -823,11 +831,14 @@ class MessageService:
             last_ts = float(last.get("ts", 0.0) or 0.0)
             last_pct = int(last.get("pct", -1) or -1)
             if not force:
-                if now - last_ts < 0.125:
+                if now - last_ts < self.network_policy.file_progress_min_interval:
                     return
                 if total > 0:
                     current_pct = int(completed / total * 100)
-                    if abs(current_pct - last_pct) < 5:
+                    if (
+                        abs(current_pct - last_pct)
+                        < self.network_policy.file_progress_pct_step
+                    ):
                         return
             self._file_progress_last_emit[file_id] = {
                 "ts": now,
@@ -890,58 +901,64 @@ class MessageService:
         """
         msg_type = data.get("type", "")
 
-        if msg_type == self.CHAT_MESSAGE:
-            self._handle_chat_message(from_ip, data)
-        elif msg_type == self.RELAY_MESSAGE:
-            self._handle_relay_message(from_ip, data)
-        elif msg_type == self.FRIEND_REQUEST:
-            self._handle_friend_request(from_ip, data)
-        elif msg_type == self.FRIEND_ACCEPT:
-            self._handle_friend_accept(from_ip, data)
-        elif msg_type == self.HEARTBEAT:
-            self._handle_heartbeat(from_ip, data)
-        elif msg_type == self.PROFILE_UPDATE_NOTICE:
-            self._handle_profile_update_notice(from_ip, data)
-        elif msg_type == self.PROFILE_SYNC_REQ:
-            self._handle_profile_sync_req(from_ip, data)
-        elif msg_type == self.PROFILE_SYNC_RESP:
-            self._handle_profile_sync_resp(from_ip, data)
-        elif msg_type == self.FILE_OFFER:
-            self._handle_file_offer(from_ip, data)
-        elif msg_type == self.FILE_CHUNK:
-            self._handle_file_chunk(from_ip, data)
-        elif msg_type == self.FILE_CHUNK_ACK:
-            self._handle_file_chunk_ack(from_ip, data)
-        elif msg_type == self.FILE_COMPLETE:
-            self._handle_file_complete(from_ip, data)
-        elif msg_type == self.FILE_COMPLETE_ACK:
-            self._handle_file_complete_ack(from_ip, data)
-        elif msg_type == self.GROUP_CREATE:
-            self._handle_group_create(from_ip, data)
-        elif msg_type == self.GROUP_CHAT:
-            self._handle_group_chat(from_ip, data)
-        elif msg_type == self.GROUP_SYNC_REQ:
-            self._handle_group_sync_req(from_ip, data)
-        elif msg_type == self.GROUP_SYNC_RESP:
-            self._handle_group_sync_resp(from_ip, data)
-        elif msg_type == self.MOMENTS_PUBLISH:
-            self._handle_moments_publish(from_ip, data)
-        elif msg_type == self.MOMENTS_SYNC_REQ:
-            self._handle_moments_sync_req(from_ip, data)
-        elif msg_type == self.MOMENTS_SYNC_RESP:
-            self._handle_moments_sync_resp(from_ip, data)
-        elif msg_type == self.FILE_CANCEL:
-            self._handle_file_cancel(from_ip, data)
-        elif msg_type == self.FILE_DECLINE:
-            self._handle_file_decline(from_ip, data)
-        elif msg_type == self.FILE_ACCEPT:
-            self._handle_file_accept(from_ip, data)
-        elif msg_type == self.FILE_RESUME_REQ:
-            self._handle_file_resume_req(from_ip, data)
-        elif msg_type == self.FILE_RESUME_RESP:
-            self._handle_file_resume_resp(from_ip, data)
-        else:
-            logger.warning(f"[MessageService] 未知消息类型: {msg_type}")
+        try:
+            if msg_type == self.CHAT_MESSAGE:
+                self._handle_chat_message(from_ip, data)
+            elif msg_type == self.RELAY_MESSAGE:
+                self._handle_relay_message(from_ip, data)
+            elif msg_type == self.FRIEND_REQUEST:
+                self._handle_friend_request(from_ip, data)
+            elif msg_type == self.FRIEND_ACCEPT:
+                self._handle_friend_accept(from_ip, data)
+            elif msg_type == self.HEARTBEAT:
+                self._handle_heartbeat(from_ip, data)
+            elif msg_type == self.PROFILE_UPDATE_NOTICE:
+                self._handle_profile_update_notice(from_ip, data)
+            elif msg_type == self.PROFILE_SYNC_REQ:
+                self._handle_profile_sync_req(from_ip, data)
+            elif msg_type == self.PROFILE_SYNC_RESP:
+                self._handle_profile_sync_resp(from_ip, data)
+            elif msg_type == self.FILE_OFFER:
+                self._handle_file_offer(from_ip, data)
+            elif msg_type == self.FILE_CHUNK:
+                self._handle_file_chunk(from_ip, data)
+            elif msg_type == self.FILE_CHUNK_ACK:
+                self._handle_file_chunk_ack(from_ip, data)
+            elif msg_type == self.FILE_COMPLETE:
+                self._handle_file_complete(from_ip, data)
+            elif msg_type == self.FILE_COMPLETE_ACK:
+                self._handle_file_complete_ack(from_ip, data)
+            elif msg_type == self.GROUP_CREATE:
+                self._handle_group_create(from_ip, data)
+            elif msg_type == self.GROUP_CHAT:
+                self._handle_group_chat(from_ip, data)
+            elif msg_type == self.GROUP_SYNC_REQ:
+                self._handle_group_sync_req(from_ip, data)
+            elif msg_type == self.GROUP_SYNC_RESP:
+                self._handle_group_sync_resp(from_ip, data)
+            elif msg_type == self.MOMENTS_PUBLISH:
+                self._handle_moments_publish(from_ip, data)
+            elif msg_type == self.MOMENTS_SYNC_REQ:
+                self._handle_moments_sync_req(from_ip, data)
+            elif msg_type == self.MOMENTS_SYNC_RESP:
+                self._handle_moments_sync_resp(from_ip, data)
+            elif msg_type == self.FILE_CANCEL:
+                self._handle_file_cancel(from_ip, data)
+            elif msg_type == self.FILE_DECLINE:
+                self._handle_file_decline(from_ip, data)
+            elif msg_type == self.FILE_ACCEPT:
+                self._handle_file_accept(from_ip, data)
+            elif msg_type == self.FILE_RESUME_REQ:
+                self._handle_file_resume_req(from_ip, data)
+            elif msg_type == self.FILE_RESUME_RESP:
+                self._handle_file_resume_resp(from_ip, data)
+            else:
+                logger.warning(f"[MessageService] 未知消息类型: {msg_type}")
+        except Exception as exc:
+            logger.error(
+                "[MessageService] 处理 %s 消息时异常 (from %s): %s",
+                msg_type, from_ip, exc,
+            )
 
     # ------------------------------------------------------------------ #
     #  CHAT_MESSAGE 处理
@@ -982,7 +999,7 @@ class MessageService:
             # 触发 UI 回调
             if self.on_message_received:
                 try:
-                    self.on_message_received(from_name, content, timestamp)
+                    self.on_message_received(from_name, content, timestamp, msg_id)
                 except Exception as e:
                     logger.error(f"[MessageService] on_message_received 回调异常: {e}")
         else:
@@ -1901,7 +1918,7 @@ class MessageService:
 
         if self.on_message_received:
             try:
-                self.on_message_received(from_name, content, timestamp)
+                self.on_message_received(from_name, content, timestamp, file_id)
             except Exception as e:
                 logger.error(f"[MessageService] on_message_received 回调异常: {e}")
         if self.on_file_received:
@@ -2213,13 +2230,13 @@ class MessageService:
                 self._send_data_to_friend(m, payload)
         return group_id
 
-    def send_group_chat_message(self, group_id: str, content: str) -> bool:
+    def send_group_chat_message(self, group_id: str, content: str, msg_id: str = "") -> bool:
         group = self.friend_db.get_group(group_id)
         if not group:
             return False
         
         my_name = self.runtime.device_name
-        msg_id = str(uuid.uuid4())
+        msg_id = msg_id or str(uuid.uuid4())
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         
         self.friend_db.save_group_chat_message(msg_id, group_id, my_name, content, timestamp)
@@ -2661,7 +2678,9 @@ class MessageService:
         
         friend_name = self._get_friend_name_by_ip(from_ip) or state_from_name
         if friend_name:
-            self._send_data_to_friend(friend_name, payload)
+            self._send_data_to_friend_with_fallback(friend_name, payload, from_ip)
+        elif from_ip:
+            self._send_data_to_friend(from_ip, payload)
 
     def _handle_file_resume_resp(self, from_ip: str, data: Dict[str, Any]):
         """处理断点续传检测回复。"""

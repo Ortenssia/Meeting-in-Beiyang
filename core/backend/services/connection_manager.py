@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional
 
+from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY, NetworkPolicy
 from core.backend.shared.helpers import Helpers
 from core.backend.shared.protocol import Protocol
 
@@ -45,6 +46,7 @@ class ConnectionManager:
         tcp_port: int = Protocol.DEFAULT_TCP_PORT,
         my_user_id: str = "",
         my_device_id: str = "",
+        network_policy: Optional[NetworkPolicy] = None,
     ):
         """
         Args:
@@ -55,6 +57,7 @@ class ConnectionManager:
         self.tcp_port = tcp_port
         self.my_user_id = my_user_id
         self.my_device_id = my_device_id
+        self.network_policy = network_policy or DEFAULT_NETWORK_POLICY
 
         # ------------------------------------------------------------------ #
         #  连接池：endpoint -> {"socket", "name", "ip", "port", "connected_at"}
@@ -175,7 +178,7 @@ class ConnectionManager:
             try:
                 client_sock, addr = self._server_socket.accept()
                 client_ip = addr[0]
-                client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._configure_tcp_socket(client_sock)
 
                 # 已有到该 IP 的已命名连接 → 关闭重复入站连接
                 dup = False
@@ -229,12 +232,18 @@ class ConnectionManager:
         """
         connection_key = friend_ip
         while self._running:
+            # ---- 1. Read one framed message from the socket ----
             try:
                 success, data = Protocol.unpack_with_header(sock)
                 if not success:
                     # 连接已断开
                     break
+            except Exception as e:
+                logger.debug("接收线程 I/O 异常 [%s]: %s", friend_ip, e)
+                break
 
+            # ---- 2. Parse & dispatch (errors must NOT kill the loop) ----
+            try:
                 message = Protocol.parse_message(data)
                 if not message:
                     continue
@@ -276,8 +285,13 @@ class ConnectionManager:
                     self.on_message_received(friend_ip, message)
 
             except Exception as e:
-                logger.debug("接收线程异常 [%s]: %s", friend_ip, e)
-                break
+                logger.error(
+                    "消息处理异常 [%s] (type=%s): %s",
+                    friend_ip,
+                    message.get("type", "?") if isinstance(message, dict) else "?",
+                    e,
+                )
+                # 不 break — 继续读取下一条消息
 
         # 连接断开，清理
         self._handle_disconnect(connection_key, sock)
@@ -343,12 +357,12 @@ class ConnectionManager:
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)  # 5 秒连接超时
+            sock.settimeout(self.network_policy.tcp_connect_timeout)
             sock.connect((ip, friend_port))
             if not self._running:
                 sock.close()
                 return False
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self._configure_tcp_socket(sock)
             sock.settimeout(None)  # 连接成功后恢复阻塞模式
 
             key = self._register_connection(sock, ip, name or ip, friend_port)
@@ -458,6 +472,7 @@ class ConnectionManager:
             True 表示发送成功，False 表示失败。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             key = self._find_connection_key(ip_or_name)
             if not key:
                 error_msg = f"好友 {ip_or_name} 不在连接池中"
@@ -487,6 +502,7 @@ class ConnectionManager:
             data: 待发送 of 字节串（已打包的完整消息）。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             endpoint_list = list(self.connections.keys())
 
         failed_ips: List[str] = []
@@ -509,6 +525,7 @@ class ConnectionManager:
             列表，每项为字典 {"ip": str, "name": str, "connected_at": str}。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             deduped = {}
             for key, info in self.connections.items():
                 name = info.get("name", "")
@@ -537,6 +554,7 @@ class ConnectionManager:
             True 表示在线。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             return any(info.get("name") == name for info in self.connections.values())
 
     def get_friend_ip(self, name: str) -> str:
@@ -550,6 +568,7 @@ class ConnectionManager:
             在线 IP，未找到则返回空字符串。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             for _key, info in self.connections.items():
                 if info.get("name") == name:
                     port = int(info.get("port", 0) or 0)
@@ -568,6 +587,7 @@ class ConnectionManager:
             True 表示已连接，False 表示未连接。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             if port:
                 return self._endpoint_key(ip, port) in self.connections
             return any(info.get("ip") == ip for info in self.connections.values())
@@ -583,6 +603,7 @@ class ConnectionManager:
             好友名字；若未连接则返回空字符串。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             key = self._find_connection_key(ip)
             if key:
                 return self.connections[key].get("name", "")
@@ -597,6 +618,7 @@ class ConnectionManager:
             name: 新名字。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             key = self._find_connection_key(ip)
             if key:
                 self.connections[key]["name"] = name
@@ -609,7 +631,20 @@ class ConnectionManager:
             连接数。
         """
         with self._lock:
+            self._prune_dead_connections_unlocked()
             return len(self.connections)
+
+    @staticmethod
+    def _configure_tcp_socket(sock: socket.socket):
+        """Apply TCP options that improve latency and stale-peer detection."""
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
 
     @staticmethod
     def _endpoint_key(ip: str, port: int = 0) -> str:
@@ -652,6 +687,19 @@ class ConnectionManager:
             return True
         except OSError:
             return False
+
+    def _prune_dead_connections_unlocked(self):
+        """Drop locally closed sockets before reporting online state."""
+        for key, info in list(self.connections.items()):
+            if self._socket_alive(info.get("socket")):
+                continue
+            sock = info.get("socket")
+            try:
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+            del self.connections[key]
 
     @staticmethod
     def _looks_like_ip(value: str) -> bool:
@@ -749,7 +797,7 @@ class ConnectionManager:
         用于维持连接活跃、宣告本机当前 IP，并让好友检测 IP 变更。
         """
         while self._running:
-            time.sleep(30)
+            time.sleep(self.network_policy.tcp_heartbeat_interval)
             if not self._running:
                 break
 
@@ -776,7 +824,7 @@ class ConnectionManager:
         携带新的 IP 地址，以便好友更新地址簿中的记录。
         """
         while self._running:
-            time.sleep(15)
+            time.sleep(self.network_policy.ip_monitor_interval)
             if not self._running:
                 break
 

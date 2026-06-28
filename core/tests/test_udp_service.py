@@ -7,7 +7,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.backend.services import udp_service
+from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY
 from core.backend.services.udp_service import UDPService
+
+
+def test_default_network_policy_is_campus_lan_profile():
+    assert DEFAULT_NETWORK_POLICY.profile_name == "campus_lan"
+    assert DEFAULT_NETWORK_POLICY.udp_broadcast_interval <= 4.0
+    assert DEFAULT_NETWORK_POLICY.udp_active_scan_interval <= 20.0
 
 
 def test_broadcast_targets_include_loopback_and_local_ip(monkeypatch):
@@ -31,6 +38,55 @@ def test_broadcast_targets_include_loopback_and_local_ip(monkeypatch):
     assert "192.168.56.10" in targets
     assert "192.168.56.255" in targets
     assert "192.168.56.11" in targets
+
+
+def test_lightweight_broadcast_targets_skip_subnet_sweep(monkeypatch):
+    monkeypatch.setattr(
+        udp_service.Helpers,
+        "_detect_interfaces",
+        lambda: [
+            {
+                "ip": "192.168.56.10",
+                "mask": "255.255.255.0",
+                "broadcast": "192.168.56.255",
+                "name": "Wi-Fi",
+            }
+        ],
+    )
+
+    service = UDPService(port=8890, device_name="Alice", tcp_port=7779)
+
+    targets = set(service._get_broadcast_targets(include_subnet_scan=False))
+
+    assert "127.0.0.1" in targets
+    assert "192.168.56.10" in targets
+    assert "192.168.56.255" in targets
+    assert "192.168.56.11" not in targets
+
+
+def test_broadcast_targets_cache_active_scan_results(monkeypatch):
+    calls = {"count": 0}
+
+    def detect_interfaces():
+        calls["count"] += 1
+        return [
+            {
+                "ip": "192.168.56.10",
+                "mask": "255.255.255.0",
+                "broadcast": "192.168.56.255",
+                "name": "Wi-Fi",
+            }
+        ]
+
+    monkeypatch.setattr(udp_service.Helpers, "_detect_interfaces", detect_interfaces)
+
+    service = UDPService(port=8890, device_name="Alice", tcp_port=7779)
+
+    first = service._get_broadcast_targets()
+    second = service._get_broadcast_targets()
+
+    assert first == second
+    assert calls["count"] == 1
 
 
 def test_network_diagnostics_explain_empty_discovery(monkeypatch):
@@ -60,6 +116,8 @@ def test_network_diagnostics_explain_empty_discovery(monkeypatch):
     assert diagnostics["udp_port"] == 8890
     assert diagnostics["tcp_port"] == 7779
     assert "192.168.56.10" in diagnostics["local_ips"]
+    assert diagnostics["network_policy"]["profile"] == "campus_lan"
+    assert diagnostics["network_policy"]["udp_active_scan_interval"] == 20.0
     assert diagnostics["receive_packets"] == 0
     assert "防火墙" in diagnostics["hint"]
 

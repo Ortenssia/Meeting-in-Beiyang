@@ -6,7 +6,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.backend.services.file_store import FileStore
-from core.backend.shared.file_message import decode_file_message, encode_file_message
+from core.backend.shared.file_message import (
+    decode_file_message,
+    encode_file_message,
+    is_file_message_content,
+)
 
 
 def test_file_message_roundtrip_with_path():
@@ -28,6 +32,19 @@ def test_file_message_decodes_legacy_plain_filename(tmp_path):
     assert decoded.status == "文件"
     assert decoded.filename == "note.txt"
     assert decoded.path == str(tmp_path / "note.txt")
+
+
+def test_file_message_recognizes_non_file_word_statuses():
+    waiting = encode_file_message(
+        "等待对方接受", "photo.png", r"C:\Temp\photo.png", "transfer-1"
+    )
+    declined = encode_file_message(
+        "已拒绝接收", "photo.png", "", "transfer-1"
+    )
+
+    assert is_file_message_content(waiting)
+    assert is_file_message_content(declined)
+    assert not is_file_message_content("[普通标签] 这不是文件")
 
 
 def test_file_store_hash_and_unique_paths(tmp_path):

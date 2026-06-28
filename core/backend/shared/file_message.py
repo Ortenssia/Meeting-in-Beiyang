@@ -11,6 +11,16 @@ from dataclasses import dataclass
 
 
 DEFAULT_FILE_NAME = "received.bin"
+FILE_MESSAGE_STATUSES = {
+    "文件",
+    "正在发送文件",
+    "正在接收文件",
+    "文件发送失败",
+    "文件接收失败",
+    "等待对方接受",
+    "已拒绝接收",
+    "对方已拒绝",
+}
 
 
 @dataclass(frozen=True)
@@ -57,4 +67,27 @@ def decode_file_message(content: str, default_dir: str = "") -> FileMessage:
         filename=filename,
         path=file_path,
         transfer_id=transfer_id,
+    )
+
+
+def is_file_message_content(content: str) -> bool:
+    """Return True when *content* is an encoded file-transfer chat record."""
+    if not content.startswith("[") or "]" not in content:
+        return False
+    idx = content.find("]")
+    status = content[1:idx]
+    raw = content[idx + 1:].strip()
+    if status in FILE_MESSAGE_STATUSES:
+        return True
+    if not raw.startswith("{"):
+        return False
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return False
+    return "filename" in payload and (
+        "transfer_id" in payload
+        or "path" in payload
+        or status.endswith("文件")
+        or "文件" in status
     )

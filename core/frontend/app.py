@@ -154,8 +154,8 @@ class BeiyangApp:
         self.runtime.on_discovery_changed = lambda: self._safe(self._on_discovery)
         self.runtime.on_online_changed = lambda: self._safe(self._on_online)
         self.runtime.on_friends_changed = lambda: self._safe(self._on_friends)
-        self.runtime.on_message_received = lambda n, c, t: self._safe(
-            lambda: self._on_message(n, c, t))
+        self.runtime.on_message_received = lambda n, c, t, mid="": self._safe(
+            lambda: self._on_message(n, c, t, mid))
         self.runtime.on_friend_request = self._on_friend_request
         self.runtime.on_friend_accepted = lambda n, ip: self._safe(self._on_online)
         self.runtime.on_error = lambda msg: print(f"[BeiyangSocial] error: {msg}")
@@ -180,7 +180,11 @@ class BeiyangApp:
                 )
             )
         )
-        self.message_service.on_file_offer_received = self._on_file_offer_received
+        self.message_service.on_file_offer_received = (
+            lambda name, filename, size, fid: self._safe(
+                lambda: self._on_file_offer_received(name, filename, size, fid)
+            )
+        )
         self.message_service.on_file_status_changed = (
             lambda fid, status: self._safe(
                 lambda: self.views["chat"].on_file_status_changed(fid, status)
@@ -450,7 +454,7 @@ class BeiyangApp:
         if self.views["chat"].current_friend:
             self.views["chat"].refresh_header()
 
-    def _on_message(self, name, content, timestamp):
+    def _on_message(self, name, content, timestamp, msg_id=""):
         chat_view = self.views.get("chat")
         is_open = bool(
             chat_view
@@ -461,7 +465,7 @@ class BeiyangApp:
             self.mark_chat_read(name)
         else:
             self.mark_chat_unread(name)
-        self.views["chat"].on_new_message(name, content, timestamp)
+        self.views["chat"].on_new_message(name, content, timestamp, msg_id=msg_id)
         self.views["friends"].refresh()
 
     def _on_group_message(self, group_id, sender, content, timestamp):
@@ -737,9 +741,9 @@ class BeiyangApp:
     def has_unread_chat(self, name):
         return bool(name and name in self._unread_chats)
 
-    def send_chat_message(self, friend_name, text):
+    def send_chat_message(self, friend_name, text, msg_id=""):
         if self.message_service:
-            return self.message_service.send_message(friend_name, text)
+            return self.message_service.send_message(friend_name, text, msg_id=msg_id)
         return False
 
     def send_file_to_friend(self, friend_name, file_path, file_id=""):
@@ -774,6 +778,13 @@ class BeiyangApp:
         if self.friend_db:
             self.friend_db.clear_chat_history(friend_name)
             self.views["chat"].reload_current()
+
+    def delete_chat_message(self, msg_id, *, is_group=False):
+        if not self.friend_db or not msg_id:
+            return False
+        if is_group:
+            return self.friend_db.delete_group_chat_message(msg_id)
+        return self.friend_db.delete_chat_message(msg_id)
 
     def get_chat_list(self):
         try:
@@ -986,9 +997,13 @@ class BeiyangApp:
                 if m != my_name:
                     self.message_service._send_data_to_friend(m, payload)
 
-    def send_group_chat_message(self, group_id: str, content: str) -> bool:
+    def send_group_chat_message(self, group_id: str, content: str, msg_id: str = "") -> bool:
         if self.message_service:
-            return self.message_service.send_group_chat_message(group_id, content)
+            return self.message_service.send_group_chat_message(
+                group_id,
+                content,
+                msg_id=msg_id,
+            )
         return False
 
     def get_group_chat_history(self, group_id: str) -> List[Dict[str, Any]]:

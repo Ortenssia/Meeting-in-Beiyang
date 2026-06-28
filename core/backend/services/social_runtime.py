@@ -16,6 +16,7 @@ from core.config import AppPaths, get_app_paths
 from core.backend.services.connection_manager import ConnectionManager
 from core.backend.services.friend_db import FriendDB
 from core.backend.services.message_service import MessageService
+from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY, NetworkPolicy
 from core.backend.services.social_service import SocialService
 from core.backend.services.udp_service import UDPService
 from core.backend.shared.helpers import Helpers
@@ -35,6 +36,7 @@ class RuntimeConfig:
     receive_dir: Optional[str] = None
     avatar_dir: Optional[str] = None
     paths: Optional[AppPaths] = None
+    network_policy: NetworkPolicy = DEFAULT_NETWORK_POLICY
 
 
 class SocialRuntime:
@@ -43,6 +45,7 @@ class SocialRuntime:
     def __init__(self, config: RuntimeConfig):
         self.config = config
         self.paths = config.paths or get_app_paths()
+        self.network_policy = config.network_policy
         self.device_name = (config.name_override or "").strip() or Helpers.get_hostname()
         self.user_id = ""
         self.device_id = ""
@@ -63,7 +66,7 @@ class SocialRuntime:
         self.on_discovery_changed: Optional[Callable[[], None]] = None
         self.on_online_changed: Optional[Callable[[], None]] = None
         self.on_friends_changed: Optional[Callable[[], None]] = None
-        self.on_message_received: Optional[Callable[[str, str, str], None]] = None
+        self.on_message_received: Optional[Callable[[str, str, str, str], None]] = None
         self.on_friend_request: Optional[Callable[..., None]] = None
         self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
         self.on_error: Optional[Callable[[str], None]] = None
@@ -83,7 +86,6 @@ class SocialRuntime:
         if self.config.name_override:
             override_name = self.config.name_override
             saved_override = self.friend_db.get_app_setting(NAME_OVERRIDE_SETTING_KEY, "")
-            host_name = Helpers.get_hostname()
             profile_name = profile.get("name", "")
             should_apply_override = False
             should_rotate_identity = False
@@ -92,9 +94,9 @@ class SocialRuntime:
                 should_apply_override = True
                 should_rotate_identity = True
             elif not saved_override:
-                should_apply_override = not profile_name or profile_name == host_name
+                should_apply_override = profile_name != override_name
                 self.friend_db.set_app_setting(NAME_OVERRIDE_SETTING_KEY, override_name)
-            elif saved_override == override_name and profile_name == host_name:
+            elif saved_override == override_name and profile_name != override_name:
                 should_apply_override = True
 
             if should_apply_override:
@@ -121,6 +123,7 @@ class SocialRuntime:
             tcp_port=self.config.tcp_port,
             my_user_id=self.user_id,
             my_device_id=self.device_id,
+            network_policy=self.network_policy,
         )
         self.udp_service = UDPService(
             port=self.config.udp_port,
@@ -128,12 +131,14 @@ class SocialRuntime:
             tcp_port=self.config.tcp_port,
             user_id=self.user_id,
             device_id=self.device_id,
+            network_policy=self.network_policy,
         )
         self.message_service = MessageService(
             connection_manager=self.connection_manager,
             friend_db=self.friend_db,
             receive_dir=str(receive_dir),
             avatar_dir=str(avatar_dir),
+            network_policy=self.network_policy,
         )
         self.message_service.runtime = self
         self.social_service = SocialService(
@@ -361,9 +366,9 @@ class SocialRuntime:
         if self.message_service:
             self.message_service.handle_message(ip, data)
 
-    def _handle_message_received(self, friend_name, content, timestamp):
+    def _handle_message_received(self, friend_name, content, timestamp, msg_id=""):
         if self.on_message_received:
-            self.on_message_received(friend_name, content, timestamp)
+            self.on_message_received(friend_name, content, timestamp, msg_id)
 
     def _handle_friend_request(self, profile, is_match, from_ip=None):
         if self.on_friend_request:

@@ -1114,6 +1114,23 @@ class FriendDB:
             logger.error("清空聊天记录失败 [%s]: %s", friend_name, e)
             return False
 
+    def delete_chat_message(self, msg_id: str) -> bool:
+        """Delete one direct-chat history row by message id."""
+        if not msg_id:
+            return False
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "DELETE FROM chat_history WHERE msg_id = ?",
+                    (msg_id,),
+                )
+                self.conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("删除聊天记录失败 [%s]: %s", msg_id, e)
+            return False
+
     # ================================================================== #
     #  内部辅助方法
     # ================================================================== #
@@ -1186,26 +1203,27 @@ class FriendDB:
         """
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT * FROM my_profile LIMIT 1")
+            cursor.execute("SELECT * FROM my_profile ORDER BY id ASC LIMIT 1")
             row = cursor.fetchone()
 
             if row:
                 user_id = row["user_id"] if "user_id" in row.keys() else ""
                 device_id = row["device_id"] if "device_id" in row.keys() else ""
                 name = row["name"]
-                tags = json.loads(row["tags"])
+                tags = json.loads(row["tags"] or "[]")
                 bio = row["bio"]
                 avatar = row["avatar"] if "avatar" in row.keys() else ""
                 background = row["background"] if "background" in row.keys() else ""
-                if not user_id or not device_id:
-                    user_id = user_id or self._new_id("user")
-                    device_id = device_id or self._new_id("device")
-                    with self._lock:
+                with self._lock:
+                    cursor.execute("DELETE FROM my_profile WHERE id != ?", (row["id"],))
+                    if not user_id or not device_id:
+                        user_id = user_id or self._new_id("user")
+                        device_id = device_id or self._new_id("device")
                         cursor.execute(
                             "UPDATE my_profile SET user_id = ?, device_id = ? WHERE id = ?",
                             (user_id, device_id, row["id"]),
                         )
-                        self.conn.commit()
+                    self.conn.commit()
             else:
                 import socket
                 user_id = self._new_id("user")
@@ -1444,6 +1462,23 @@ class FriendDB:
             return True
         except Exception as e:
             logger.error("更新聊天记录失败: %s", e)
+            return False
+
+    def delete_group_chat_message(self, msg_id: str) -> bool:
+        """Delete one group-chat history row by message id."""
+        if not msg_id:
+            return False
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "DELETE FROM group_chat_history WHERE msg_id = ?",
+                    (msg_id,),
+                )
+                self.conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("删除群聊记录失败 [%s]: %s", msg_id, e)
             return False
 
     def check_msg_id(self, msg_id: str) -> bool:

@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional
 
+from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY, NetworkPolicy
 from core.backend.shared.helpers import Helpers
 from core.backend.shared.protocol import Protocol
 
@@ -83,6 +84,7 @@ class UDPService:
         tcp_port: int = Protocol.DEFAULT_TCP_PORT,
         user_id: str = "",
         device_id: str = "",
+        network_policy: Optional[NetworkPolicy] = None,
     ):
         """
         Args:
@@ -95,10 +97,14 @@ class UDPService:
         self.tcp_port = tcp_port
         self.user_id = user_id
         self.device_id = device_id
+        self.network_policy = network_policy or DEFAULT_NETWORK_POLICY
         self.sock: Optional[socket.socket] = None
         self.devices: Dict[str, DeviceInfo] = {}  # identity key -> DeviceInfo
         self.running = False
         self.multicast_lock = None
+        self._targets_cache: List[str] = []
+        self._targets_cache_at = 0.0
+        self._last_active_scan_at = 0.0
 
         # 设备列表锁，保护多线程读写 devices 字典
         self._devices_lock = threading.Lock()
@@ -144,12 +150,25 @@ class UDPService:
         name_lower = name.lower()
         return any(kw in name_lower for kw in cls._VIRTUAL_IFACE_KW)
 
-    def _get_broadcast_targets(self) -> List[str]:
+    def _get_broadcast_targets(
+        self,
+        include_subnet_scan: bool = True,
+        refresh: bool = False,
+    ) -> List[str]:
         """获取所有潜在的广播目标 IP 地址，包含应对校园网的子网单播扫描。
 
         虚拟网卡（VPN、Docker、WSL 等）的子网不会做单播扫描，
         因为在虚拟子网里不可能发现真实的局域网用户。
         """
+        now = time.monotonic()
+        if (
+            include_subnet_scan
+            and not refresh
+            and self._targets_cache
+            and now - self._targets_cache_at < self.network_policy.udp_target_cache_ttl
+        ):
+            return list(self._targets_cache)
+
         targets = ["127.0.0.1", "255.255.255.255"]
         try:
             ifaces = Helpers._detect_interfaces()
@@ -166,7 +185,8 @@ class UDPService:
                 # 校园网专属破局方案：对物理网卡的 /24 子网进行主动单播扫描。
                 # 虚拟网卡（Docker、VPN 等）子网不存在真实局域网用户，跳过。
                 if (
-                    ip
+                    include_subnet_scan
+                    and ip
                     and mask == "255.255.255.0"
                     and not ip.startswith("127.")
                     and not self._is_virtual_iface(iface.get("name", ""))
@@ -178,7 +198,11 @@ class UDPService:
                             targets.append(f"{prefix}.{i}")
         except Exception as e:
             print(f"[UDPService] Error getting targets: {e}")
-        return list(set(targets))
+        result = sorted(set(targets))
+        if include_subnet_scan:
+            self._targets_cache = list(result)
+            self._targets_cache_at = now
+        return result
 
     # ================================================================== #
     #  生命周期
@@ -280,7 +304,16 @@ class UDPService:
                     self.device_name, self.tcp_port, self.user_id, self.device_id
                 )
                 self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                targets = self._get_broadcast_targets()
+                now = time.monotonic()
+                include_subnet_scan = (
+                    now - self._last_active_scan_at
+                    >= self.network_policy.udp_active_scan_interval
+                )
+                if include_subnet_scan:
+                    self._last_active_scan_at = now
+                targets = self._get_broadcast_targets(
+                    include_subnet_scan=include_subnet_scan
+                )
                 # 探测常见 UDP 发现端口，支持单机多实例测试
                 probe_ports = self._get_probe_ports()
                 self._mark_diagnostic(
@@ -293,7 +326,7 @@ class UDPService:
                         self._send_probe(ping_data, target, p_port)
             except Exception as e:
                 self._mark_diagnostic(last_error=f"UDP broadcast failed: {e}")
-            time.sleep(5)
+            time.sleep(self.network_policy.udp_broadcast_interval)
 
     def _receive_worker(self):
         """接收线程：处理收到的 PING 和 PONG 包。"""
@@ -417,7 +450,7 @@ class UDPService:
 
             except Exception:
                 pass
-            time.sleep(5)
+            time.sleep(self.network_policy.udp_broadcast_interval)
 
     # ================================================================== #
     #  设备管理
@@ -533,7 +566,7 @@ class UDPService:
             probe_ports = self._get_probe_ports()
             
             # 1. 广播扫描
-            targets = self._get_broadcast_targets()
+            targets = self._get_broadcast_targets(refresh=True)
             self._mark_diagnostic(
                 last_scan_at=time.time(),
                 last_targets=len(targets),
@@ -654,6 +687,12 @@ class UDPService:
             "local_ips": local_ips,
             "interfaces": interfaces,
             "probe_ports": self._get_probe_ports(),
+            "network_policy": {
+                "profile": self.network_policy.profile_name,
+                "udp_broadcast_interval": self.network_policy.udp_broadcast_interval,
+                "udp_active_scan_interval": self.network_policy.udp_active_scan_interval,
+                "udp_target_cache_ttl": self.network_policy.udp_target_cache_ttl,
+            },
         })
         diagnostics["hint"] = self._diagnostic_hint(diagnostics)
         return diagnostics

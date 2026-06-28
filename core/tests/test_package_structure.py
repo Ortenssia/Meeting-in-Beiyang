@@ -81,6 +81,14 @@ def test_flet_application_does_not_import_kivy_compatibility():
     assert not (root / "buildozer.spec").exists()
 
 
+def test_file_offer_callback_is_ui_thread_safe():
+    source = inspect.getsource(BeiyangApp._main)
+
+    assert "on_file_offer_received" in source
+    assert "_on_file_offer_received" in source
+    assert "self._safe" in source
+
+
 def test_frontend_only_uses_available_flet_icons():
     import flet as ft
 
@@ -265,6 +273,8 @@ class _ChatAppStub:
 
     def __init__(self):
         self.sent_files = []
+        self.cancelled_files = []
+        self.deleted_messages = []
 
     def get_avatar_for_name(self, name):
         return name
@@ -274,6 +284,13 @@ class _ChatAppStub:
 
     def show_toast(self, _text):
         pass
+
+    def cancel_file_transfer(self, file_id):
+        self.cancelled_files.append(file_id)
+
+    def delete_chat_message(self, msg_id, *, is_group=False):
+        self.deleted_messages.append((msg_id, is_group))
+        return True
 
     def send_file_to_friend(self, friend_name, file_path, file_id=""):
         self.sent_files.append((friend_name, file_path))
@@ -338,6 +355,287 @@ def test_active_file_bubble_has_determinate_progress_and_pause_button():
     assert pause_button is not None
     assert progress_bar is not None
     assert progress_bar.value == 0.0
+
+
+def test_delete_active_file_bubble_cancels_and_removes_row():
+    import flet as ft
+
+    app = _ChatAppStub()
+    view = ChatView(app)
+    view._msg_list = ft.Column()
+
+    row = view._append_bubble(
+        "Me",
+        view._file_message_content(
+            "正在发送文件",
+            "large.bin",
+            r"C:\Temp\large.bin",
+            "transfer-delete",
+        ),
+        "12:00:00",
+        is_self=True,
+        msg_id="transfer-delete",
+    )
+
+    assert "transfer-delete" in view._transfer_widgets
+
+    view._delete_message_row(
+        row,
+        msg_id="transfer-delete",
+        file_id="transfer-delete",
+    )
+
+    assert view._msg_list.controls == []
+    assert app.cancelled_files == ["transfer-delete"]
+    assert app.deleted_messages == [("transfer-delete", False)]
+    assert "transfer-delete" in view._closed_file_transfers
+    assert view._transfer_widgets == {}
+
+
+def test_delete_text_bubble_removes_persisted_message():
+    import flet as ft
+
+    app = _ChatAppStub()
+    view = ChatView(app)
+    view._msg_list = ft.Column()
+
+    row = view._append_bubble(
+        "Me",
+        "hello",
+        "12:00:00",
+        is_self=True,
+        msg_id="chat-delete",
+    )
+
+    view._delete_message_row(row, msg_id="chat-delete")
+
+    assert view._msg_list.controls == []
+    assert app.deleted_messages == [("chat-delete", False)]
+
+
+def test_incoming_text_bubble_keeps_msg_id_for_delete_menu():
+    import flet as ft
+
+    app = _ChatAppStub()
+    view = ChatView(app)
+    view.current_friend = "Alice"
+    view._msg_list = ft.Column()
+
+    view.on_new_message(
+        "Alice",
+        "hello from alice",
+        "2026-06-29 00:30:00",
+        msg_id="incoming-delete",
+    )
+
+    def item_has_label(item, label):
+        nested = [getattr(item, "content", None)]
+        while nested:
+            control = nested.pop()
+            if control is None:
+                continue
+            if isinstance(control, ft.Text) and control.value == label:
+                return True
+            for attr in ("controls", "items"):
+                nested.extend(getattr(control, attr, []) or [])
+            content = getattr(control, "content", None)
+            if content is not None:
+                nested.append(content)
+        return False
+
+    delete_item = None
+    pending = list(view._msg_list.controls)
+    while pending and delete_item is None:
+        control = pending.pop()
+        if isinstance(control, ft.PopupMenuItem) and item_has_label(control, "删除此条"):
+            delete_item = control
+            break
+        for attr in ("controls", "items"):
+            pending.extend(getattr(control, attr, []) or [])
+        content = getattr(control, "content", None)
+        if content is not None:
+            pending.append(content)
+
+    assert delete_item is not None
+    delete_item.on_click(None)
+    assert view._msg_list.controls == []
+    assert app.deleted_messages == [("incoming-delete", False)]
+
+
+def test_waiting_accept_file_status_renders_as_file_bubble():
+    import flet as ft
+
+    view = ChatView(_ChatAppStub())
+    view._msg_list = ft.Column()
+    view._append_bubble(
+        "Me",
+        view._file_message_content(
+            "等待对方接受",
+            "photo.png",
+            r"C:\Temp\photo.png",
+            "transfer-waiting",
+        ),
+        "12:00:00",
+        is_self=True,
+    )
+
+    assert len(view._msg_list.controls) == 1
+    row = view._msg_list.controls[0]
+    pending = [row]
+    labels = []
+    while pending:
+        control = pending.pop()
+        if isinstance(control, ft.Text):
+            labels.append(control.value)
+        for attr in ("controls", "items"):
+            pending.extend(getattr(control, attr, []) or [])
+        content = getattr(control, "content", None)
+        if content is not None:
+            pending.append(content)
+
+    assert "photo.png" in labels
+    assert all('"filename"' not in str(value) for value in labels)
+
+
+def test_delete_file_offer_declines_and_removes_row():
+    import flet as ft
+
+    class _MessageService:
+        def __init__(self):
+            self.declined = []
+
+        def decline_file_offer(self, file_id):
+            self.declined.append(file_id)
+            return True
+
+    app = _ChatAppStub()
+    app.message_service = _MessageService()
+    view = ChatView(app)
+    view.current_friend = "Alice"
+    view._msg_list = ft.Column()
+
+    view.add_file_offer("Alice", "photo.png", 1024, "offer-delete")
+    row = view._msg_list.controls[0]
+
+    view._delete_message_row(row, msg_id="offer-delete", file_id="offer-delete")
+
+    assert view._msg_list.controls == []
+    assert app.message_service.declined == ["offer-delete"]
+    assert "offer-delete" not in view._pending_file_offers
+    assert "offer-delete" in view._closed_file_transfers
+
+
+def test_waiting_accept_sender_status_updates_same_bubble():
+    import flet as ft
+
+    view = ChatView(_ChatAppStub())
+    view._msg_list = ft.Column()
+    view._append_bubble(
+        "Me",
+        view._file_message_content(
+            "等待对方接受",
+            "photo.png",
+            r"C:\Temp\photo.png",
+            "transfer-waiting",
+        ),
+        "12:00:00",
+        is_self=True,
+    )
+
+    view.on_file_status_changed("transfer-waiting", "文件")
+
+    assert len(view._msg_list.controls) == 1
+    assert view._transfer_widgets == {}
+
+
+def test_accepting_file_offer_reuses_offer_bubble_for_progress():
+    import threading
+    import flet as ft
+
+    class _TransferState:
+        def active_file_id_for(self, _filename):
+            return ""
+
+    class _MessageService:
+        def __init__(self):
+            self._file_lock = threading.Lock()
+            self.file_transfer = _TransferState()
+            self.accepted = []
+
+        def accept_file_offer(self, file_id):
+            self.accepted.append(file_id)
+            return True
+
+    app = _ChatAppStub()
+    app.message_service = _MessageService()
+    view = ChatView(app)
+    view.current_friend = "Alice"
+    view._msg_list = ft.Column()
+
+    view.add_file_offer("Alice", "photo.png", 1024, "transfer-offer")
+
+    accept_button = None
+    pending = list(view._msg_list.controls)
+    while pending and accept_button is None:
+        control = pending.pop()
+        if isinstance(control, ft.IconButton) and control.tooltip == "接收文件":
+            accept_button = control
+            break
+        for attr in ("controls", "items"):
+            pending.extend(getattr(control, attr, []) or [])
+        content = getattr(control, "content", None)
+        if content is not None:
+            pending.append(content)
+
+    assert accept_button is not None
+    accept_button.on_click(None)
+    view.on_file_progress("transfer-offer", "Alice", "photo.png", 512, 1024, False)
+
+    assert app.message_service.accepted == ["transfer-offer"]
+    assert len(view._msg_list.controls) == 1
+    assert "transfer-offer" in view._transfer_widgets
+
+
+def test_late_progress_after_final_status_does_not_recreate_bubble():
+    import flet as ft
+
+    view = ChatView(_ChatAppStub())
+    view.current_friend = "Alice"
+    view._msg_list = ft.Column()
+
+    view.on_file_progress("transfer-late", "Alice", "photo.png", 512, 1024, False)
+    done_content = view._file_message_content(
+        "文件",
+        "photo.png",
+        r"C:\Temp\photo.png",
+        "transfer-late",
+    )
+    view.on_new_message("Alice", done_content, "2026-06-28 12:00:00")
+    view.on_file_progress("transfer-late", "Alice", "photo.png", 0, 1024, False)
+
+    assert len(view._msg_list.controls) == 1
+    assert view._transfer_widgets == {}
+
+
+def test_duplicate_final_file_message_is_ignored_after_close():
+    import flet as ft
+
+    view = ChatView(_ChatAppStub())
+    view.current_friend = "Alice"
+    view._msg_list = ft.Column()
+
+    view.on_file_progress("transfer-final", "Alice", "photo.png", 1024, 1024, False)
+    done_content = view._file_message_content(
+        "文件",
+        "photo.png",
+        r"C:\Temp\photo.png",
+        "transfer-final",
+    )
+    view.on_new_message("Alice", done_content, "2026-06-28 12:00:00")
+    view.on_new_message("Alice", done_content, "2026-06-28 12:00:01")
+
+    assert len(view._msg_list.controls) == 1
+    assert view._transfer_widgets == {}
 
 
 def test_failed_file_bubble_retry_reuses_same_bubble(tmp_path):

@@ -50,6 +50,33 @@ class TestFriendDB:
         assert loaded["conditions"]["required_tags"] == ["linux"]
         assert loaded["conditions"]["auto_accept"] is True
 
+    def test_get_my_profile_collapses_duplicate_profile_rows(self, db):
+        cursor = db.conn.cursor()
+        cursor.execute("DELETE FROM my_profile")
+        cursor.execute(
+            """
+            INSERT INTO my_profile
+            (user_id, device_id, name, tags, bio, avatar, background)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("user_bob", "device_bob", "Bob", "[]", "", "", ""),
+        )
+        cursor.execute(
+            """
+            INSERT INTO my_profile
+            (user_id, device_id, name, tags, bio, avatar, background)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("user_old", "device_old", "Ortensia", "[]", "", "", ""),
+        )
+        db.conn.commit()
+
+        profile = db.get_my_profile()
+        rows = db.conn.execute("SELECT name FROM my_profile").fetchall()
+
+        assert profile["name"] == "Bob"
+        assert [row[0] for row in rows] == ["Bob"]
+
     def test_add_and_get_friend(self, db):
         success = db.add_friend(
             name="FriendB",
@@ -298,7 +325,17 @@ class TestFriendDB:
         assert history[0]["direction"] == "send"
         assert history[0]["content"] == "how are you"
 
+        # 删除单条聊天历史
+        assert db.delete_chat_message("chat1") is True
+        assert db.get_chat_history("FriendB") == []
+        assert db.delete_chat_message("missing-chat") is False
+
         # 清空聊天历史
+        db.save_chat_message(
+            from_name="Me", to_name="FriendB",
+            content="second message", timestamp="2026-06-13 00:00:01",
+            msg_id="chat2"
+        )
         success = db.clear_chat_history("FriendB")
         assert success is True
         assert len(db.get_chat_history("FriendB")) == 0
@@ -329,6 +366,8 @@ class TestFriendDB:
         assert len(history) == 1
         assert history[0]["content"] == "Hello group!"
         assert history[0]["sender"] == "Alice"
+        assert db.delete_group_chat_message(msg_id) is True
+        assert db.get_group_chat_history(group_id) == []
 
         # 3. Test moments
         post_id = "post-1"

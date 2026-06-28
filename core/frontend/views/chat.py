@@ -7,7 +7,11 @@ import uuid
 
 import flet as ft
 
-from core.backend.shared.file_message import decode_file_message, encode_file_message
+from core.backend.shared.file_message import (
+    decode_file_message,
+    encode_file_message,
+    is_file_message_content,
+)
 
 from .. import theme as T
 
@@ -29,6 +33,7 @@ class ChatView:
         self._scroll_generation = 0
         self._transfer_widgets = {}
         self._transfer_watchdogs = set()
+        self._closed_file_transfers = set()
         self._pending_file_offers: dict = {}  # file_id → {from_name, filename, size, widget}
         self.file_picker = getattr(app, "chat_file_picker", None) or ft.FilePicker()
         self.compress_checkbox = ft.Checkbox(
@@ -350,7 +355,11 @@ class ChatView:
         # Clean file tag descriptions for clean preview
         if last_msg.startswith("[") and "]" in last_msg:
             parts = last_msg.split("]", 1)
-            file_info = self._file_info_from_content(last_msg) if "文件" in parts[0] else None
+            file_info = (
+                self._file_info_from_content(last_msg)
+                if is_file_message_content(last_msg)
+                else None
+            )
             preview = file_info["filename"] if file_info else parts[1].strip()
             last_msg = f"📂 {parts[0][1:]}: {preview}"
 
@@ -413,7 +422,13 @@ class ChatView:
                 ts = msg.get("timestamp", "")
                 if len(ts) >= 19:
                     ts = ts[11:19]
-                self._append_bubble(sender, content, ts, is_self=is_self)
+                self._append_bubble(
+                    sender,
+                    content,
+                    ts,
+                    is_self=is_self,
+                    msg_id=msg.get("msg_id", ""),
+                )
         else:
             history = self.app.get_chat_history(self.current_friend) or []
             for msg in history:
@@ -424,13 +439,19 @@ class ChatView:
                 ts = msg.get("timestamp", "")
                 if len(ts) >= 19:
                     ts = ts[11:19]
-                self._append_bubble(from_name, content, ts, is_self=is_self)
+                self._append_bubble(
+                    from_name,
+                    content,
+                    ts,
+                    is_self=is_self,
+                    msg_id=msg.get("msg_id", ""),
+                )
         # Render any pending file offers for this friend at the bottom.
         if not self.is_group:
             self._render_file_offers_for(self.current_friend)
         self._scroll_bottom()
 
-    def _append_bubble(self, from_name, content, timestamp, is_self=False):
+    def _append_bubble(self, from_name, content, timestamp, is_self=False, msg_id=""):
         bubble_content = None
         
         # Check if the message is a file transfer representation
@@ -438,17 +459,21 @@ class ChatView:
         file_status = ""
         filename = ""
         transfer_id = ""
+        file_id = ""
+        row = None
+
+        def delete_current(_e=None):
+            self._delete_message_row(row, msg_id=msg_id, file_id=file_id)
         
-        if content.startswith("[") and "]" in content:
+        if is_file_message_content(content):
             idx = content.find("]")
             tag = content[1:idx]
-            if "文件" in tag:
-                file_info = self._file_info_from_content(content)
-                is_file_msg = True
-                filename = file_info["filename"]
-                file_path = file_info["path"]
-                transfer_id = file_info["transfer_id"]
-                file_status = tag
+            file_info = self._file_info_from_content(content)
+            is_file_msg = True
+            filename = file_info["filename"]
+            file_path = file_info["path"]
+            transfer_id = file_info["transfer_id"]
+            file_status = tag
 
         if is_file_msg:
             # Resolve file_id for active cancel action
@@ -735,6 +760,13 @@ class ChatView:
                                         ], spacing=6),
                                         on_click=lambda _: decompress_zip()
                                     ) if filename.lower().endswith(".zip") else ft.PopupMenuItem(visible=False),
+                                    ft.PopupMenuItem(
+                                        content=ft.Row([
+                                            ft.Icon(ft.Icons.DELETE_ROUNDED, size=14, color=ft.Colors.RED_400),
+                                            ft.Text("删除此条", size=12),
+                                        ], spacing=6),
+                                        on_click=delete_current,
+                                    ),
                                 ],
                                 icon=ft.Icons.MORE_VERT_ROUNDED,
                                 icon_color=ft.Colors.ON_SURFACE_VARIANT,
@@ -878,13 +910,47 @@ class ChatView:
             on_tap=lambda _: self.app.show_friend_profile(from_name) if hasattr(self.app, "show_friend_profile") else None,
             content=T.avatar_circle(self.app.get_avatar_for_name(from_name), T.AVATAR_SM)
         )
+        row_menu = None
+        if not is_file_msg:
+            row_menu = ft.PopupMenuButton(
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Row([
+                            ft.Icon(
+                                ft.Icons.DELETE_ROUNDED,
+                                size=14,
+                                color=ft.Colors.RED_400,
+                            ),
+                            ft.Text("删除此条", size=12),
+                        ], spacing=6),
+                        on_click=delete_current,
+                    )
+                ],
+                icon=ft.Icons.MORE_VERT_ROUNDED,
+                icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                icon_size=16,
+            )
         if is_self:
-            row = ft.Row([ft.Container(expand=True), bubble, avatar],
-                         alignment=ft.MainAxisAlignment.END, vertical_alignment=ft.CrossAxisAlignment.END)
+            controls = [ft.Container(expand=True)]
+            if row_menu:
+                controls.append(row_menu)
+            controls.extend([bubble, avatar])
+            row = ft.Row(
+                controls,
+                alignment=ft.MainAxisAlignment.END,
+                vertical_alignment=ft.CrossAxisAlignment.END,
+            )
         else:
-            row = ft.Row([avatar, bubble], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.END)
+            controls = [avatar, bubble]
+            if row_menu:
+                controls.append(row_menu)
+            row = ft.Row(
+                controls,
+                alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.END,
+            )
 
-        if is_file_msg and file_id and "正在" in file_status:
+        if is_file_msg and file_id and ("正在" in file_status or "等待" in file_status):
             self._transfer_widgets[file_id] = {
                 "row": row,
                 "progress": progress_bar,
@@ -919,10 +985,14 @@ class ChatView:
     ):
         return encode_file_message(status, filename, file_path, transfer_id)
 
-    def _replace_bubble(self, old_row, from_name, content, timestamp, is_self=False):
+    def _replace_bubble(self, old_row, from_name, content, timestamp, is_self=False, msg_id=""):
         if not self._msg_list:
-            return self._append_bubble(from_name, content, timestamp, is_self=is_self)
-        replacement = self._build_bubble_row(from_name, content, timestamp, is_self)
+            return self._append_bubble(
+                from_name, content, timestamp, is_self=is_self, msg_id=msg_id
+            )
+        replacement = self._build_bubble_row(
+            from_name, content, timestamp, is_self, msg_id=msg_id
+        )
         try:
             idx = self._msg_list.controls.index(old_row)
             self._msg_list.controls[idx] = replacement
@@ -931,12 +1001,42 @@ class ChatView:
         self._scroll_bottom()
         return replacement
 
-    def _build_bubble_row(self, from_name, content, timestamp, is_self=False):
+    def _build_bubble_row(self, from_name, content, timestamp, is_self=False, msg_id=""):
         before_len = len(self._msg_list.controls)
-        row = self._append_bubble(from_name, content, timestamp, is_self=is_self)
+        row = self._append_bubble(
+            from_name, content, timestamp, is_self=is_self, msg_id=msg_id
+        )
         if len(self._msg_list.controls) > before_len:
             self._msg_list.controls.pop()
         return row
+
+    def _delete_message_row(self, row, msg_id="", file_id=""):
+        delete_id = msg_id or file_id
+        if file_id:
+            was_pending_offer = file_id in self._pending_file_offers
+            self._mark_file_transfer_closed(file_id)
+            service = getattr(self.app, "message_service", None)
+            try:
+                if was_pending_offer and service and hasattr(service, "decline_file_offer"):
+                    service.decline_file_offer(file_id)
+                elif hasattr(self.app, "cancel_file_transfer"):
+                    self.app.cancel_file_transfer(file_id)
+            except Exception:
+                pass
+
+        if delete_id and hasattr(self.app, "delete_chat_message"):
+            try:
+                self.app.delete_chat_message(delete_id, is_group=self.is_group)
+            except TypeError:
+                self.app.delete_chat_message(delete_id)
+            except Exception:
+                pass
+
+        if row and self._msg_list and row in self._msg_list.controls:
+            self._msg_list.controls.remove(row)
+
+        if self.page:
+            self.page.update()
 
     def _scroll_bottom(self):
         if not self._msg_list or not self.page:
@@ -1032,15 +1132,26 @@ class ChatView:
 
         # Append bubble immediately so the user sees it instantly!
         ts = time.strftime("%H:%M:%S", time.localtime())
-        self._append_bubble(self.app.device_name, text, ts, is_self=True)
+        msg_id = str(uuid.uuid4())
+        self._append_bubble(
+            self.app.device_name,
+            text,
+            ts,
+            is_self=True,
+            msg_id=msg_id,
+        )
         if self.page:
             self.page.update()
 
         def task():
             if self.is_group:
-                self.app.send_group_chat_message(self.current_group_id, text)
+                self.app.send_group_chat_message(
+                    self.current_group_id,
+                    text,
+                    msg_id=msg_id,
+                )
             else:
-                self.app.send_chat_message(self.current_friend, text)
+                self.app.send_chat_message(self.current_friend, text, msg_id=msg_id)
         threading.Thread(target=task, daemon=True).start()
 
     async def _pick_file(self, _e):
@@ -1298,6 +1409,17 @@ class ChatView:
             return transfer_id, widget
         return "", None
 
+    @staticmethod
+    def _is_final_file_status(status: str) -> bool:
+        return bool(status) and "正在" not in status and "等待" not in status
+
+    def _mark_file_transfer_closed(self, file_id: str):
+        if not file_id:
+            return
+        self._closed_file_transfers.add(file_id)
+        self._transfer_widgets.pop(file_id, None)
+        self._pending_file_offers.pop(file_id, None)
+
     # ── progress callback (called by MessageService) ────────────────────
 
     def on_file_progress(
@@ -1309,6 +1431,8 @@ class ChatView:
         *completed*  – bytes sent (sender) or written (receiver) so far.
         *confirmed*  – bytes the remote side has acknowledged (sender only).
         """
+        if file_id in self._closed_file_transfers:
+            return
         widget = self._transfer_widgets.get(file_id)
         if not widget:
             old_id, old_widget = self._find_transfer_widget(
@@ -1393,43 +1517,49 @@ class ChatView:
 
     def on_file_status_changed(self, file_id, status):
         """Update transfer widget for *file_id* to the new status."""
+        if file_id in self._closed_file_transfers:
+            return
         widget = self._transfer_widgets.get(file_id)
-        if widget:
-            sending = widget.get("sending", False)
-            peer_name = widget.get("peer_name", "")
-            filename = widget.get("filename", "")
-            from_name = self.app.device_name if sending else peer_name
-            
-            # Retrieve the file path if available
-            file_path = ""
-            service = self.app.message_service
-            if service:
-                with service._file_lock:
-                    state = service._incoming_files.get(file_id, {}) if not sending else service._active_senders.get(file_id, {})
-                    file_path = state.get("final_path", "") or state.get("file_path", "")
-                    
-            content = self._file_message_content(
-                status,
-                filename,
-                file_path,
-                file_id,
-            )
-            timestamp = time.strftime("%H:%M:%S", time.localtime())
-            
-            # Replace the old bubble row with the new bubble row
-            new_row = self._replace_bubble(
-                widget["row"],
-                from_name,
-                content,
-                timestamp,
-                is_self=sending,
-            )
-            # Update the widget reference and clean up if it reached a final state
-            widget["row"] = new_row
-            if "正在" not in status and "等待" not in status:
-                self._transfer_widgets.pop(file_id, None)
-            if self.page:
-                self.page.update()
+        if not widget:
+            if self._is_final_file_status(status):
+                self._mark_file_transfer_closed(file_id)
+            return
+
+        sending = widget.get("sending", False)
+        peer_name = widget.get("peer_name", "")
+        filename = widget.get("filename", "")
+        from_name = self.app.device_name if sending else peer_name
+
+        # Retrieve the file path if available
+        file_path = ""
+        service = self.app.message_service
+        if service:
+            with service._file_lock:
+                state = service._incoming_files.get(file_id, {}) if not sending else service._active_senders.get(file_id, {})
+                file_path = state.get("final_path", "") or state.get("file_path", "")
+
+        content = self._file_message_content(
+            status,
+            filename,
+            file_path,
+            file_id,
+        )
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+
+        # Replace the old bubble row with the new bubble row
+        new_row = self._replace_bubble(
+            widget["row"],
+            from_name,
+            content,
+            timestamp,
+            is_self=sending,
+        )
+        # Update the widget reference and clean up if it reached a final state
+        widget["row"] = new_row
+        if self._is_final_file_status(status):
+            self._mark_file_transfer_closed(file_id)
+        if self.page:
+            self.page.update()
 
     # ── inline file-offer (no modal) ──────────────────────────────────
 
@@ -1475,10 +1605,19 @@ class ChatView:
         row = None
 
         def accept(_e):
-            self.app.message_service.accept_file_offer(file_id)
-            self._pending_file_offers.pop(file_id, None)
+            content = self._file_message_content(
+                "正在接收文件", filename, "", file_id
+            )
             if row and row in self._msg_list.controls:
-                self._msg_list.controls.remove(row)
+                self._replace_bubble(
+                    row,
+                    from_name,
+                    content,
+                    time.strftime("%H:%M:%S", time.localtime()),
+                    is_self=False,
+                )
+            self._pending_file_offers.pop(file_id, None)
+            self.app.message_service.accept_file_offer(file_id)
             if self.page:
                 self.page.update()
 
@@ -1489,6 +1628,9 @@ class ChatView:
                 self._msg_list.controls.remove(row)
             if self.page:
                 self.page.update()
+
+        def delete_offer(_e):
+            self._delete_message_row(row, msg_id=file_id, file_id=file_id)
 
         # File Type Icon resolution
         ext = os.path.splitext(filename)[1].lower()
@@ -1565,6 +1707,24 @@ class ChatView:
                     [
                         accept_btn,
                         decline_btn,
+                        ft.PopupMenuButton(
+                            items=[
+                                ft.PopupMenuItem(
+                                    content=ft.Row([
+                                        ft.Icon(
+                                            ft.Icons.DELETE_ROUNDED,
+                                            size=14,
+                                            color=ft.Colors.RED_400,
+                                        ),
+                                        ft.Text("删除此条", size=12),
+                                    ], spacing=6),
+                                    on_click=delete_offer,
+                                )
+                            ],
+                            icon=ft.Icons.MORE_VERT_ROUNDED,
+                            icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                            icon_size=16,
+                        ),
                     ],
                     spacing=0,
                     alignment=ft.MainAxisAlignment.END,
@@ -1618,12 +1778,14 @@ class ChatView:
 
     # ── incoming messages ─────────────────────────────────────────────
 
-    def on_new_message(self, from_name, content, timestamp):
+    def on_new_message(self, from_name, content, timestamp, msg_id=""):
         ts = timestamp
         if len(timestamp) >= 19:
             ts = timestamp[11:19]
         if self.current_friend == from_name and not self.is_group and self._msg_list is not None:
             decoded = decode_file_message(content, self.app.get_receive_dir())
+            if decoded.transfer_id and decoded.transfer_id in self._closed_file_transfers:
+                return
             widget = None
             if decoded.transfer_id:
                 widget = self._transfer_widgets.pop(decoded.transfer_id, None)
@@ -1637,12 +1799,25 @@ class ChatView:
                     self._transfer_widgets.pop(old_id, None)
             if widget:
                 self._replace_bubble(
-                    widget["row"], from_name, content, ts, is_self=False
+                    widget["row"],
+                    from_name,
+                    content,
+                    ts,
+                    is_self=False,
+                    msg_id=msg_id or decoded.transfer_id,
                 )
+                if self._is_final_file_status(decoded.status):
+                    self._mark_file_transfer_closed(decoded.transfer_id)
                 if self.page:
                     self.page.update()
                 return
-            self._append_bubble(from_name, content, ts, is_self=False)
+            self._append_bubble(
+                from_name,
+                content,
+                ts,
+                is_self=False,
+                msg_id=msg_id or decoded.transfer_id,
+            )
             if self.page:
                 self.page.update()
         if not self.current_friend and self._list_root is not None:

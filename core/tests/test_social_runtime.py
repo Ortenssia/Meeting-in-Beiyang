@@ -8,6 +8,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.backend.services import social_runtime
+from core.backend.services.network_policy import NetworkPolicy
 from core.backend.services.social_runtime import RuntimeConfig, SocialRuntime
 
 
@@ -67,6 +68,34 @@ def test_runtime_initializes_identity_and_health(tmp_path):
         runtime.stop()
 
 
+def test_runtime_passes_network_policy_to_services(tmp_path):
+    policy = NetworkPolicy(
+        tcp_connect_timeout=1.5,
+        udp_active_scan_interval=9.0,
+        message_heartbeat_interval=4.0,
+        file_chunk_size=64 * 1024,
+    )
+    runtime = SocialRuntime(
+        RuntimeConfig(
+            tcp_port=7779,
+            udp_port=8890,
+            db_path=str(tmp_path / "alice.db"),
+            name_override="Alice",
+            network_policy=policy,
+        )
+    ).initialize()
+
+    try:
+        assert runtime.network_policy is policy
+        assert runtime.connection_manager.network_policy is policy
+        assert runtime.udp_service.network_policy is policy
+        assert runtime.message_service.network_policy is policy
+        assert runtime.message_service.FILE_CHUNK_SIZE == 64 * 1024
+        assert runtime.message_service.HEARTBEAT_INTERVAL == 4.0
+    finally:
+        runtime.stop()
+
+
 def test_runtime_can_change_receive_dir_and_persist_setting(tmp_path):
     db_path = tmp_path / "alice.db"
     chosen_dir = tmp_path / "chosen_inbox"
@@ -120,7 +149,7 @@ def test_runtime_name_override_rotates_identity_when_reusing_db_for_new_name(tmp
         bob.stop()
 
 
-def test_runtime_preserves_saved_profile_for_same_name_override(tmp_path):
+def test_runtime_reasserts_launch_name_for_same_name_override(tmp_path):
     db_path = tmp_path / "alice.db"
     runtime = SocialRuntime(
         RuntimeConfig(db_path=str(db_path), name_override="Alice")
@@ -147,7 +176,8 @@ def test_runtime_preserves_saved_profile_for_same_name_override(tmp_path):
     ).initialize()
     try:
         profile = restarted.friend_db.get_my_profile()
-        assert restarted.device_name == "Alice 自定义"
+        assert restarted.device_name == "Alice"
+        assert profile["name"] == "Alice"
         assert profile["tags"] == ["编程", "摄影"]
         assert profile["bio"] == "Keep profile"
         assert profile["conditions"]["required_tags"] == ["编程"]
