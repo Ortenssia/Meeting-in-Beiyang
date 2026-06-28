@@ -208,6 +208,7 @@ class ProfileView:
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
             expand=True,
+            height=48,  # Force identical height to ID field
         )
         self.user_id_in = ft.TextField(
             label="用户ID（修改后好友需重新搜索）",
@@ -217,6 +218,7 @@ class ProfileView:
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
             expand=True,
+            height=48,  # Force identical height to name field
             suffix=ft.IconButton(
                 icon=ft.Icons.COPY_ROUNDED,
                 icon_color=ft.Colors.DEEP_PURPLE_400,
@@ -603,20 +605,16 @@ class ProfileView:
                     )
                     self._build_default_avatars()
                 elif target == self.bg_in:
-                    try:
-                        import base64
-                        with open(file_path, "rb") as f:
-                            bg_bytes = f.read()
-                        bg_img = ft.Image(
-                            src="background",
+                    if file_path and os.path.exists(file_path):
+                        self.main_layout.image = ft.DecorationImage(
+                            src=file_path,
                             fit=ft.BoxFit.COVER,
-                            border_radius=T.R_LG,
+                            opacity=0.15,
                         )
-                        bg_img.src_base64 = base64.b64encode(bg_bytes).decode()
-                        self.cover_container.content = bg_img
-                        self.cover_container.gradient = None
-                    except Exception:
-                        pass
+                    else:
+                        self.main_layout.image = None
+                    self.cover_container.content = None
+                    self.cover_container.gradient = T.GRADIENT_PRIMARY
                 if self.page:
                     self.page.update()
                 self._auto_save("avatar" if target == self.avatar_in else "background")
@@ -649,20 +647,16 @@ class ProfileView:
                 )
                 self._build_default_avatars()
             elif target == self.bg_in:
-                try:
-                    import base64
-                    with open(file_path, "rb") as f:
-                        bg_bytes = f.read()
-                    bg_img = ft.Image(
-                        src="background",
+                if file_path and os.path.exists(file_path):
+                    self.main_layout.image = ft.DecorationImage(
+                        src=file_path,
                         fit=ft.BoxFit.COVER,
-                        border_radius=T.R_LG,
+                        opacity=0.15,
                     )
-                    bg_img.src_base64 = base64.b64encode(bg_bytes).decode()
-                    self.cover_container.content = bg_img
-                    self.cover_container.gradient = None
-                except Exception:
-                    pass
+                else:
+                    self.main_layout.image = None
+                self.cover_container.content = None
+                self.cover_container.gradient = T.GRADIENT_PRIMARY
             if self.page:
                 self.page.update()
             self._auto_save("avatar" if target == self.avatar_in else "background")
@@ -754,28 +748,21 @@ class ProfileView:
                 self.app.paths.asset_src(self._avatar_name), T.AVATAR_LG
             )
 
-            # Load cover banner image
+            # Load custom background if set
             import os
             bg_path = profile.get("background", "").strip()
             if bg_path and os.path.exists(bg_path):
-                try:
-                    import base64
-                    with open(bg_path, "rb") as f:
-                        bg_bytes = f.read()
-                    bg_img = ft.Image(
-                        src="background",
-                        fit=ft.BoxFit.COVER,
-                        border_radius=T.R_LG,
-                    )
-                    bg_img.src_base64 = base64.b64encode(bg_bytes).decode()
-                    self.cover_container.content = bg_img
-                    self.cover_container.gradient = None
-                except Exception:
-                    self.cover_container.content = None
-                    self.cover_container.gradient = T.GRADIENT_PRIMARY
+                self.main_layout.image = ft.DecorationImage(
+                    src=bg_path,
+                    fit=ft.BoxFit.COVER,
+                    opacity=0.15,
+                )
             else:
-                self.cover_container.content = None
-                self.cover_container.gradient = T.GRADIENT_PRIMARY
+                self.main_layout.image = None
+
+            # Keep avatar cover banner themed gradient
+            self.cover_container.content = None
+            self.cover_container.gradient = T.GRADIENT_PRIMARY
 
             self._theme_selector_row.content = self._build_theme_selector()
 
