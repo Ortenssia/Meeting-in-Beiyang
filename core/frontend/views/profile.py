@@ -260,7 +260,7 @@ class ProfileView:
             height=48,
             expand=True,
         )
-        self.bg_fit_dd.on_change = self._on_bg_param_change
+        self.bg_fit_dd.on_select = self._on_bg_param_change
 
         self.bg_align_dd = ft.Dropdown(
             label="对齐位置",
@@ -278,7 +278,7 @@ class ProfileView:
             height=48,
             expand=True,
         )
-        self.bg_align_dd.on_change = self._on_bg_param_change
+        self.bg_align_dd.on_select = self._on_bg_param_change
 
         self.bg_opacity_dd = ft.Dropdown(
             label="背景透明度",
@@ -296,7 +296,7 @@ class ProfileView:
             height=48,
             expand=True,
         )
-        self.bg_opacity_dd.on_change = self._on_bg_param_change
+        self.bg_opacity_dd.on_select = self._on_bg_param_change
 
         self.bg_params_row = ft.Row(
             [self.bg_fit_dd, self.bg_align_dd, self.bg_opacity_dd],
