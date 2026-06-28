@@ -75,7 +75,14 @@ class CropState:
 
 def image_size(path: str) -> tuple[int, int]:
     with Image.open(path) as image:
-        image = ImageOps.exif_transpose(image)
+        try:
+            exif = image._getexif()
+            if exif:
+                orientation = exif.get(274)
+                if orientation in (5, 6, 7, 8):
+                    return image.height, image.width
+        except Exception:
+            pass
         return image.size
 
 

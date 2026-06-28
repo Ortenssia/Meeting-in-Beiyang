@@ -1055,14 +1055,13 @@ class ChatView:
         import threading
         def _do_pick():
             from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
+            root = self.app.get_tk_root()
+            if root:
+                root.attributes("-topmost", True)
             file_path = filedialog.askopenfilename(
                 title="选择要发送的文件",
                 parent=root,
             )
-            root.destroy()
             if file_path:
                 self._send_file(file_path)
         threading.Thread(target=_do_pick, daemon=True).start()

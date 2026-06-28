@@ -641,20 +641,17 @@ class ProfileView:
             await self._browse_flet(target)
             return
 
-        import threading
-
         def _do_pick():
             from tkinter import filedialog
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
+            root = self.app.get_tk_root()
+            if root:
+                root.attributes("-topmost", True)
             file_path = filedialog.askopenfilename(
                 title="选择图片",
                 parent=root,
                 filetypes=[("图片文件", "*.png;*.jpg;*.jpeg;*.bmp")],
             )
-            root.destroy()
             if file_path:
                 self._open_crop_editor(file_path, target)
 
@@ -699,8 +696,25 @@ class ProfileView:
                 self.page.update()
             return
 
+        # Generate a smaller preview version of the image to send to Flet UI
+        preview_path = source_path
+        try:
+            from PIL import Image, ImageOps
+            temp_dir = Path(self.app.paths.data_dir) / "temp_previews"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_file = temp_dir / f"preview_{time.time_ns()}.jpg"
+            
+            with Image.open(source_path) as img:
+                img = ImageOps.exif_transpose(img)
+                # Downscale to max 1024px while keeping aspect ratio
+                img.thumbnail((1024, 1024))
+                img.save(temp_file, "JPEG", quality=80)
+                preview_path = str(temp_file)
+        except Exception as exc:
+            pass
+
         preview = ft.Image(
-            src=source_path,
+            src=preview_path,
             fit=ft.BoxFit.FILL,
             width=state.display_width,
             height=state.display_height,
@@ -783,9 +797,18 @@ class ProfileView:
             actions_alignment=ft.MainAxisAlignment.END,
         )
 
+        def cleanup():
+            if preview_path != source_path:
+                try:
+                    if os.path.exists(preview_path):
+                        os.remove(preview_path)
+                except Exception:
+                    pass
+
         def cancel(_e):
             if self.page:
                 self.page.pop_dialog()
+            cleanup()
 
         def confirm(_e):
             try:
@@ -801,6 +824,7 @@ class ProfileView:
                 if self.page:
                     self.page.pop_dialog()
                 self._apply_cropped_media(output_path, target)
+                cleanup()
             except Exception as exc:
                 error_text.value = f"裁剪失败：{exc}"
                 try:
@@ -1557,18 +1581,16 @@ class ProfileView:
 
     def _choose_receive_dir(self, _e):
         def _do_pick():
-            import tkinter as tk
             from tkinter import filedialog
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
+            root = self.app.get_tk_root()
+            if root:
+                root.attributes("-topmost", True)
             selected = filedialog.askdirectory(
                 title="选择接收文件保存目录",
                 initialdir=self.app.get_receive_dir(),
                 parent=root,
             )
-            root.destroy()
             if selected:
                 self._apply_receive_dir(selected)
 

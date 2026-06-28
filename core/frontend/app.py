@@ -389,10 +389,10 @@ class BeiyangApp:
             view.open_chat(kwargs["friend"], is_group=is_group, group_id=group_id)
             
         self._stack.controls = [view.build()]
+        self.page.update()
         
         if key != "chat" or not kwargs.get("friend"):
-            view.on_enter()
-        self.page.update()
+            self._safe(view.on_enter)
 
     # -- runtime callback handlers (all UI-side, run on Flet thread) -------
 
@@ -1015,3 +1015,13 @@ class BeiyangApp:
         if self.message_service and self.connection_manager:
             for f in self.connection_manager.get_online_friends():
                 self.message_service.sync_moments_with_friend(f["name"])
+
+    def get_tk_root(self):
+        if not hasattr(self, "_tk_root") or self._tk_root is None:
+            try:
+                import tkinter as tk
+                self._tk_root = tk.Tk()
+                self._tk_root.withdraw()
+            except Exception:
+                self._tk_root = None
+        return self._tk_root
