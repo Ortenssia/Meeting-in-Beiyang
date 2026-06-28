@@ -216,7 +216,6 @@ class ProfileView:
             border_radius=12,
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            helper="留空则自动生成；修改后旧ID将不再被好友识别",
             expand=True,
             suffix=ft.IconButton(
                 icon=ft.Icons.COPY_ROUNDED,
@@ -248,22 +247,13 @@ class ProfileView:
             min_lines=3,
             max_lines=5,
             on_change=self._on_bio_change,
+            on_blur=lambda _e: self._auto_save("bio"),
+            on_tap_outside=lambda _e: self._auto_save("bio"),
             border_radius=12,
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
             hint_text="向大家介绍一下你自己吧…",
         )
-        self.bio_save_btn = ft.ElevatedButton(
-            "保存签名",
-            icon=ft.Icons.CHECK_ROUNDED,
-            on_click=self._save_bio,
-            style=ft.ButtonStyle(
-                shape=ft.RoundedRectangleBorder(radius=10),
-                bgcolor=ft.Colors.DEEP_PURPLE_500,
-                color=ft.Colors.WHITE,
-            ),
-        )
-        self.bio_in.expand = True  # fill available width next to the button
 
         self.tags_input = TagInput("输入兴趣，逗号或回车分割")
         self.req_input = TagInput("必选兴趣（如：计算机）")
@@ -465,6 +455,11 @@ class ProfileView:
                         spacing=T.SP_MD,
                         vertical_alignment=ft.CrossAxisAlignment.START,
                     ),
+                    ft.Text(
+                        "用户ID留空则自动生成；修改后旧ID将不再被好友识别",
+                        size=11,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
                     self._path_row("头像路径", self.avatar_in, "选择图片"),
                     self.default_avatars_row,
                 ], spacing=12)),
@@ -476,11 +471,7 @@ class ProfileView:
                     ft.Text("个性展示", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
                     self.tags_input,
                     ft.Container(height=4),
-                    ft.Row(
-                        [self.bio_in, self.bio_save_btn],
-                        spacing=T.SP_SM,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
-                    ),
+                    self.bio_in,
                 ], spacing=12)),
                 
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),

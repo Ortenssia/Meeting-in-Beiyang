@@ -171,13 +171,24 @@ def avatar_circle(
     
     image_ctrl = None
     if is_image:
-        image_ctrl = ft.Image(
-            src=img_src,
-            width=size - 3,
-            height=size - 3,
-            fit=ft.BoxFit.COVER,
-            border_radius=(size - 3) // 2,
-        )
+        if isinstance(img_src, bytes):
+            import base64
+            image_ctrl = ft.Image(
+                src="avatar.png",
+                width=size - 3,
+                height=size - 3,
+                fit=ft.BoxFit.COVER,
+                border_radius=(size - 3) // 2,
+            )
+            image_ctrl.src_base64 = base64.b64encode(img_src).decode()
+        else:
+            image_ctrl = ft.Image(
+                src=img_src or "avatar.png",
+                width=size - 3,
+                height=size - 3,
+                fit=ft.BoxFit.COVER,
+                border_radius=(size - 3) // 2,
+            )
 
     controls = [
         ft.Container(
