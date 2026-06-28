@@ -181,9 +181,9 @@ class BeiyangApp:
             )
         )
         self.message_service.on_file_offer_received = self._on_file_offer_received
-        self.message_service.on_file_failed = (
-            lambda fid, err: self._safe(
-                lambda: self.views["chat"].on_file_failed(fid, err)
+        self.message_service.on_file_status_changed = (
+            lambda fid, status: self._safe(
+                lambda: self.views["chat"].on_file_status_changed(fid, status)
             )
         )
 

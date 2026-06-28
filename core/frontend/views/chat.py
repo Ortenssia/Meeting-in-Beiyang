@@ -472,6 +472,11 @@ class ChatView:
                 pb_color = ft.Colors.RED_400
                 icon_color = ft.Colors.RED_400
                 status_text = "❌ " + file_status
+            elif "等待" in file_status:
+                pb_val = 1.0
+                pb_color = ft.Colors.ORANGE_400
+                icon_color = ft.Colors.ORANGE_400
+                status_text = "⏳ " + file_status
             else:
                 pb_val = 1.0
                 pb_color = ft.Colors.GREEN_400 if not is_self else ft.Colors.WHITE
@@ -1142,12 +1147,15 @@ class ChatView:
                     target_friend, file_path, transfer_id
                 )
                 done_ts = time.strftime("%H:%M:%S", time.localtime())
-                status = "文件" if ok else "文件发送失败"
+                status = "文件发送失败"
+                if ok:
+                    status = self.app.message_service.get_file_final_status(transfer_id) if self.app.message_service else "文件"
                 content = self._file_message_content(
                     status, filename, file_path, transfer_id
                 )
                 self._replace_bubble(sending_row, self.app.device_name, content, done_ts, is_self=True)
-                self._transfer_widgets.pop(transfer_id, None)
+                if "等待" not in status:
+                    self._transfer_widgets.pop(transfer_id, None)
                 if self.page:
                     self.page.update()
             threading.Thread(target=worker, daemon=True).start()
@@ -1383,8 +1391,8 @@ class ChatView:
                     f"{self._format_bytes(completed)} / {self._format_bytes(total)}"
                 )
 
-    def on_file_failed(self, file_id, error_msg):
-        """Update transfer widget for *file_id* to failed state."""
+    def on_file_status_changed(self, file_id, status):
+        """Update transfer widget for *file_id* to the new status."""
         widget = self._transfer_widgets.get(file_id)
         if widget:
             sending = widget.get("sending", False)
@@ -1401,14 +1409,14 @@ class ChatView:
                     file_path = state.get("final_path", "") or state.get("file_path", "")
                     
             content = self._file_message_content(
-                "文件发送失败" if sending else "文件接收失败",
+                status,
                 filename,
                 file_path,
                 file_id,
             )
             timestamp = time.strftime("%H:%M:%S", time.localtime())
             
-            # Replace the old bubble row with the new failed bubble row
+            # Replace the old bubble row with the new bubble row
             new_row = self._replace_bubble(
                 widget["row"],
                 from_name,
@@ -1416,9 +1424,10 @@ class ChatView:
                 timestamp,
                 is_self=sending,
             )
-            # Update the widget reference and clean up
+            # Update the widget reference and clean up if it reached a final state
             widget["row"] = new_row
-            self._transfer_widgets.pop(file_id, None)
+            if "正在" not in status and "等待" not in status:
+                self._transfer_widgets.pop(file_id, None)
             if self.page:
                 self.page.update()
 

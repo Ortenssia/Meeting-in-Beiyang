@@ -37,6 +37,7 @@ from core.backend.services.file_transfer_state import (
     FILE_RESUME_REQ,
     FILE_RESUME_RESP,
     FILE_DECLINE,
+    FILE_ACCEPT,
     FileTransferState,
 )
 from core.backend.shared.file_message import encode_file_message
@@ -138,7 +139,7 @@ class MessageService:
         self.on_file_offer_received: Optional[
             Callable[[str, str, int, str], None]
         ] = None  # (from_name, filename, size, file_id)
-        self.on_file_failed: Optional[Callable[[str, str], None]] = None  # (file_id, error_msg)
+        self.on_file_status_changed: Optional[Callable[[str, str], None]] = None  # (file_id, status)
 
         # Pending file offers awaiting user accept/decline.
         self._pending_file_offers: Dict[str, Dict[str, Any]] = {}
@@ -173,6 +174,8 @@ class MessageService:
         self.FILE_RESUME_REQ = FILE_RESUME_REQ
         self.FILE_RESUME_RESP = FILE_RESUME_RESP
         self.FILE_DECLINE = FILE_DECLINE
+        self.FILE_ACCEPT = FILE_ACCEPT
+        self._file_final_statuses: Dict[str, str] = {}
         os.makedirs(self.receive_dir, exist_ok=True)
         os.makedirs(self.avatar_dir, exist_ok=True)
         self.runtime = None
@@ -609,12 +612,16 @@ class MessageService:
                         )
                         continue
 
+                status = "等待对方接受" if (reliable and error == "pending_accept") else "文件"
+                with self._file_lock:
+                    self._file_final_statuses[file_id] = status
+
                 if purpose != "avatar":
                     self.friend_db.save_chat_message(
                         from_name=my_name,
                         to_name=to_name,
                         content=self._file_message_content(
-                            filename, file_path, file_id
+                            filename, file_path, file_id, status=status
                         ),
                         timestamp=timestamp,
                         msg_id=file_id,
@@ -927,6 +934,8 @@ class MessageService:
             self._handle_file_cancel(from_ip, data)
         elif msg_type == self.FILE_DECLINE:
             self._handle_file_decline(from_ip, data)
+        elif msg_type == self.FILE_ACCEPT:
+            self._handle_file_accept(from_ip, data)
         elif msg_type == self.FILE_RESUME_REQ:
             self._handle_file_resume_req(from_ip, data)
         elif msg_type == self.FILE_RESUME_RESP:
@@ -1457,12 +1466,22 @@ class MessageService:
                 return False
             del self._pending_file_offers[file_id]
 
+        from_name = ""
         with self._file_lock:
             state = self._incoming_files.get(file_id)
             if not state:
                 return False
             state["pending_accept"] = False
             is_complete = state.get("_all_chunks_received", False)
+            from_name = state.get("from_name", "")
+
+        if from_name:
+            accept_msg = {
+                "type": self.FILE_ACCEPT,
+                "file_id": file_id,
+                "from_name": self.friend_db.get_my_profile().get("name", ""),
+            }
+            self._send_data_to_friend_with_fallback(from_name, accept_msg, "")
 
         if is_complete:
             # All chunks arrived while waiting for user decision.
@@ -1514,9 +1533,9 @@ class MessageService:
             except Exception:
                 logger.debug("Failed to save local decline chat message", exc_info=True)
         
-        if self.on_file_failed:
+        if self.on_file_status_changed:
             try:
-                self.on_file_failed(file_id, "已拒绝接收")
+                self.on_file_status_changed(file_id, "已拒绝接收")
             except Exception:
                 pass
         return True
@@ -1772,7 +1791,7 @@ class MessageService:
         if state.get("pending_accept"):
             state["_all_chunks_received"] = True
             state["_pending_complete_data"] = dict(data)
-            self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
+            self._send_file_complete_ack(from_name, file_id, True, error="pending_accept", fallback=from_ip)
             return
 
         self._finalise_incoming_file(file_id, data)
@@ -2012,6 +2031,10 @@ class MessageService:
         self, filename: str, path: str = "", transfer_id: str = "", status: str = "文件"
     ) -> str:
         return encode_file_message(status, filename, path, transfer_id)
+
+    def get_file_final_status(self, file_id: str) -> str:
+        with self._file_lock:
+            return self._file_final_statuses.pop(file_id, "文件")
 
     def _unique_avatar_path(self, filename: str, owner_name: str = "", user_id: str = "") -> str:
         return self.file_store.unique_avatar_path(filename, owner_name, user_id)
@@ -2549,15 +2572,43 @@ class MessageService:
         except Exception:
             logger.debug("Failed to update database message status on file decline", exc_info=True)
 
-        if self.on_file_failed:
+        if self.on_file_status_changed:
             try:
-                self.on_file_failed(file_id, "对方已拒绝")
+                self.on_file_status_changed(file_id, "对方已拒绝")
             except Exception:
                 pass
                         
         logger.info("[MessageService] 对端已取消文件传输: %s", file_id)
         if hasattr(self.runtime, "on_friends_changed") and self.runtime.on_friends_changed:
             self.runtime.on_friends_changed()
+
+    def _handle_file_accept(self, from_ip: str, data: Dict[str, Any]):
+        """对方接受了文件传输 — 更新为成功状态。"""
+        file_id = data.get("file_id", "")
+        if not file_id:
+            return
+        
+        try:
+            old_content = self.friend_db.get_chat_message_content(file_id)
+            if old_content:
+                decoded = decode_file_message(old_content, self.receive_dir)
+                # Only update if the current saved state is "等待对方接受"
+                if decoded.status == "等待对方接受":
+                    new_content = encode_file_message(
+                        "文件",
+                        decoded.filename,
+                        decoded.path,
+                        file_id,
+                    )
+                    self.friend_db.update_chat_message_content(file_id, new_content)
+        except Exception:
+            logger.debug("Failed to update database message status on file accept", exc_info=True)
+
+        if self.on_file_status_changed:
+            try:
+                self.on_file_status_changed(file_id, "文件")
+            except Exception:
+                pass
 
     def _handle_file_resume_req(self, from_ip: str, data: Dict[str, Any]):
         """处理断点续传检测请求。"""
