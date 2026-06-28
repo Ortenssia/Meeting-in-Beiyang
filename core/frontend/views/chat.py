@@ -1381,6 +1381,45 @@ class ChatView:
                     f"{self._format_bytes(completed)} / {self._format_bytes(total)}"
                 )
 
+    def on_file_failed(self, file_id, error_msg):
+        """Update transfer widget for *file_id* to failed state."""
+        widget = self._transfer_widgets.get(file_id)
+        if widget:
+            sending = widget.get("sending", False)
+            peer_name = widget.get("peer_name", "")
+            filename = widget.get("filename", "")
+            from_name = self.app.device_name if sending else peer_name
+            
+            # Retrieve the file path if available
+            file_path = ""
+            service = self.app.message_service
+            if service:
+                with service._file_lock:
+                    state = service._incoming_files.get(file_id, {}) if not sending else service._active_senders.get(file_id, {})
+                    file_path = state.get("final_path", "") or state.get("file_path", "")
+                    
+            content = self._file_message_content(
+                "文件发送失败" if sending else "文件接收失败",
+                filename,
+                file_path,
+                file_id,
+            )
+            timestamp = time.strftime("%H:%M:%S", time.localtime())
+            
+            # Replace the old bubble row with the new failed bubble row
+            new_row = self._replace_bubble(
+                widget["row"],
+                from_name,
+                content,
+                timestamp,
+                is_self=sending,
+            )
+            # Update the widget reference and clean up
+            widget["row"] = new_row
+            self._transfer_widgets.pop(file_id, None)
+            if self.page:
+                self.page.update()
+
     # ── inline file-offer (no modal) ──────────────────────────────────
 
     @staticmethod
@@ -1422,60 +1461,147 @@ class ChatView:
         filename = offer["filename"]
         size = offer["size"]
 
+        row = None
+
         def accept(_e):
             self.app.message_service.accept_file_offer(file_id)
             self._pending_file_offers.pop(file_id, None)
-            self._msg_list.controls.remove(bubble)
+            if row and row in self._msg_list.controls:
+                self._msg_list.controls.remove(row)
             if self.page:
                 self.page.update()
 
         def decline(_e):
             self.app.message_service.decline_file_offer(file_id)
             self._pending_file_offers.pop(file_id, None)
-            self._msg_list.controls.remove(bubble)
+            if row and row in self._msg_list.controls:
+                self._msg_list.controls.remove(row)
             if self.page:
                 self.page.update()
 
-        status_text = ft.Text(
-            f"📁 {filename} ({self._format_sz(size)})",
-            size=T.FS_CAPTION,
-            weight=ft.FontWeight.BOLD,
+        # File Type Icon resolution
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in (".zip", ".rar", ".7z", ".tar", ".gz"):
+            file_icon = ft.Icons.FOLDER_ZIP_ROUNDED
+            icon_bg = ft.Colors.AMBER_500
+        elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+            file_icon = ft.Icons.IMAGE_ROUNDED
+            icon_bg = ft.Colors.BLUE_500
+        elif ext in (".mp4", ".avi", ".mkv", ".mov", ".flv"):
+            file_icon = ft.Icons.VIDEO_LIBRARY_ROUNDED
+            icon_bg = ft.Colors.RED_500
+        elif ext in (".mp3", ".wav", ".flac", ".ogg", ".m4a"):
+            file_icon = ft.Icons.AUDIO_FILE_ROUNDED
+            icon_bg = ft.Colors.TEAL_500
+        elif ext in (".txt", ".md", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"):
+            file_icon = ft.Icons.ARTICLE_ROUNDED
+            icon_bg = ft.Colors.BLUE_GREY_500
+        else:
+            file_icon = ft.Icons.INSERT_DRIVE_FILE_ROUNDED
+            icon_bg = ft.Colors.DEEP_PURPLE_500
+
+        icon_container = ft.Container(
+            content=ft.Icon(file_icon, color=ft.Colors.WHITE, size=22),
+            bgcolor=icon_bg,
+            width=40,
+            height=40,
+            border_radius=8,
+            alignment=ft.alignment.Alignment.CENTER,
         )
+
         accept_btn = ft.IconButton(
-            icon=ft.Icons.CHECK_ROUNDED,
+            icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
             icon_color=ft.Colors.GREEN_400,
             icon_size=20,
             tooltip="接收文件",
             on_click=accept,
         )
         decline_btn = ft.IconButton(
-            icon=ft.Icons.CLOSE_ROUNDED,
-            icon_color=ft.Colors.RED_300,
+            icon=ft.Icons.CANCEL_ROUNDED,
+            icon_color=ft.Colors.RED_400,
             icon_size=20,
             tooltip="拒绝文件",
             on_click=decline,
         )
 
-        bubble = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Text(from_name, size=10, color=ft.Colors.DEEP_PURPLE_400,
-                            weight=ft.FontWeight.BOLD),
-                    status_text,
-                    ft.Container(expand=1),
-                    accept_btn,
-                    decline_btn,
-                ],
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            padding=T.pad_symmetric(horizontal=12, vertical=8),
-            border_radius=12,
-            bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.DEEP_PURPLE),
-            border=T.border_all(1, ft.Colors.with_opacity(0.12, ft.Colors.DEEP_PURPLE_400)),
+        top_row = ft.Row(
+            [
+                icon_container,
+                ft.Column(
+                    [
+                        ft.Text(
+                            filename, 
+                            size=13, 
+                            weight=ft.FontWeight.BOLD, 
+                            color=ft.Colors.ON_SURFACE,
+                            overflow=ft.TextOverflow.ELLIPSIS, 
+                            max_lines=1,
+                            width=140,
+                        ),
+                        ft.Text(
+                            f"📁 请求发送文件 · {self._format_sz(size)}",
+                            size=10,
+                            color=ft.Colors.DEEP_PURPLE_400,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                            max_lines=1,
+                            width=140,
+                        ),
+                    ],
+                    spacing=1,
+                    expand=True,
+                ),
+                ft.Row(
+                    [
+                        accept_btn,
+                        decline_btn,
+                    ],
+                    spacing=0,
+                    alignment=ft.MainAxisAlignment.END,
+                )
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        offer["widget"] = bubble
-        self._msg_list.controls.append(bubble)
+
+        bubble_content = ft.Column(
+            [
+                top_row,
+                ft.Text(
+                    time.strftime("%H:%M:%S", time.localtime()),
+                    size=T.FS_CAPTION,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    text_align=ft.TextAlign.RIGHT,
+                ),
+            ],
+            spacing=4,
+            tight=True,
+        )
+
+        bubble = ft.Container(
+            content=bubble_content,
+            width=320,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            border_radius=T.radius_only(
+                top_left=16, top_right=16,
+                bottom_right=16,
+                bottom_left=4,
+            ),
+            padding=T.pad_symmetric(horizontal=12, vertical=12),
+            shadow=ft.BoxShadow(blur_radius=8, color=ft.Colors.with_opacity(0.04, ft.Colors.BLACK), offset=ft.Offset(0, 2)),
+            border=T.border_all(1, ft.Colors.with_opacity(0.15, ft.Colors.DEEP_PURPLE_400)),
+        )
+
+        avatar = ft.GestureDetector(
+            mouse_cursor=ft.MouseCursor.CLICK,
+            on_tap=lambda _: self.app.show_friend_profile(from_name) if hasattr(self.app, "show_friend_profile") else None,
+            content=T.avatar_circle(self.app.get_avatar_for_name(from_name), T.AVATAR_SM)
+        )
+
+        row = ft.Row([avatar, bubble], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.END)
+        
+        offer["widget"] = row
+        self._msg_list.controls.append(row)
+        self._scroll_bottom()
         if self.page:
             self.page.update()
 

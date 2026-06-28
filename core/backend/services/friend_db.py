@@ -1419,6 +1419,33 @@ class FriendDB:
             logger.error("保存聊天消息失败: %s", e)
             return False
 
+    def get_chat_message_content(self, msg_id: str) -> Optional[str]:
+        """根据 msg_id 获取聊天消息内容。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT content FROM chat_history WHERE msg_id = ?", (msg_id,))
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
+
+    def update_chat_message_content(self, msg_id: str, new_content: str) -> bool:
+        """根据 msg_id 更新聊天记录内容。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    UPDATE chat_history
+                    SET content = ?
+                    WHERE msg_id = ?
+                """, (new_content, msg_id))
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("更新聊天记录失败: %s", e)
+            return False
+
     def check_msg_id(self, msg_id: str) -> bool:
         """
         检查指定 msg_id 是否已处理过。

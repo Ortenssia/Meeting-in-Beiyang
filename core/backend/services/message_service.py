@@ -138,6 +138,7 @@ class MessageService:
         self.on_file_offer_received: Optional[
             Callable[[str, str, int, str], None]
         ] = None  # (from_name, filename, size, file_id)
+        self.on_file_failed: Optional[Callable[[str, str], None]] = None  # (file_id, error_msg)
 
         # Pending file offers awaiting user accept/decline.
         self._pending_file_offers: Dict[str, Dict[str, Any]] = {}
@@ -1488,6 +1489,12 @@ class MessageService:
                 "from_name": self.friend_db.get_my_profile().get("name", ""),
             }
             self._send_data_to_friend_with_fallback(from_name, decline_msg, "")
+        
+        if self.on_file_failed:
+            try:
+                self.on_file_failed(file_id, "已拒绝接收")
+            except Exception:
+                pass
         return True
 
     def _accept_file_offer_internal(self, from_ip: str, data: Dict[str, Any]):
@@ -2492,6 +2499,27 @@ class MessageService:
             event = self._file_complete_events.get(file_id)
             if event:
                 event.set()  # wake the sender's retry loop
+
+        # Update database message to "对方拒绝了文件" / "文件发送失败"
+        try:
+            old_content = self.friend_db.get_chat_message_content(file_id)
+            if old_content:
+                decoded = decode_file_message(old_content, self.receive_dir)
+                new_content = encode_file_message(
+                    "文件发送失败",
+                    decoded.filename,
+                    decoded.path,
+                    file_id,
+                )
+                self.friend_db.update_chat_message_content(file_id, new_content)
+        except Exception:
+            logger.debug("Failed to update database message status on file decline", exc_info=True)
+
+        if self.on_file_failed:
+            try:
+                self.on_file_failed(file_id, "对方拒绝了文件")
+            except Exception:
+                pass
                         
         logger.info("[MessageService] 对端已取消文件传输: %s", file_id)
         if hasattr(self.runtime, "on_friends_changed") and self.runtime.on_friends_changed:
