@@ -64,11 +64,10 @@ def test_duplicate_connection_keeps_existing_socket():
 
     key = manager._register_connection(old_socket, "172.30.0.1", "Alice", 7780)
     manager._register_connection(new_socket, "172.30.0.1", "Alice", 7780)
-    manager._handle_disconnect(key, new_socket)
 
-    assert new_socket.closed is True
-    assert old_socket.closed is False
-    assert manager.connections[key]["socket"] is old_socket
+    assert old_socket.closed is True
+    assert new_socket.closed is False
+    assert manager.connections[key]["socket"] is new_socket
     assert manager.is_friend_online("Alice") is True
 
 

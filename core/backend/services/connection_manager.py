@@ -180,23 +180,6 @@ class ConnectionManager:
                 client_ip = addr[0]
                 self._configure_tcp_socket(client_sock)
 
-                # 已有到该 IP 的已命名连接 → 关闭重复入站连接
-                dup = False
-                with self._lock:
-                    for info in self.connections.values():
-                        if info.get("ip") == client_ip and not self._looks_like_ip(
-                            info.get("name", "")
-                        ):
-                            dup = True
-                            break
-                if dup:
-                    logger.debug("已有到 %s 的连接，关闭重复入站连接", client_ip)
-                    try:
-                        client_sock.close()
-                    except Exception:
-                        pass
-                    continue
-
                 logger.info("收到入站连接: %s", client_ip)
 
                 recv_thread = threading.Thread(
@@ -243,6 +226,7 @@ class ConnectionManager:
                 break
 
             # ---- 2. Parse & dispatch (errors must NOT kill the loop) ----
+            message = None
             try:
                 message = Protocol.parse_message(data)
                 if not message:
@@ -756,19 +740,12 @@ class ConnectionManager:
                 old_name = existing.get("name", "")
                 old_sock = existing.get("socket")
                 if old_sock and old_sock is not sock:
-                    # Duplicate — close the new socket, keep the existing one.
+                    # Duplicate — close the old socket, keep the new one (self-healing).
                     try:
-                        sock.close()
+                        old_sock.close()
                     except Exception:
                         pass
-                    # Still upgrade the name if this was an IP→name transition.
-                    new_name = name or ip
-                    if new_name and new_name != old_name and self._looks_like_ip(old_name):
-                        existing["name"] = new_name
-                        if self.on_friend_connected:
-                            should_notify = True
-                    if not should_notify:
-                        return key
+                    should_notify = True
 
             existing_lock = self.connections.get(key, {}).get("send_lock")
             self.connections[key] = {
