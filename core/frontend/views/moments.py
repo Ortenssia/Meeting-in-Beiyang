@@ -152,11 +152,12 @@ class MomentsView:
         media_image = None
         if media_path and os.path.exists(media_path):
             try:
+                import base64
                 with open(media_path, "rb") as f:
                     img_bytes = f.read()
                 media_image = ft.Container(
                     content=ft.Image(
-                        src=img_bytes,
+                        src_base64=base64.b64encode(img_bytes).decode(),
                         border_radius=8,
                         fit=ft.BoxFit.FIT_WIDTH,
                     ),
@@ -236,7 +237,7 @@ class MomentsView:
             self._media_path = ""
             self.media_indicator.value = ""
             self.image_preview.visible = False
-            self.image_preview.src = ""
+            self.image_preview.src_base64 = None
             self.app.show_toast("空间动态发布成功 🌌")
             self.refresh()
         else:
