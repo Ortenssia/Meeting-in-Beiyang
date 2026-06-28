@@ -4,12 +4,15 @@ Each field auto-saves independently on blur or on explicit interaction,
 so there is no single "save" button that can be swallowed by the scroll
 container.
 """
+import os
 import threading
 import time
+from pathlib import Path
 
 import flet as ft
 
 from .. import theme as T
+from ..image_crop import CropState, image_size, render_crop
 
 
 class TagInput(ft.Column):
@@ -518,7 +521,7 @@ class ProfileView:
                         size=11,
                         color=ft.Colors.ON_SURFACE_VARIANT,
                     ),
-                    self._path_row("头像路径", self.avatar_in, "选择图片"),
+                    self._path_row("头像路径", self.avatar_in, "选择并裁剪"),
                     self.default_avatars_row,
                 ], spacing=12)),
                 
@@ -599,7 +602,7 @@ class ProfileView:
                         ]
                     ),
                     ft.Divider(height=24, thickness=1, color=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
-                    self._path_row("背景图片", self.bg_in, "选择"),
+                    self._path_row("背景图片", self.bg_in, "选择并裁剪"),
                     self.bg_params_row,
                 ], spacing=12)),
             ],
@@ -653,29 +656,7 @@ class ProfileView:
             )
             root.destroy()
             if file_path:
-                target.value = file_path
-                if target == self.avatar_in:
-                    self._avatar_name = file_path
-                    self.avatar_holder.content = T.avatar_circle(
-                        self.app.paths.asset_src(self._avatar_name),
-                        T.AVATAR_LG,
-                    )
-                    self._build_default_avatars()
-                elif target == self.bg_in:
-                    if file_path and os.path.exists(file_path):
-                        self.main_layout.image = ft.DecorationImage(
-                            src=file_path,
-                            fit=self._get_bg_fit(self.bg_fit_dd.value),
-                            alignment=self._get_bg_align(self.bg_align_dd.value),
-                            opacity=float(self.bg_opacity_dd.value or "0.15"),
-                        )
-                    else:
-                        self.main_layout.image = None
-                    self.cover_container.content = None
-                    self.cover_container.gradient = T.GRADIENT_PRIMARY
-                if self.page:
-                    self.page.update()
-                self._auto_save("avatar" if target == self.avatar_in else "background")
+                self._open_crop_editor(file_path, target)
 
         threading.Thread(target=_do_pick, daemon=True).start()
 
@@ -696,29 +677,182 @@ class ProfileView:
         )
         if files and files[0].path:
             file_path = files[0].path
-            target.value = file_path
-            if target == self.avatar_in:
-                self._avatar_name = file_path
-                self.avatar_holder.content = T.avatar_circle(
-                    self.app.paths.asset_src(self._avatar_name),
-                    T.AVATAR_LG,
-                )
-                self._build_default_avatars()
-            elif target == self.bg_in:
-                if file_path and os.path.exists(file_path):
-                    self.main_layout.image = ft.DecorationImage(
-                        src=file_path,
-                        fit=self._get_bg_fit(self.bg_fit_dd.value),
-                        alignment=self._get_bg_align(self.bg_align_dd.value),
-                        opacity=float(self.bg_opacity_dd.value or "0.15"),
-                    )
-                else:
-                    self.main_layout.image = None
-                self.cover_container.content = None
-                self.cover_container.gradient = T.GRADIENT_PRIMARY
+            self._open_crop_editor(file_path, target)
+
+    def _open_crop_editor(self, source_path, target):
+        """Open a draggable, zoomable crop viewport for avatar or cover media."""
+        is_avatar = target == self.avatar_in
+        viewport_width, viewport_height = ((300, 300) if is_avatar else (336, 112))
+        output_size = ((512, 512) if is_avatar else (1500, 500))
+        try:
+            source_width, source_height = image_size(source_path)
+            state = CropState(
+                source_width,
+                source_height,
+                viewport_width,
+                viewport_height,
+            )
+        except Exception as exc:
+            self._save_status.value = f"✗ 无法读取图片：{exc}"
+            self._save_status.color = ft.Colors.RED_400
             if self.page:
                 self.page.update()
-            self._auto_save("avatar" if target == self.avatar_in else "background")
+            return
+
+        preview = ft.Image(
+            src=source_path,
+            fit=ft.BoxFit.FILL,
+            width=state.display_width,
+            height=state.display_height,
+            left=state.x,
+            top=state.y,
+            filter_quality=ft.FilterQuality.HIGH,
+        )
+        hint = ft.Text(
+            "拖动图片选择显示区域，滑动缩放",
+            size=T.FS_CAPTION,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            text_align=ft.TextAlign.CENTER,
+        )
+        error_text = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.RED_400)
+
+        def refresh_preview():
+            preview.width = state.display_width
+            preview.height = state.display_height
+            preview.left = state.x
+            preview.top = state.y
+            try:
+                preview.update()
+            except Exception:
+                if self.page:
+                    self.page.update()
+
+        def on_pan(e):
+            delta = getattr(e, "local_delta", None)
+            if delta is None:
+                return
+            state.pan(delta.x, delta.y)
+            refresh_preview()
+
+        def on_zoom(e):
+            state.set_zoom(float(e.control.value or 1.0))
+            refresh_preview()
+
+        viewport = ft.GestureDetector(
+            mouse_cursor=ft.MouseCursor.MOVE,
+            drag_interval=12,
+            on_pan_update=on_pan,
+            content=ft.Container(
+                content=ft.Stack([preview], clip_behavior=ft.ClipBehavior.HARD_EDGE),
+                width=viewport_width,
+                height=viewport_height,
+                bgcolor=ft.Colors.BLACK,
+                border_radius=(viewport_width / 2 if is_avatar else 14),
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                border=T.border_all(2, ft.Colors.with_opacity(0.75, ft.Colors.WHITE)),
+            ),
+        )
+        zoom_slider = ft.Slider(
+            min=1.0,
+            max=4.0,
+            value=1.0,
+            divisions=60,
+            on_change=on_zoom,
+            active_color=ft.Colors.DEEP_PURPLE_400,
+        )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("裁剪头像" if is_avatar else "裁剪个人背景"),
+            content=ft.Column(
+                [
+                    ft.Container(viewport, alignment=ft.alignment.Alignment.CENTER),
+                    hint,
+                    ft.Row(
+                        [ft.Icon(ft.Icons.ZOOM_OUT_ROUNDED, size=18), zoom_slider,
+                         ft.Icon(ft.Icons.ZOOM_IN_ROUNDED, size=18)],
+                        spacing=4,
+                    ),
+                    error_text,
+                ],
+                width=360,
+                spacing=10,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        def cancel(_e):
+            if self.page:
+                self.page.pop_dialog()
+
+        def confirm(_e):
+            try:
+                media_dir = Path(self.app.paths.data_dir) / "profile_media"
+                stamp = time.time_ns()
+                filename = f"{'avatar' if is_avatar else 'background'}_crop_{stamp}{'.png' if is_avatar else '.jpg'}"
+                output_path = render_crop(
+                    source_path,
+                    str(media_dir / filename),
+                    state,
+                    output_size,
+                )
+                if self.page:
+                    self.page.pop_dialog()
+                self._apply_cropped_media(output_path, target)
+            except Exception as exc:
+                error_text.value = f"裁剪失败：{exc}"
+                try:
+                    error_text.update()
+                except Exception:
+                    if self.page:
+                        self.page.update()
+
+        dialog.actions = [
+            ft.TextButton("取消", on_click=cancel),
+            ft.FilledButton("使用此区域", icon=ft.Icons.CROP_ROUNDED, on_click=confirm),
+        ]
+        if self.page:
+            self.page.show_dialog(dialog)
+
+    def _apply_cropped_media(self, output_path, target):
+        target.value = output_path
+        if target == self.avatar_in:
+            self._draft_avatar = output_path
+            self._avatar_name = output_path
+            self.avatar_holder.content = T.avatar_circle(
+                self.app.paths.asset_src(output_path), T.AVATAR_LG
+            )
+            self._build_default_avatars()
+            source = "avatar"
+        else:
+            self._draft_bg = output_path
+            # A crop already defines the composition; keep rendering centered.
+            self.bg_fit_dd.value = "cover"
+            self.bg_align_dd.value = "center"
+            self.app.friend_db.set_app_setting("bg_fit", "cover")
+            self.app.friend_db.set_app_setting("bg_align", "center")
+            self._apply_background_preview(output_path)
+            source = "background"
+        if self.page:
+            self.page.update()
+        self._auto_save(source)
+
+    def _apply_background_preview(self, bg_path):
+        if bg_path and os.path.exists(bg_path):
+            self.main_layout.image = ft.DecorationImage(
+                src=bg_path,
+                fit=self._get_bg_fit(self.bg_fit_dd.value),
+                alignment=self._get_bg_align(self.bg_align_dd.value),
+                opacity=float(self.bg_opacity_dd.value or "0.15"),
+            )
+            self.cover_container.gradient = None
+            self.cover_container.image = ft.DecorationImage(src=bg_path, fit=ft.BoxFit.COVER)
+        else:
+            self.main_layout.image = None
+            self.cover_container.image = None
+            self.cover_container.gradient = T.GRADIENT_PRIMARY
 
     def _build_default_avatars(self):
         self.default_avatars_row.controls.clear()

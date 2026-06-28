@@ -1,4 +1,5 @@
 # Beiyang Social - Challenge 3 依赖
 flet==0.85.3
 plyer>=2.0.0
+Pillow>=10.0.0
 pytest>=7.0.0

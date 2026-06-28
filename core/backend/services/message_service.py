@@ -1470,10 +1470,12 @@ class MessageService:
             del self._pending_file_offers[file_id]
 
         from_name = ""
+        filename = "received.bin"
         with self._file_lock:
             state = self._incoming_files.pop(file_id, None)
             if state:
                 from_name = state.get("from_name", "")
+                filename = state.get("filename", "received.bin")
                 self._close_incoming_handle(state)
                 part_path = state.get("part_path", "")
                 if part_path and os.path.exists(part_path):
@@ -1489,6 +1491,20 @@ class MessageService:
                 "from_name": self.friend_db.get_my_profile().get("name", ""),
             }
             self._send_data_to_friend_with_fallback(from_name, decline_msg, "")
+
+            # Save Bob's local decline message to database
+            try:
+                self.friend_db.save_chat_message(
+                    from_name=from_name,
+                    to_name=self.friend_db.get_my_profile().get("name", ""),
+                    content=self._file_message_content(
+                        filename, "", file_id, status="已拒绝接收"
+                    ),
+                    timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+                    msg_id=file_id,
+                )
+            except Exception:
+                logger.debug("Failed to save local decline chat message", exc_info=True)
         
         if self.on_file_failed:
             try:
@@ -1509,13 +1525,18 @@ class MessageService:
                 data.get("avatar_owner", from_name),
                 data.get("avatar_user_id", ""),
             )
+            part_path = final_path + ".part"
         else:
             candidate = os.path.join(self.receive_dir, filename)
             if os.path.exists(candidate):
                 final_path = self._unique_receive_path(filename)
             else:
                 final_path = candidate
-        part_path = final_path + ".part"
+            import tempfile
+            part_path = os.path.join(
+                tempfile.gettempdir(),
+                f"meeting_in_beiyang_{file_id}_{filename}.part"
+            )
 
         completed_chunks = 0
         if purpose != "avatar" and os.path.exists(part_path):
@@ -1794,7 +1815,12 @@ class MessageService:
             )
             return
 
-        os.replace(part_path, final_path)
+        try:
+            import shutil
+            shutil.move(part_path, final_path)
+        except Exception as e:
+            logger.error(f"[MessageService] 移动临时文件失败: {e}, fallback to os.replace")
+            os.replace(part_path, final_path)
         with self._file_lock:
             self._incoming_files.pop(file_id, None)
 
@@ -1975,9 +2001,9 @@ class MessageService:
         return self.file_store.unique_receive_path(filename)
 
     def _file_message_content(
-        self, filename: str, path: str = "", transfer_id: str = ""
+        self, filename: str, path: str = "", transfer_id: str = "", status: str = "文件"
     ) -> str:
-        return encode_file_message("文件", filename, path, transfer_id)
+        return encode_file_message(status, filename, path, transfer_id)
 
     def _unique_avatar_path(self, filename: str, owner_name: str = "", user_id: str = "") -> str:
         return self.file_store.unique_avatar_path(filename, owner_name, user_id)
@@ -2494,19 +2520,19 @@ class MessageService:
             self.file_transfer.mark_sender_cancelled(file_id)
             # Also set the complete result to "declined" so the sender's
             # retry loop does not retry.
-            self._file_complete_results[file_id] = (False, "对方拒绝了文件")
-            self._file_ack_errors[file_id] = "对方拒绝了文件"
+            self._file_complete_results[file_id] = (False, "对方已拒绝")
+            self._file_ack_errors[file_id] = "对方已拒绝"
             event = self._file_complete_events.get(file_id)
             if event:
                 event.set()  # wake the sender's retry loop
 
-        # Update database message to "对方拒绝了文件" / "文件发送失败"
+        # Update database message to "对方已拒绝"
         try:
             old_content = self.friend_db.get_chat_message_content(file_id)
             if old_content:
                 decoded = decode_file_message(old_content, self.receive_dir)
                 new_content = encode_file_message(
-                    "文件发送失败",
+                    "对方已拒绝",
                     decoded.filename,
                     decoded.path,
                     file_id,
@@ -2517,7 +2543,7 @@ class MessageService:
 
         if self.on_file_failed:
             try:
-                self.on_file_failed(file_id, "对方拒绝了文件")
+                self.on_file_failed(file_id, "对方已拒绝")
             except Exception:
                 pass
                         
@@ -2543,7 +2569,12 @@ class MessageService:
                 final_path = self._unique_receive_path(filename)
             else:
                 final_path = candidate
-            part_path = final_path + ".part"
+            
+            import tempfile
+            part_path = os.path.join(
+                tempfile.gettempdir(),
+                f"meeting_in_beiyang_{file_id}_{filename}.part"
+            )
         
         completed_chunks = 0
         if state and state.get("already_complete"):

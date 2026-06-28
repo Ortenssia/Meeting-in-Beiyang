@@ -467,7 +467,7 @@ class ChatView:
             if "正在" in file_status:
                 pb_val = 0.0
                 status_text = "📁 " + file_status + " · 0% · --/s"
-            elif "失败" in file_status:
+            elif "失败" in file_status or "拒绝" in file_status or "取消" in file_status:
                 pb_val = 1.0
                 pb_color = ft.Colors.RED_400
                 icon_color = ft.Colors.RED_400
