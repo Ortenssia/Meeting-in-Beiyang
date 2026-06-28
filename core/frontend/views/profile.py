@@ -879,6 +879,7 @@ class ProfileView:
 
     def _select_default_avatar(self, path):
         self.avatar_in.value = path
+        self._draft_avatar = path
         self._avatar_name = path
         self.avatar_holder.content = T.avatar_circle(
             self.app.paths.asset_src(path), T.AVATAR_LG
@@ -950,21 +951,10 @@ class ProfileView:
             self.bg_align_dd.value = bg_align
             self.bg_opacity_dd.value = bg_opacity
 
-            # Apply background image to self.main_layout (entire profile module background)
+            # Apply the selected image both as the page ambience and profile cover.
             bg_path = profile.get("background", "").strip()
-            if bg_path and os.path.exists(bg_path):
-                self.main_layout.image = ft.DecorationImage(
-                    src=bg_path,
-                    fit=self._get_bg_fit(bg_fit),
-                    alignment=self._get_bg_align(bg_align),
-                    opacity=float(bg_opacity),
-                )
-            else:
-                self.main_layout.image = None
-
-            # Keep avatar cover banner themed gradient
             self.cover_container.content = None
-            self.cover_container.gradient = T.GRADIENT_PRIMARY
+            self._apply_background_preview(bg_path)
 
             self._theme_selector_row.content = self._build_theme_selector()
 
@@ -1066,15 +1056,7 @@ class ProfileView:
 
     def _on_bg_param_change(self, _e):
         bg_path = (self.bg_in.value or "").strip()
-        if bg_path and os.path.exists(bg_path):
-            self.main_layout.image = ft.DecorationImage(
-                src=bg_path,
-                fit=self._get_bg_fit(self.bg_fit_dd.value),
-                alignment=self._get_bg_align(self.bg_align_dd.value),
-                opacity=float(self.bg_opacity_dd.value or "0.15"),
-            )
-        else:
-            self.main_layout.image = None
+        self._apply_background_preview(bg_path)
         if self.page:
             self.page.update()
         
@@ -1473,7 +1455,7 @@ class ProfileView:
                 ),
                 T.surface_card(
                     T.section_title("自定义背景"),
-                    self._path_row("背景图片", self.bg_in, "选择"),
+                    self._path_row("背景图片", self.bg_in, "选择并裁剪"),
                 ),
                 T.surface_card(
                     T.section_title("网络与设备"),

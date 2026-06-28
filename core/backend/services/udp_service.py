@@ -186,25 +186,13 @@ class UDPService:
 
     @staticmethod
     def _acquire_android_multicast_lock():
-        """Acquire a WiFi MulticastLock on Android so UDP broadcasts are
-        received even when the device enters power-saving mode."""
-        try:
-            # Only attempt on Android; the jnius / pyjnius packages are
-            # available inside a p4a / Buildozer / Serious-Python APK.
-            from jnius import autoclass  # type: ignore
-        except ImportError:
-            return None
-        try:
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            activity = PythonActivity.mActivity
-            Context = autoclass("android.content.Context")
-            wifi = activity.getSystemService(Context.WIFI_SERVICE)
-            lock = wifi.createMulticastLock("beiyang_udp_lock")
-            lock.setReferenceCounted(True)
-            lock.acquire()
-            return lock
-        except Exception:
-            return None
+        """Return no native lock when running under the Flet Android host.
+
+        The app declares CHANGE_WIFI_MULTICAST_STATE in its Flet manifest.
+        Direct access to another framework's activity is not portable in the
+        Flet runtime; a future native Flet extension can provide a real lock.
+        """
+        return None
 
     def start(self):
         """

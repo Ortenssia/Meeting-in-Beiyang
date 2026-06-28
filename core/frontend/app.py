@@ -383,12 +383,14 @@ class BeiyangApp:
             self.nav.selected_index = [k for _, k, _ in T.TABS].index(key)
 
         view = self.views[key]
-        self._stack.controls = [view.build()]
         if key == "chat" and kwargs.get("friend"):
             is_group = kwargs.get("is_group", False)
             group_id = kwargs.get("group_id", "")
             view.open_chat(kwargs["friend"], is_group=is_group, group_id=group_id)
-        else:
+            
+        self._stack.controls = [view.build()]
+        
+        if key != "chat" or not kwargs.get("friend"):
             view.on_enter()
         self.page.update()
 

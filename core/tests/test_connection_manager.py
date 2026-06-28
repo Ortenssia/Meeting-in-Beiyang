@@ -48,17 +48,18 @@ def test_get_online_friends_prefers_port_entry_for_same_name():
     assert online[0]["port"] == 7780
 
 
-def test_stale_socket_disconnect_does_not_remove_replacement_connection():
+def test_duplicate_connection_keeps_existing_socket():
     manager = ConnectionManager(my_name="Me", tcp_port=7779)
     old_socket = DummySocket()
     new_socket = DummySocket()
 
     key = manager._register_connection(old_socket, "172.30.0.1", "Alice", 7780)
     manager._register_connection(new_socket, "172.30.0.1", "Alice", 7780)
-    manager._handle_disconnect(key, old_socket)
+    manager._handle_disconnect(key, new_socket)
 
-    assert old_socket.closed is True
-    assert manager.connections[key]["socket"] is new_socket
+    assert new_socket.closed is True
+    assert old_socket.closed is False
+    assert manager.connections[key]["socket"] is old_socket
     assert manager.is_friend_online("Alice") is True
 
 

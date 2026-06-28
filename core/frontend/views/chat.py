@@ -697,7 +697,7 @@ class ChatView:
                                 icon=ft.Icons.REFRESH_ROUNDED,
                                 icon_color=ft.Colors.DEEP_PURPLE_400,
                                 icon_size=16,
-                                tooltip="重试",
+                                tooltip="重试/续传",
                                 on_click=lambda _e: retry_file(),
                             ) if ("失败" in file_status and is_self) else ft.Container(),
                             ft.PopupMenuButton(
@@ -1025,15 +1025,17 @@ class ChatView:
             return
         self._input.value = ""
 
+        # Append bubble immediately so the user sees it instantly!
+        ts = time.strftime("%H:%M:%S", time.localtime())
+        self._append_bubble(self.app.device_name, text, ts, is_self=True)
+        if self.page:
+            self.page.update()
+
         def task():
             if self.is_group:
                 self.app.send_group_chat_message(self.current_group_id, text)
             else:
                 self.app.send_chat_message(self.current_friend, text)
-            ts = time.strftime("%H:%M:%S", time.localtime())
-            self._append_bubble(self.app.device_name, text, ts, is_self=True)
-            if self.page:
-                self.page.update()
         threading.Thread(target=task, daemon=True).start()
 
     async def _pick_file(self, _e):

@@ -7,6 +7,8 @@ import os
 import json
 import struct
 import base64
+import tempfile
+import uuid
 
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -411,7 +413,7 @@ class TestSocialFlow:
         sender_db.add_friend("Bob", "127.0.0.1", 7779, [], "")
         receiver_db.add_friend("Alice", "127.0.0.1", 7779, [], "")
 
-        sender_conn = LoopbackConnectionManager(drop_chunk=24)
+        sender_conn = LoopbackConnectionManager(drop_chunk=5)
         receiver_conn = LoopbackConnectionManager()
         sender = MessageService(
             sender_conn,
@@ -428,16 +430,22 @@ class TestSocialFlow:
         )
         sender_conn.peer_service = receiver
         receiver_conn.peer_service = sender
+        receiver.on_file_offer_received = (
+            lambda _name, _filename, _size, file_id: receiver.accept_file_offer(file_id)
+        )
         sender.FILE_ACK_TIMEOUT = 0.2
         progress_updates = []
-        sender.on_file_progress = lambda *args: progress_updates.append(args)
+        sender.on_file_progress = (
+            lambda *args, **_kwargs: progress_updates.append(args)
+        )
 
         payload = bytes(range(256)) * (12 * 1024)  # 3 MiB, several ACK windows
         source = tmp_path / "large.bin"
         source.write_bytes(payload)
+        transfer_id = f"large-transfer-{uuid.uuid4().hex}"
         try:
             result = sender.send_file(
-                "Bob", str(source), file_id="large-transfer"
+                "Bob", str(source), file_id=transfer_id
             )
             assert result is True, (sender_conn.sent_types, receiver_conn.sent_types)
             assert sender_conn.dropped is True
@@ -448,7 +456,7 @@ class TestSocialFlow:
             )
             assert (receiver_dir / "large.bin").read_bytes() == payload
             assert progress_updates[-1] == (
-                "large-transfer",
+                transfer_id,
                 "Bob",
                 "large.bin",
                 len(payload),
@@ -501,6 +509,7 @@ class TestSocialFlow:
         msg_service.handle_message("192.168.1.5", offer)
         msg_service.handle_message("192.168.1.5", chunk)
         msg_service.handle_message("192.168.1.5", complete)
+        assert msg_service.accept_file_offer(file_id) is True
 
         assert len(callbacks) == 1
         _, saved_path, _ = callbacks[0]
@@ -553,6 +562,7 @@ class TestSocialFlow:
         msg_service.handle_message("192.168.1.5", offer)
         msg_service.handle_message("192.168.1.5", chunk)
         msg_service.handle_message("192.168.1.5", complete)
+        assert msg_service.accept_file_offer(file_id) is True
 
         saved_path = custom_dir / "custom.txt"
         assert saved_path.read_bytes() == payload
@@ -582,7 +592,10 @@ class TestSocialFlow:
         msg_service.handle_message("192.168.1.5", offer)
         with msg_service._file_lock:
             state = msg_service._incoming_files["resume-conflict"]
-        assert state["part_path"].endswith("note_1.txt.part")
+        assert os.path.basename(state["part_path"]) == (
+            "meeting_in_beiyang_resume-conflict_note.txt.part"
+        )
+        assert os.path.dirname(state["part_path"]) == tempfile.gettempdir()
         with open(state["part_path"], "wb") as f:
             f.write(payload[:msg_service.FILE_CHUNK_SIZE])
 

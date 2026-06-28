@@ -248,6 +248,14 @@ class MessageService:
         )
 
         # 尝试直连发送
+        if not self.connection_manager.is_friend_online(to_name):
+            record = self.friend_db.get_friend(to_name) if self.friend_db else None
+            if record and record.get("ip"):
+                ip = record["ip"]
+                port = int(record.get("port") or Protocol.DEFAULT_TCP_PORT)
+                logger.info(f"[MessageService] 尝试主动重连以发送消息 -> {to_name} ({ip}:{port})")
+                self.connection_manager.connect_to_friend(ip, port, to_name)
+
         if self.connection_manager.is_friend_online(to_name):
             success = self._send_data_to_friend(to_name, chat_msg)
             if success:
