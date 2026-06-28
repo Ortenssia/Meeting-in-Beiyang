@@ -1184,7 +1184,10 @@ class MessageService:
         name = profile.get("name", "") or self._get_friend_name_by_ip(from_ip)
         if not name:
             return
-        friend = self.friend_db.get_friend(name) or {}
+        friend = self.friend_db.get_friend(name)
+        if not friend:
+            logger.debug(f"[MessageService] 忽略未添加好友 {name} 的资料同步响应")
+            return
         self.friend_db.add_friend(
             name=name,
             ip=friend.get("ip", from_ip) or from_ip,
