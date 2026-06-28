@@ -210,6 +210,12 @@ class MomentsView:
         return card
 
     def _pick_image(self, _e):
+        try:
+            import tkinter as tk
+        except ImportError:
+            self.app.page.run_thread(self._pick_image_flet)
+            return
+
         import threading
         def _do_pick():
             from tkinter import filedialog
@@ -222,22 +228,44 @@ class MomentsView:
                 filetypes=[("图片文件", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp")],
             )
             if file_path:
-                self._media_path = file_path
-                self.media_indicator.value = os.path.basename(file_path)
-                try:
-                    import base64
-                    with open(file_path, "rb") as f:
-                        img_bytes = f.read()
-                    b64 = base64.b64encode(img_bytes).decode()
-                    ext = os.path.splitext(file_path)[1].lower()
-                    mime = "image/png" if ext == ".png" else "image/jpeg"
-                    self.image_preview.src = f"data:{mime};base64,{b64}"
-                    self.image_preview.visible = True
-                except Exception:
-                    pass
-                if self.page:
-                    self.page.update()
+                self._apply_picked_image(file_path)
+
         threading.Thread(target=_do_pick, daemon=True).start()
+
+    async def _pick_image_flet(self):
+        picker = getattr(self.app, "moment_image_picker", None)
+        if not picker:
+            picker = ft.FilePicker()
+            self.app.moment_image_picker = picker
+        picker.on_result = self._on_moment_image_selected
+        page = self.page
+        if page and picker not in page.services:
+            page.services.append(picker)
+        await picker.pick_files(
+            dialog_title="选择分享图片",
+            file_type=ft.FilePickerFileType.IMAGE,
+        )
+
+    def _on_moment_image_selected(self, e):
+        if e.files and e.files[0].path:
+            self._apply_picked_image(e.files[0].path)
+
+    def _apply_picked_image(self, file_path):
+        self._media_path = file_path
+        self.media_indicator.value = os.path.basename(file_path)
+        try:
+            import base64
+            with open(file_path, "rb") as f:
+                img_bytes = f.read()
+            b64 = base64.b64encode(img_bytes).decode()
+            ext = os.path.splitext(file_path)[1].lower()
+            mime = "image/png" if ext == ".png" else "image/jpeg"
+            self.image_preview.src = f"data:{mime};base64,{b64}"
+            self.image_preview.visible = True
+        except Exception:
+            pass
+        if self.page:
+            self.page.update()
 
     def _on_publish(self, _e):
         content = (self.post_input.value or "").strip()

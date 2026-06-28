@@ -1579,7 +1579,13 @@ class ProfileView:
                 pass
         threading.Thread(target=_clear, daemon=True).start()
 
-    def _choose_receive_dir(self, _e):
+    async def _choose_receive_dir(self, _e):
+        try:
+            import tkinter as tk
+        except ImportError:
+            await self._choose_receive_dir_flet()
+            return
+
         def _do_pick():
             from tkinter import filedialog
 
@@ -1595,6 +1601,24 @@ class ProfileView:
                 self._apply_receive_dir(selected)
 
         threading.Thread(target=_do_pick, daemon=True).start()
+
+    async def _choose_receive_dir_flet(self):
+        picker = getattr(self.app, "receive_dir_picker", None)
+        if not picker:
+            picker = ft.FilePicker()
+            self.app.receive_dir_picker = picker
+        picker.on_result = self._on_receive_dir_selected
+        page = self.page
+        if page and picker not in page.services:
+            page.services.append(picker)
+        await picker.get_directory_path(
+            dialog_title="选择接收文件保存目录",
+            initial_directory=self.app.get_receive_dir(),
+        )
+
+    def _on_receive_dir_selected(self, e):
+        if e.path:
+            self._apply_receive_dir(e.path)
 
     def _reset_receive_dir(self, _e):
         self._apply_receive_dir(str(self.app.paths.received_files_dir))
