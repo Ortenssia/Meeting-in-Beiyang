@@ -243,6 +243,62 @@ class ProfileView:
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
         )
+        self.bg_fit_dd = ft.Dropdown(
+            label="填充模式",
+            value="cover",
+            options=[
+                ft.dropdown.Option("cover", "裁剪铺满"),
+                ft.dropdown.Option("contain", "完整包含"),
+                ft.dropdown.Option("fill", "拉伸缩放"),
+            ],
+            border_radius=12,
+            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            height=48,
+            expand=True,
+        )
+        self.bg_fit_dd.on_change = self._on_bg_param_change
+
+        self.bg_align_dd = ft.Dropdown(
+            label="对齐位置",
+            value="center",
+            options=[
+                ft.dropdown.Option("center", "居中对齐"),
+                ft.dropdown.Option("top", "顶部对齐"),
+                ft.dropdown.Option("bottom", "底部对齐"),
+                ft.dropdown.Option("left", "靠左对齐"),
+                ft.dropdown.Option("right", "靠右对齐"),
+            ],
+            border_radius=12,
+            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            height=48,
+            expand=True,
+        )
+        self.bg_align_dd.on_change = self._on_bg_param_change
+
+        self.bg_opacity_dd = ft.Dropdown(
+            label="背景透明度",
+            value="0.15",
+            options=[
+                ft.dropdown.Option("0.05", "微弱 (5%)"),
+                ft.dropdown.Option("0.10", "柔和 (10%)"),
+                ft.dropdown.Option("0.15", "清晰 (15%)"),
+                ft.dropdown.Option("0.25", "明艳 (25%)"),
+                ft.dropdown.Option("0.40", "重彩 (40%)"),
+            ],
+            border_radius=12,
+            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            height=48,
+            expand=True,
+        )
+        self.bg_opacity_dd.on_change = self._on_bg_param_change
+
+        self.bg_params_row = ft.Row(
+            [self.bg_fit_dd, self.bg_align_dd, self.bg_opacity_dd],
+            spacing=T.SP_SM,
+        )
         self.bio_in = ft.TextField(
             label="个人简介",
             multiline=True,
@@ -544,6 +600,7 @@ class ProfileView:
                     ),
                     ft.Divider(height=24, thickness=1, color=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
                     self._path_row("背景图片", self.bg_in, "选择"),
+                    self.bg_params_row,
                 ], spacing=12)),
             ],
             spacing=T.SP_MD,
@@ -608,8 +665,9 @@ class ProfileView:
                     if file_path and os.path.exists(file_path):
                         self.main_layout.image = ft.DecorationImage(
                             src=file_path,
-                            fit=ft.BoxFit.COVER,
-                            opacity=0.15,
+                            fit=self._get_bg_fit(self.bg_fit_dd.value),
+                            alignment=self._get_bg_align(self.bg_align_dd.value),
+                            opacity=float(self.bg_opacity_dd.value or "0.15"),
                         )
                     else:
                         self.main_layout.image = None
@@ -650,8 +708,9 @@ class ProfileView:
                 if file_path and os.path.exists(file_path):
                     self.main_layout.image = ft.DecorationImage(
                         src=file_path,
-                        fit=ft.BoxFit.COVER,
-                        opacity=0.15,
+                        fit=self._get_bg_fit(self.bg_fit_dd.value),
+                        alignment=self._get_bg_align(self.bg_align_dd.value),
+                        opacity=float(self.bg_opacity_dd.value or "0.15"),
                     )
                 else:
                     self.main_layout.image = None
@@ -748,14 +807,23 @@ class ProfileView:
                 self.app.paths.asset_src(self._avatar_name), T.AVATAR_LG
             )
 
-            # Load custom background if set
-            import os
+            # Load custom background configuration
+            bg_fit = self.app.friend_db.get_app_setting("bg_fit") or "cover"
+            bg_align = self.app.friend_db.get_app_setting("bg_align") or "center"
+            bg_opacity = self.app.friend_db.get_app_setting("bg_opacity") or "0.15"
+
+            self.bg_fit_dd.value = bg_fit
+            self.bg_align_dd.value = bg_align
+            self.bg_opacity_dd.value = bg_opacity
+
+            # Apply background image to self.main_layout (entire profile module background)
             bg_path = profile.get("background", "").strip()
             if bg_path and os.path.exists(bg_path):
                 self.main_layout.image = ft.DecorationImage(
                     src=bg_path,
-                    fit=ft.BoxFit.COVER,
-                    opacity=0.15,
+                    fit=self._get_bg_fit(bg_fit),
+                    alignment=self._get_bg_align(bg_align),
+                    opacity=float(bg_opacity),
                 )
             else:
                 self.main_layout.image = None
@@ -861,6 +929,43 @@ class ProfileView:
                 pass
 
         threading.Thread(target=_clear, daemon=True).start()
+
+    def _on_bg_param_change(self, _e):
+        bg_path = (self.bg_in.value or "").strip()
+        if bg_path and os.path.exists(bg_path):
+            self.main_layout.image = ft.DecorationImage(
+                src=bg_path,
+                fit=self._get_bg_fit(self.bg_fit_dd.value),
+                alignment=self._get_bg_align(self.bg_align_dd.value),
+                opacity=float(self.bg_opacity_dd.value or "0.15"),
+            )
+        else:
+            self.main_layout.image = None
+        if self.page:
+            self.page.update()
+        
+        # Save settings
+        self.app.friend_db.set_app_setting("bg_fit", self.bg_fit_dd.value)
+        self.app.friend_db.set_app_setting("bg_align", self.bg_align_dd.value)
+        self.app.friend_db.set_app_setting("bg_opacity", self.bg_opacity_dd.value)
+
+    def _get_bg_fit(self, val):
+        if val == "contain":
+            return ft.BoxFit.CONTAIN
+        if val == "fill":
+            return ft.BoxFit.FILL
+        return ft.BoxFit.COVER
+
+    def _get_bg_align(self, val):
+        if val == "top":
+            return ft.alignment.top_center
+        if val == "bottom":
+            return ft.alignment.bottom_center
+        if val == "left":
+            return ft.alignment.center_left
+        if val == "right":
+            return ft.alignment.center_right
+        return ft.alignment.center
 
     # -- auto-save engine ----------------------------------------------------
 

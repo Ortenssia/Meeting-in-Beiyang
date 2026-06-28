@@ -466,55 +466,14 @@ class BeiyangApp:
             self.views["moments"].on_moments_changed()
 
     def _on_file_offer_received(self, from_name, filename, size, file_id):
-        """Show accept/decline dialog for an incoming file transfer."""
+        """Forward file offer to the chat view so it appears inline."""
         if not self.page:
             return
-
-        def _format_sz(sz):
-            for unit in ("B", "KiB", "MiB", "GiB"):
-                if sz < 1024 or unit == "GiB":
-                    return f"{sz:.0f} {unit}" if unit == "B" else f"{sz:.1f} {unit}"
-                sz /= 1024
-
-        def accept(_e):
-            dlg.open = False
-            self.page.update()
-            self.message_service.accept_file_offer(file_id)
-            self.show_toast(f"正在接收来自 {from_name} 的文件")
-
-        def decline(_e):
-            dlg.open = False
-            self.page.update()
-            self.message_service.decline_file_offer(file_id)
-            self.show_toast(f"已拒绝 {from_name} 的文件")
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("📁 收到文件", weight=ft.FontWeight.BOLD),
-            content=ft.Column(
-                [
-                    ft.Text(f"{from_name} 向你发送文件：", size=T.FS_BODY),
-                    ft.Text(filename, size=T.FS_TITLE, weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.DEEP_PURPLE_400),
-                    ft.Text(f"大小: {_format_sz(size)}", size=T.FS_CAPTION,
-                            color=ft.Colors.ON_SURFACE_VARIANT),
-                ],
-                spacing=T.SP_SM,
-                tight=True,
-                width=300,
-            ),
-            actions=[
-                ft.TextButton("拒绝", on_click=decline,
-                              style=ft.ButtonStyle(color=ft.Colors.RED_400)),
-                ft.ElevatedButton("接收", on_click=accept,
-                                  bgcolor=ft.Colors.DEEP_PURPLE_500,
-                                  color=ft.Colors.WHITE),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
+        chat = self.views.get("chat")
+        if chat:
+            chat.add_file_offer(from_name, filename, size, file_id)
+        # Also show a brief toast so the user notices even outside chat.
+        self.show_toast(f"📁 {from_name} 发来文件: {filename}")
 
     def _on_file_received(self, name, path, timestamp):
         # Avatar transfers also arrive through the file channel. Once the DB

@@ -29,6 +29,7 @@ class ChatView:
         self._scroll_generation = 0
         self._transfer_widgets = {}
         self._transfer_watchdogs = set()
+        self._pending_file_offers: dict = {}  # file_id → {from_name, filename, size, widget}
         self.file_picker = getattr(app, "chat_file_picker", None) or ft.FilePicker()
         self.compress_checkbox = ft.Checkbox(
             label="压缩",
@@ -424,6 +425,9 @@ class ChatView:
                 if len(ts) >= 19:
                     ts = ts[11:19]
                 self._append_bubble(from_name, content, ts, is_self=is_self)
+        # Render any pending file offers for this friend at the bottom.
+        if not self.is_group:
+            self._render_file_offers_for(self.current_friend)
         self._scroll_bottom()
 
     def _append_bubble(self, from_name, content, timestamp, is_self=False):
@@ -1376,6 +1380,106 @@ class ChatView:
                 widget["detail"].value = (
                     f"{self._format_bytes(completed)} / {self._format_bytes(total)}"
                 )
+
+    # ── inline file-offer (no modal) ──────────────────────────────────
+
+    @staticmethod
+    def _format_sz(sz):
+        for unit in ("B", "KiB", "MiB", "GiB"):
+            if sz < 1024 or unit == "GiB":
+                return f"{sz:.0f} {unit}" if unit == "B" else f"{sz:.1f} {unit}"
+            sz /= 1024
+
+    def add_file_offer(self, from_name, filename, size, file_id):
+        """Queue an inline file-offer widget for *from_name*."""
+        if file_id in self._pending_file_offers:
+            return  # already queued
+        self._pending_file_offers[file_id] = {
+            "from_name": from_name,
+            "filename": filename,
+            "size": size,
+        }
+        # If the chat with this friend is currently open, render it immediately.
+        if (self.current_friend == from_name
+                and not self.is_group
+                and self._msg_list is not None):
+            self._render_file_offer(file_id)
+        if self.page:
+            self.page.update()
+
+    def _render_file_offers_for(self, friend_name):
+        """Render all pending file offers for *friend_name*."""
+        for file_id, offer in list(self._pending_file_offers.items()):
+            if offer["from_name"] == friend_name:
+                self._render_file_offer(file_id)
+
+    def _render_file_offer(self, file_id):
+        """Insert an inline file-offer bubble into the current chat."""
+        offer = self._pending_file_offers.get(file_id)
+        if not offer or offer.get("widget"):
+            return  # already rendered or already acted upon
+        from_name = offer["from_name"]
+        filename = offer["filename"]
+        size = offer["size"]
+
+        def accept(_e):
+            self.app.message_service.accept_file_offer(file_id)
+            self._pending_file_offers.pop(file_id, None)
+            self._msg_list.controls.remove(bubble)
+            if self.page:
+                self.page.update()
+
+        def decline(_e):
+            self.app.message_service.decline_file_offer(file_id)
+            self._pending_file_offers.pop(file_id, None)
+            self._msg_list.controls.remove(bubble)
+            if self.page:
+                self.page.update()
+
+        status_text = ft.Text(
+            f"📁 {filename} ({self._format_sz(size)})",
+            size=T.FS_CAPTION,
+            weight=ft.FontWeight.BOLD,
+        )
+        accept_btn = ft.IconButton(
+            icon=ft.Icons.CHECK_ROUNDED,
+            icon_color=ft.Colors.GREEN_400,
+            icon_size=20,
+            tooltip="接收文件",
+            on_click=accept,
+        )
+        decline_btn = ft.IconButton(
+            icon=ft.Icons.CLOSE_ROUNDED,
+            icon_color=ft.Colors.RED_300,
+            icon_size=20,
+            tooltip="拒绝文件",
+            on_click=decline,
+        )
+
+        bubble = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Text(from_name, size=10, color=ft.Colors.DEEP_PURPLE_400,
+                            weight=ft.FontWeight.BOLD),
+                    status_text,
+                    ft.Container(expand=1),
+                    accept_btn,
+                    decline_btn,
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=T.pad_symmetric(horizontal=12, vertical=8),
+            border_radius=12,
+            bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.DEEP_PURPLE),
+            border=T.border_all(1, ft.Colors.with_opacity(0.12, ft.Colors.DEEP_PURPLE_400)),
+        )
+        offer["widget"] = bubble
+        self._msg_list.controls.append(bubble)
+        if self.page:
+            self.page.update()
+
+    # ── incoming messages ─────────────────────────────────────────────
 
     def on_new_message(self, from_name, content, timestamp):
         ts = timestamp
