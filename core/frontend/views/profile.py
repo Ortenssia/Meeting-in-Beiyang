@@ -445,94 +445,113 @@ class ProfileView:
             spacing=12,
         )
 
+        # Use a list of containers to dynamically manage right padding to offset from the Column scrollbar
+        self._section_containers = []
+        self._right_panel_padding = ft.Padding.only(right=24)
+
+        def make_section(content):
+            c = ft.Container(content=content, padding=self._right_panel_padding)
+            self._section_containers.append(c)
+            return c
+
         # Right Column: Unified scrolling form sections with elegant divider lines
         self.right_panel = ft.Column(
             [
                 # Section 1: 基本资料
-                ft.Text("基本资料", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                ft.Row(
-                    [self.name_in, self.user_id_in],
-                    spacing=T.SP_MD,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                ),
-                self._path_row("头像路径", self.avatar_in, "选择图片"),
-                self.default_avatars_row,
+                make_section(ft.Column([
+                    ft.Text("基本资料", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                    ft.Row(
+                        [self.name_in, self.user_id_in],
+                        spacing=T.SP_MD,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    ),
+                    self._path_row("头像路径", self.avatar_in, "选择图片"),
+                    self.default_avatars_row,
+                ], spacing=12)),
                 
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
                 
                 # Section 2: 个性展示
-                ft.Text("个性展示", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                self.tags_input,
-                ft.Container(height=4),
-                ft.Row(
-                    [self.bio_in, self.bio_save_btn],
-                    spacing=T.SP_SM,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                ),
+                make_section(ft.Column([
+                    ft.Text("个性展示", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                    self.tags_input,
+                    ft.Container(height=4),
+                    ft.Row(
+                        [self.bio_in, self.bio_save_btn],
+                        spacing=T.SP_SM,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    ),
+                ], spacing=12)),
                 
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
                 
                 # Section 3: 自动同意匹配条件与同步偏好
-                ft.Text("自动同意匹配条件", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                ft.Text(
-                    "配置必选与可选交友标签以开启自动匹配通过：",
-                    size=T.FS_CAPTION,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                ),
-                self.req_input,
-                self.opt_input,
-                ft.Row(
-                    [
-                        ft.Container(content=self.min_match_row, expand=True),
-                        self.auto_accept,
-                    ],
-                    spacing=20,
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                ft.Container(height=8),
-                self._update_mode_container,
+                make_section(ft.Column([
+                    ft.Text("自动同意匹配条件", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                    ft.Text(
+                        "配置必选与可选交友标签以开启自动匹配通过：",
+                        size=T.FS_CAPTION,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    self.req_input,
+                    self.opt_input,
+                    ft.Row(
+                        [
+                            ft.Container(content=self.min_match_row, expand=True),
+                            self.auto_accept,
+                        ],
+                        spacing=20,
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    ft.Container(height=8),
+                    self._update_mode_container,
+                ], spacing=12)),
                 
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
                 
                 # Section 4: 网络与设备
-                ft.Text("网络与设备", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                self._setting_row("本机主机名", self.settings_device_name),
-                ft.Row(
-                    [
-                        ft.Text("TCP 监听端口", size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT, width=100),
-                        self.settings_tcp_port,
-                        ft.IconButton(
-                            icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
-                            icon_color=ft.Colors.DEEP_PURPLE_400,
-                            on_click=self._save_tcp,
-                            tooltip="保存端口"
-                        ),
-                    ],
-                    spacing=T.SP_SM,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                self.settings_tcp_hint,
-                self._setting_row("UDP 广播端口", self.settings_udp_port),
+                make_section(ft.Column([
+                    ft.Text("网络与设备", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                    self._setting_row("本机主机名", self.settings_device_name),
+                    ft.Row(
+                        [
+                            ft.Text("TCP 监听端口", size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT, width=100),
+                            self.settings_tcp_port,
+                            ft.IconButton(
+                                icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
+                                icon_color=ft.Colors.DEEP_PURPLE_400,
+                                on_click=self._save_tcp,
+                                tooltip="保存端口"
+                            ),
+                        ],
+                        spacing=T.SP_SM,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    self.settings_tcp_hint,
+                    self._setting_row("UDP 广播端口", self.settings_udp_port),
+                ], spacing=12)),
                 
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
                 
                 # Section 5: 文件接收与背景
-                ft.Text("文件接收与背景", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                self._setting_row("保存位置", self.settings_receive_dir),
-                ft.Row(
-                    [
-                        ft.ElevatedButton(
-                            "选择保存目录",
-                            icon=ft.Icons.FOLDER_OPEN_ROUNDED,
-                            on_click=self._choose_receive_dir,
-                            bgcolor=ft.Colors.DEEP_PURPLE_500,
-                            color=ft.Colors.WHITE,
-                            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
-                        ),
-                    ]
-                ),
-                ft.Divider(height=24, thickness=1, color=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
-                self._path_row("背景图片", self.bg_in, "选择"),
+                make_section(ft.Column([
+                    ft.Text("文件接收与背景", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                    self._setting_row("保存位置", self.settings_receive_dir),
+                    ft.Row(
+                        [
+                            ft.ElevatedButton(
+                                "选择保存目录",
+                                icon=ft.Icons.FOLDER_OPEN_ROUNDED,
+                                on_click=self._choose_receive_dir,
+                                bgcolor=ft.Colors.DEEP_PURPLE_500,
+                                color=ft.Colors.WHITE,
+                                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+                            ),
+                        ]
+                    ),
+                    ft.Divider(height=24, thickness=1, color=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
+                    self._path_row("背景图片", self.bg_in, "选择"),
+                ], spacing=12)),
             ],
             spacing=T.SP_MD,
             scroll=ft.ScrollMode.AUTO,
@@ -598,7 +617,7 @@ class ProfileView:
                         with open(file_path, "rb") as f:
                             bg_bytes = f.read()
                         bg_img = ft.Image(
-                            src="",
+                            src="background",
                             fit=ft.BoxFit.COVER,
                             border_radius=T.R_LG,
                         )
@@ -644,7 +663,7 @@ class ProfileView:
                     with open(file_path, "rb") as f:
                         bg_bytes = f.read()
                     bg_img = ft.Image(
-                        src="",
+                        src="background",
                         fit=ft.BoxFit.COVER,
                         border_radius=T.R_LG,
                     )
@@ -753,7 +772,7 @@ class ProfileView:
                     with open(bg_path, "rb") as f:
                         bg_bytes = f.read()
                     bg_img = ft.Image(
-                        src="",
+                        src="background",
                         fit=ft.BoxFit.COVER,
                         border_radius=T.R_LG,
                     )
@@ -1092,6 +1111,11 @@ class ProfileView:
             self.right_panel.scroll = None
             self.right_panel.expand = False
             
+            # Clear section padding so fields take up full width
+            self._right_panel_padding = None
+            for c in getattr(self, "_section_containers", []):
+                c.padding = None
+            
             # Combined single scrolling column
             stacked_content = ft.Column(
                 [
@@ -1120,6 +1144,11 @@ class ProfileView:
             # Enable right panel internal scroll
             self.right_panel.scroll = ft.ScrollMode.AUTO
             self.right_panel.expand = True
+            
+            # Set section padding to shift content left, leaving room for the scrollbar
+            self._right_panel_padding = ft.Padding.only(right=24)
+            for c in getattr(self, "_section_containers", []):
+                c.padding = self._right_panel_padding
             
             side_by_side = ft.Column(
                 [

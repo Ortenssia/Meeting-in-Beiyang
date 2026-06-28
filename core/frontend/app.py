@@ -321,7 +321,7 @@ class BeiyangApp:
 
         self._stack = ft.Stack(expand=True)
         self.root_bg = ft.Image(
-            src="",
+            src="placeholder",
             fit=ft.BoxFit.COVER,
             opacity=0.08,
             expand=True,

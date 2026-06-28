@@ -31,7 +31,7 @@ class MomentsView:
         )
         self.media_indicator = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
         self.media_row = ft.Row([self.media_btn, self.media_indicator], spacing=10)
-        self.image_preview = ft.Image(src="", visible=False, height=100, fit=ft.BoxFit.FIT_HEIGHT)
+        self.image_preview = ft.Image(src=None, visible=False, height=100, fit=ft.BoxFit.FIT_HEIGHT)
 
         self.publish_btn = ft.ElevatedButton(
             "发布动态",
@@ -155,9 +155,22 @@ class MomentsView:
                 import base64
                 with open(media_path, "rb") as f:
                     img_bytes = f.read()
+                b64 = base64.b64encode(img_bytes).decode()
+                # Determine MIME type from extension.
+                ext = os.path.splitext(media_path)[1].lower()
+                mime_map = {
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".gif": "image/gif",
+                    ".bmp": "image/bmp",
+                    ".webp": "image/webp",
+                }
+                mime = mime_map.get(ext, "image/png")
+                data_uri = f"data:{mime};base64,{b64}"
                 media_image = ft.Container(
                     content=ft.Image(
-                        src_base64=base64.b64encode(img_bytes).decode(),
+                        src=data_uri,
                         border_radius=8,
                         fit=ft.BoxFit.FIT_WIDTH,
                     ),
@@ -217,7 +230,10 @@ class MomentsView:
                     import base64
                     with open(file_path, "rb") as f:
                         img_bytes = f.read()
-                    self.image_preview.src_base64 = base64.b64encode(img_bytes).decode()
+                    b64 = base64.b64encode(img_bytes).decode()
+                    ext = os.path.splitext(file_path)[1].lower()
+                    mime = "image/png" if ext == ".png" else "image/jpeg"
+                    self.image_preview.src = f"data:{mime};base64,{b64}"
                     self.image_preview.visible = True
                 except Exception:
                     pass
@@ -237,7 +253,7 @@ class MomentsView:
             self._media_path = ""
             self.media_indicator.value = ""
             self.image_preview.visible = False
-            self.image_preview.src_base64 = None
+            self.image_preview.src = None
             self.app.show_toast("空间动态发布成功 🌌")
             self.refresh()
         else:
