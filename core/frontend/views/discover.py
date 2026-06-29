@@ -11,22 +11,23 @@ class DiscoverView:
     def __init__(self, app):
         self.app = app
         self.page = app.page
-        
+        self._lock = threading.Lock()
+
         # Scan status text with clean typography
         self.scan_status = ft.Text(
-            "雷达就绪，点击开始扫描", 
+            "雷达就绪，点击开始扫描",
             size=T.FS_BODY,
             weight=ft.FontWeight.W_500,
             color=ft.Colors.ON_SURFACE_VARIANT
         )
-        
+
         # Premium animated scanning progress ring
         self.scan_indicator = ft.ProgressRing(
             width=24, height=24, stroke_width=2.5,
             color=ft.Colors.DEEP_PURPLE_400,
             value=0  # Static when not scanning
         )
-        
+
         # Sleek radar trigger button with primary gradient & shadow
         self.scan_btn = ft.GestureDetector(
             mouse_cursor=ft.MouseCursor.CLICK,
@@ -47,7 +48,7 @@ class DiscoverView:
                 alignment=ft.alignment.Alignment.CENTER,
             )
         )
-        
+
         # Elegant secondary button for manual connect
         self.manual_btn = ft.GestureDetector(
             mouse_cursor=ft.MouseCursor.CLICK,
@@ -67,10 +68,10 @@ class DiscoverView:
                 alignment=ft.alignment.Alignment.CENTER,
             )
         )
-        
+
         self.online_row = ft.Row(spacing=T.SP_MD, scroll=ft.ScrollMode.AUTO)
         self.list_col = ft.Column(spacing=T.SP_SM, expand=True, scroll=ft.ScrollMode.AUTO)
-        
+
         # Diagnostics details rendered as custom status pills
         self.ip_pill = ft.Container(
             content=ft.Row(
@@ -92,13 +93,13 @@ class DiscoverView:
             padding=T.pad_symmetric(horizontal=8, vertical=4),
             border_radius=6,
         )
-        
+
         self.diag_row = ft.Row(
             [self.ip_pill, self.packets_pill],
             spacing=T.SP_XS,
             wrap=True,
         )
-        
+
         self._scanning = False
 
     def build(self):
@@ -159,68 +160,70 @@ class DiscoverView:
     # -- refreshers --------------------------------------------------------
 
     def refresh_discovered(self):
-        people = self.app.get_discovered_people() or []
-        self.list_col.controls.clear()
-        for p in people:
-            self.list_col.controls.append(self._person_card(p))
-        if not people:
-            self.list_col.controls.append(
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Icon(ft.Icons.RADAR_ROUNDED, size=40, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4),
-                            ft.Text(
-                                "附近暂无可发现的人\n点按「雷达扫描」或「手动连接」",
-                                text_align=ft.TextAlign.CENTER, 
-                                size=T.FS_BODY,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                                weight=ft.FontWeight.W_500
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=T.SP_SM,
-                    ),
-                    padding=T.SP_2XL,
-                    alignment=ft.alignment.Alignment.CENTER,
-                    height=180,
-                )
-            )
-        if not self._scanning:
-            self.scan_status.value = f"已发现 {len(people)} 人" if people else "未发现附近的人"
-        self.refresh_diagnostics()
-        if self.page:
-            self.page.update()
-
-    def refresh_online(self):
-        friends = self.app.get_online_friends() or []
-        self.online_row.controls.clear()
-        for f in friends:
-            name = f.get("name", "")
-            self.online_row.controls.append(
-                ft.GestureDetector(
-                    mouse_cursor=ft.MouseCursor.CLICK,
-                    on_tap=lambda _e, n=name: self.app.open_chat_with(n),
-                    content=ft.Column(
-                        [
-                            T.avatar_circle(self.app.get_avatar_for_name(name) if hasattr(self.app, "get_avatar_for_name") else name, T.AVATAR_MD, online=True),
-                            ft.Text(name, size=T.FS_CAPTION, weight=ft.FontWeight.BOLD,
-                                    max_lines=1, text_align=ft.TextAlign.CENTER, width=66),
-                        ],
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=4,
+        with self._lock:
+            people = self.app.get_discovered_people() or []
+            self.list_col.controls.clear()
+            for p in people:
+                self.list_col.controls.append(self._person_card(p))
+            if not people:
+                self.list_col.controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Icon(ft.Icons.RADAR_ROUNDED, size=40, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4),
+                                ft.Text(
+                                    "附近暂无可发现的人\n点按「雷达扫描」或「手动连接」",
+                                    text_align=ft.TextAlign.CENTER,
+                                    size=T.FS_BODY,
+                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                    weight=ft.FontWeight.W_500
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=T.SP_SM,
+                        ),
+                        padding=T.SP_2XL,
+                        alignment=ft.alignment.Alignment.CENTER,
+                        height=180,
                     )
                 )
-            )
-        if not friends:
-            self.online_row.controls.append(
-                ft.Container(
-                    content=ft.Text("暂无在线好友", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
-                    padding=T.pad_symmetric(horizontal=12, vertical=8),
+            if not self._scanning:
+                self.scan_status.value = f"已发现 {len(people)} 人" if people else "未发现附近的人"
+            self.refresh_diagnostics()
+            if self.page:
+                self.page.update()
+
+    def refresh_online(self):
+        with self._lock:
+            friends = self.app.get_online_friends() or []
+            self.online_row.controls.clear()
+            for f in friends:
+                name = f.get("name", "")
+                self.online_row.controls.append(
+                    ft.GestureDetector(
+                        mouse_cursor=ft.MouseCursor.CLICK,
+                        on_tap=lambda _e, n=name: self.app.open_chat_with(n),
+                        content=ft.Column(
+                            [
+                                T.avatar_circle(self.app.get_avatar_for_name(name) if hasattr(self.app, "get_avatar_for_name") else name, T.AVATAR_MD, online=True),
+                                ft.Text(name, size=T.FS_CAPTION, weight=ft.FontWeight.BOLD,
+                                        max_lines=1, text_align=ft.TextAlign.CENTER, width=66),
+                            ],
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=4,
+                        )
+                    )
                 )
-            )
-        if self.page:
-            self.page.update()
+            if not friends:
+                self.online_row.controls.append(
+                    ft.Container(
+                        content=ft.Text("暂无在线好友", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
+                        padding=T.pad_symmetric(horizontal=12, vertical=8),
+                    )
+                )
+            if self.page:
+                self.page.update()
 
     def refresh_diagnostics(self):
         diag = self.app.get_network_diagnostics() or {}
@@ -228,20 +231,20 @@ class DiscoverView:
             ips = diag.get("local_ips") or []
             primary = next((ip for ip in ips if not ip.startswith("127.")),
                            ips[0] if ips else "未知")
-            
+
             # Update diagnostic badges
             self.ip_pill.content.controls[1].value = f"IP: {primary}"
-            
+
             packets = diag.get("receive_packets", 0)
             self.packets_pill.content.controls[1].value = f"已收: {packets}包"
-            
+
             if diag.get("last_error"):
                 # Dynamically append error text if something went wrong
                 self.scan_status.value = f"网络错误: {diag['last_error']}"
                 self.scan_status.color = ft.Colors.RED_400
         else:
             self.ip_pill.content.controls[1].value = "IP: 暂无数据"
-            
+
         if self.page:
             self.page.update()
 
@@ -261,27 +264,29 @@ class DiscoverView:
                 "accepted": "已是好友", "rejected": "可重试",
             }.get(status, "添加好友")
 
-        # Sleek premium actions button
+        # Use a standard button here. GestureDetector taps can be swallowed by
+        # the surrounding scrollable view on Android.
         is_disabled = status in ("pending_sent", "pending_received", "accepted")
-        btn = ft.GestureDetector(
-            mouse_cursor=ft.MouseCursor.CLICK if not is_disabled else ft.MouseCursor.BASIC,
-            on_tap=lambda _e, d=p: self._send_request(d) if not is_disabled else None,
-            content=ft.Container(
-                content=ft.Text(status_label, size=T.FS_BODY, color=ft.Colors.WHITE if not is_disabled else ft.Colors.ON_SURFACE_VARIANT, weight=ft.FontWeight.BOLD),
-                padding=T.pad_symmetric(horizontal=16, vertical=8),
-                border_radius=16,
-                gradient=T.GRADIENT_PRIMARY if not is_disabled else None,
-                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST if is_disabled else None,
-                shadow=T.SHADOW_GLOW if not is_disabled else None,
-            )
+        btn = ft.Button(
+            status_label,
+            icon=ft.Icons.PERSON_ADD_ROUNDED if not is_disabled else None,
+            disabled=is_disabled,
+            on_click=lambda _e, d=p: self._send_request(d),
+            bgcolor=ft.Colors.DEEP_PURPLE_500 if not is_disabled else ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            color=ft.Colors.WHITE if not is_disabled else ft.Colors.ON_SURFACE_VARIANT,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=16),
+                padding=T.pad_symmetric(horizontal=14, vertical=10),
+            ),
         )
-        
+
         if status == "accepted":
-            btn.on_tap = lambda _e, n=name: self.app.open_chat_with(n)
-            btn.mouse_cursor = ft.MouseCursor.CLICK
-            # Override colors for already added friends
-            btn.content.gradient = T.GRADIENT_SECONDARY
-            btn.content.content.color = ft.Colors.WHITE
+            btn.disabled = False
+            btn.text = "发起聊天"
+            btn.icon = ft.Icons.CHAT_ROUNDED
+            btn.on_click = lambda _e, n=name: self.app.open_chat_with(n)
+            btn.bgcolor = ft.Colors.DEEP_PURPLE_400
+            btn.color = ft.Colors.WHITE
 
         # Glassmorphic card styling with premium layout
         return ft.Container(
@@ -320,7 +325,7 @@ class DiscoverView:
         if self._scanning:
             return
         self._scanning = True
-        
+
         # Animate progress ring
         self.scan_indicator.value = None
         self.scan_btn.content.gradient = None
@@ -328,7 +333,7 @@ class DiscoverView:
         self.scan_btn.content.shadow = None
         self.scan_status.value = "正在搜寻周围设备…"
         self.scan_status.color = ft.Colors.ON_SURFACE_VARIANT
-        
+
         self.app.scan_for_people()
         if self.page:
             self.page.update()
@@ -378,13 +383,13 @@ class DiscoverView:
             if not name:
                 err.value = "昵称不能为空"
                 return None
-            
+
             # Simple IP validation fallback
             parts = ip.split('.')
             if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
                 err.value = "IP 地址格式不合法"
                 return None
-                
+
             try:
                 port = int((port_in.value or "7779").strip())
                 if port < 1024 or port > 65535:

@@ -11,7 +11,6 @@ don't keep raw color hexes here. Instead this module exposes:
 * premium UI elements like glass cards, gradient buttons, and glowing badges.
 """
 import os
-from dataclasses import dataclass
 from typing import List, Tuple
 
 import flet as ft
@@ -183,7 +182,7 @@ def avatar_circle(
     r, g, b = avatar_color(name)
     initial = (name or "?").strip()[0].upper() if (name or "").strip() else "?"
     avatar_bg_color = f"#{r:02x}{g:02x}{b:02x}"
-    
+
     image_ctrl = None
     if is_image:
         image_ctrl = ft.Image(

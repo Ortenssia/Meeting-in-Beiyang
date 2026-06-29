@@ -1,5 +1,4 @@
 import os
-import time
 import threading
 import flet as ft
 from core.frontend import theme as T
@@ -31,7 +30,7 @@ class MomentsView:
         )
         self.media_indicator = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
         self.media_row = ft.Row([self.media_btn, self.media_indicator], spacing=10)
-        self.image_preview = ft.Image(src=None, visible=False, height=100, fit=ft.BoxFit.FIT_HEIGHT)
+        self.image_preview = ft.Image(src="placeholder", visible=False, height=100, fit=ft.BoxFit.FIT_HEIGHT)
 
         self.publish_btn = ft.ElevatedButton(
             "发布动态",
@@ -115,7 +114,7 @@ class MomentsView:
         # Load from DB
         moments = self.app.get_moments() or []
         self.feed_col.controls.clear()
-        
+
         if not moments:
             self.feed_col.controls.append(
                 ft.Container(
@@ -134,7 +133,7 @@ class MomentsView:
         else:
             for m in moments:
                 self.feed_col.controls.append(self._build_moment_card(m))
-        
+
         if self.page:
             self.page.update()
 
@@ -149,56 +148,144 @@ class MomentsView:
         if len(ts) >= 19:
             ts = ts[:16] # Show YYYY-MM-DD HH:MM
 
+        is_my_post = False
+        if self.app:
+            if self.app.device_name and author == self.app.device_name:
+                is_my_post = True
+            elif hasattr(self.app, "runtime") and self.app.runtime and getattr(self.app.runtime, "device_name", None) and author == self.app.runtime.device_name:
+                is_my_post = True
+            else:
+                try:
+                    my_profile = self.app.friend_db.get_my_profile() if self.app.friend_db else None
+                    if my_profile and author == my_profile.get("name", ""):
+                        is_my_post = True
+                except Exception:
+                    pass
+
         media_image = None
         if media_path and os.path.exists(media_path):
             try:
-                import base64
-                with open(media_path, "rb") as f:
-                    img_bytes = f.read()
-                b64 = base64.b64encode(img_bytes).decode()
-                # Determine MIME type from extension.
-                ext = os.path.splitext(media_path)[1].lower()
-                mime_map = {
-                    ".png": "image/png",
-                    ".jpg": "image/jpeg",
-                    ".jpeg": "image/jpeg",
-                    ".gif": "image/gif",
-                    ".bmp": "image/bmp",
-                    ".webp": "image/webp",
-                }
-                mime = mime_map.get(ext, "image/png")
-                data_uri = f"data:{mime};base64,{b64}"
+                img_ctrl = ft.Image(
+                    src=media_path,
+                    border_radius=8,
+                    fit=ft.BoxFit.FIT_WIDTH,
+                )
                 media_image = ft.Container(
-                    content=ft.Image(
-                        src=data_uri,
-                        border_radius=8,
-                        fit=ft.BoxFit.FIT_WIDTH,
-                    ),
-                    margin=ft.margin.only(top=8),
+                    content=img_ctrl,
+                    margin={"top": 8},
                     border_radius=8,
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
                 )
             except Exception:
                 pass
 
+        # Comments section data fetching & rendering
+        post_id = m.get("post_id", "")
+        comments = self.app.get_moment_comments(post_id) or []
+
+        comments_list = ft.Column(spacing=6)
+        for c in comments:
+            comments_list.controls.append(
+                ft.Text.rich(
+                    ft.TextSpan(
+                        [
+                            ft.TextSpan(f"{c['author']}: ", style=ft.TextStyle(weight=ft.FontWeight.BOLD, size=11, color=ft.Colors.DEEP_PURPLE_400)),
+                            ft.TextSpan(c['content'], style=ft.TextStyle(size=11, color=ft.Colors.ON_SURFACE)),
+                        ]
+                    )
+                )
+            )
+
+        comment_input = ft.TextField(
+            hint_text="添加评论...",
+            text_size=12,
+            border_radius=8,
+            height=30,
+            expand=True,
+            content_padding=T.pad_symmetric(horizontal=10, vertical=0),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            border_color=ft.Colors.with_opacity(0.1, ft.Colors.ON_SURFACE),
+        )
+
+        def send_comment_click(_e):
+            val = (comment_input.value or "").strip()
+            if not val:
+                return
+            self.app.publish_moment_comment(post_id, val)
+            comment_input.value = ""
+            try:
+                comment_input.update()
+            except Exception:
+                pass
+            self.refresh()
+            if hasattr(self.app, "_refresh_personal_space_feed") and self.app._refresh_personal_space_feed:
+                try:
+                    self.app._refresh_personal_space_feed()
+                except Exception:
+                    pass
+
+        send_btn = ft.IconButton(
+            icon=ft.Icons.SEND_ROUNDED,
+            icon_size=14,
+            icon_color=ft.Colors.DEEP_PURPLE_400,
+            on_click=send_comment_click,
+            padding=0,
+        )
+
         card = ft.Container(
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            T.avatar_circle(self.app.get_avatar_for_name(author), T.AVATAR_MD),
+                            ft.GestureDetector(
+                                content=T.avatar_circle(self.app.get_avatar_for_name(author), T.AVATAR_MD),
+                                on_tap=lambda _e: self.app.show_friend_profile(author),
+                                mouse_cursor=ft.MouseCursor.CLICK,
+                            ),
                             ft.Column(
                                 [
-                                    ft.Text(author, size=T.FS_TEXT, weight=ft.FontWeight.BOLD),
+                                    ft.Row(
+                                        [
+                                            ft.GestureDetector(
+                                                content=ft.Text(author, size=T.FS_TEXT, weight=ft.FontWeight.BOLD),
+                                                on_tap=lambda _e: self.app.show_friend_profile(author),
+                                                mouse_cursor=ft.MouseCursor.CLICK,
+                                            ),
+                                            ft.Container(
+                                                content=ft.Text("我的", size=9, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+                                                bgcolor=ft.Colors.DEEP_PURPLE_400,
+                                                padding={"left": 6, "top": 2, "right": 6, "bottom": 2},
+                                                border_radius=6,
+                                                margin={"left": 4},
+                                            ) if is_my_post else ft.Container()
+                                        ],
+                                        alignment=ft.MainAxisAlignment.START,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    ),
                                     ft.Text(ts, size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
                                 ],
                                 spacing=2,
+                                expand=True,
                             ),
+                            ft.IconButton(
+                                icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
+                                icon_color=ft.Colors.RED_300,
+                                tooltip="删除动态",
+                                on_click=lambda _e, pid=m.get("post_id"): self._on_delete_moment(pid),
+                            ) if is_my_post else ft.Container()
                         ],
                         spacing=T.SP_SM,
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
                     ft.Text(content, size=T.FS_BODY),
                     media_image if media_image else ft.Container(),
+                    ft.Divider(height=6, thickness=1, color=ft.Colors.with_opacity(0.04, ft.Colors.ON_SURFACE)) if comments else ft.Container(),
+                    comments_list if comments else ft.Container(),
+                    ft.Row(
+                        [comment_input, send_btn],
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    )
                 ],
                 spacing=T.SP_SM,
             ),
@@ -216,7 +303,6 @@ class MomentsView:
             self.app.page.run_thread(self._pick_image_flet)
             return
 
-        import threading
         def _do_pick():
             from tkinter import filedialog
             root = tk.Tk()
@@ -242,6 +328,10 @@ class MomentsView:
         page = self.page
         if page and picker not in page.services:
             page.services.append(picker)
+            try:
+                page.update()
+            except Exception:
+                pass
         await picker.pick_files(
             dialog_title="选择分享图片",
             file_type=ft.FilePickerFileType.IMAGE,
@@ -255,13 +345,7 @@ class MomentsView:
         self._media_path = file_path
         self.media_indicator.value = os.path.basename(file_path)
         try:
-            import base64
-            with open(file_path, "rb") as f:
-                img_bytes = f.read()
-            b64 = base64.b64encode(img_bytes).decode()
-            ext = os.path.splitext(file_path)[1].lower()
-            mime = "image/png" if ext == ".png" else "image/jpeg"
-            self.image_preview.src = f"data:{mime};base64,{b64}"
+            self.image_preview.src = file_path
             self.image_preview.visible = True
         except Exception:
             pass
@@ -273,15 +357,41 @@ class MomentsView:
         if not content and not self._media_path:
             self.app.show_toast("不能发布空内容喔~")
             return
-        
+
         ok = self.app.publish_moment(content, self._media_path)
         if ok:
             self.post_input.value = ""
             self._media_path = ""
             self.media_indicator.value = ""
             self.image_preview.visible = False
-            self.image_preview.src = None
+            self.image_preview.src = "placeholder"
+            self.image_preview.src_base64 = None
             self.app.show_toast("空间动态发布成功 🌌")
             self.refresh()
         else:
             self.app.show_toast("发布失败")
+
+    def _on_delete_moment(self, post_id: str):
+        def confirm_delete(_e2):
+            self.app.delete_moment(post_id)
+            dlg.open = False
+            self.page.update()
+            self.refresh()
+            self.app.show_toast("动态已删除 🗑️")
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("确认删除吗？", weight=ft.FontWeight.BOLD),
+            content=ft.Text("此操作将永久从您的本地设备上删除该条空间动态。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda _e: self._close_dialog(dlg)),
+                ft.ElevatedButton("删除", on_click=confirm_delete, bgcolor=ft.Colors.RED_400, color=ft.Colors.WHITE),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
+    def _close_dialog(self, dlg):
+        dlg.open = False
+        self.page.update()

@@ -1,10 +1,8 @@
 """
 挑战 3 - 协议模块单元测试
 """
-import pytest
 import sys
 import os
-import json
 
 # 将项目根目录添加到路径中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -88,7 +86,7 @@ class TestProtocol:
         packet = Protocol.create_friend_request(
             "UserA", ["tag1"], "hi", my_conditions, "user_a", "device_a", 7780
         )
-        
+
         data = Protocol.parse_message(packet[4:])
         assert data["type"] == Protocol.FRIEND_REQUEST
         assert data["profile"]["name"] == "UserA"

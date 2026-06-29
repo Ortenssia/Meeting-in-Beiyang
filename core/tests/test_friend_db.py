@@ -16,7 +16,7 @@ def db(tmp_path):
     db_path = tmp_path / "test_friends.db"
     friend_db = FriendDB(str(db_path))
     yield friend_db
-    
+
     friend_db.close()
 
 
@@ -31,6 +31,7 @@ class TestFriendDB:
             "name": "UserA",
             "tags": ["python", "kivy"],
             "bio": "Keep coding",
+            "card_bg": "/path/to/card_bg.jpg",
             "conditions": {
                 "required_tags": ["linux"],
                 "optional_tags": ["git"],
@@ -47,6 +48,7 @@ class TestFriendDB:
         assert loaded["name"] == "UserA"
         assert loaded["tags"] == ["python", "kivy"]
         assert loaded["bio"] == "Keep coding"
+        assert loaded["card_bg"] == "/path/to/card_bg.jpg"
         assert loaded["conditions"]["required_tags"] == ["linux"]
         assert loaded["conditions"]["auto_accept"] is True
 
@@ -253,6 +255,40 @@ class TestFriendDB:
         friend = db.get_friend("FriendB")
         assert friend["category"] == "家人"
 
+    def test_get_friend_categories(self, db):
+        db.add_friend("FriendX", "192.168.1.103", 7779, [], "bio", "同学")
+        db.add_friend("FriendY", "192.168.1.104", 7779, [], "bio", "家人")
+        cats = db.get_friend_categories()
+        assert "同学" in cats
+        assert "家人" in cats
+
+    def test_friend_category_table_add_and_delete_migrates_friends(self, db):
+        assert db.add_friend_category("社团") is True
+        assert "社团" in db.get_friend_categories()
+
+        db.add_friend("FriendClub", "192.168.1.105", 7779, [], "bio", "社团")
+        assert db.delete_friend_category("社团", fallback="朋友") is True
+
+        friend = db.get_friend("FriendClub")
+        assert friend["category"] == "朋友"
+        assert "社团" not in [item["name"] for item in db.get_friend_category_records()]
+
+    def test_friend_categories_migrate_from_legacy_setting(self, tmp_path):
+        db_path = tmp_path / "legacy_categories.db"
+        first = FriendDB(str(db_path))
+        first.set_app_setting("custom_friend_categories", '["室友", "社团"]')
+        first.conn.execute("DELETE FROM friend_categories")
+        first.conn.commit()
+        first.close()
+
+        migrated = FriendDB(str(db_path))
+        try:
+            cats = migrated.get_friend_categories()
+            assert cats[:2] == ["室友", "社团"]
+            assert "朋友" in cats
+        finally:
+            migrated.close()
+
     def test_msg_id_deduplication(self, db):
         msg_id = "test_msg_id_999"
         # 初始应未处理
@@ -380,3 +416,23 @@ class TestFriendDB:
         assert moments[0]["content"] == "My first post!"
         assert moments[0]["author"] == "Alice"
         assert moments[0]["media_path"] == "/path/to/img.png"
+
+        assert db.delete_moment(post_id) is True
+        assert db.has_moment(post_id) is False
+        assert len(db.get_moments()) == 0
+
+        # 4. Test moment comments
+        post_id_c = "post-comment-test"
+        db.save_moment(post_id_c, "Alice", "Comment test", "", "2026-06-13 12:10:00")
+        assert db.save_moment_comment("comm-1", post_id_c, "Bob", "Nice post!", "2026-06-13 12:11:00") is True
+        assert db.save_moment_comment("comm-2", post_id_c, "Charlie", "Agreed", "2026-06-13 12:12:00") is True
+
+        comments = db.get_moment_comments(post_id_c)
+        assert len(comments) == 2
+        assert comments[0]["author"] == "Bob"
+        assert comments[0]["content"] == "Nice post!"
+        assert comments[1]["author"] == "Charlie"
+        assert comments[1]["content"] == "Agreed"
+
+        assert db.delete_moment_comment("comm-1") is True
+        assert len(db.get_moment_comments(post_id_c)) == 1

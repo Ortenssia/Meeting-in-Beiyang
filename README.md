@@ -2,6 +2,8 @@
 
 “相识北洋”是一个使用 Python 与 Flet 开发的校园局域网社交应用，对应 Challenge 3。
 
+当前版本：`1.8.95`
+
 应用通过 UDP 在局域网内发现附近用户，并使用 TCP 建立好友间的点对点连接，支持好友申请、资料匹配、即时聊天、离线消息中继和文件传输。
 
 ## 主要功能
@@ -82,6 +84,25 @@ python -m pip install -r requirements.txt
 
 ## 运行应用
 
+### Windows 一键启动（推荐）
+
+双击 `run.bat`，脚本会自动：
+
+1. 检测 Python 3.10 或更高版本；
+2. 在项目目录创建隔离的 `.venv`；
+3. 仅在依赖缺失时安装依赖；
+4. 启动应用。
+
+也可以在 PowerShell 中运行，并附加启动参数：
+
+```powershell
+.\run.bat --name Alice --port 7779 --udp-port 8890
+```
+
+首次启动需要联网安装依赖。不要将其他电脑上的 `.venv` 复制过来，每台电脑应自行生成。
+
+### 命令行启动
+
 普通启动：
 
 ```powershell
@@ -126,8 +147,43 @@ python -m pytest core/tests -q
 当前验证结果：
 
 ```text
-91 passed
+136 passed
 ```
+
+## 打包发布
+
+### Android APK（Docker）
+
+先启动 Docker Desktop，然后在项目根目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-apk-clean.ps1
+```
+
+脚本会删除旧暂存与旧 APK、复制最新源码、构建并校验版本和 Build ID。产物位于：
+
+```text
+build\apk\
+```
+
+若 NDK 下载损坏，脚本会清理不完整的 NDK 并自动重试，文件传输分块配置不会因此改变。
+
+### Windows PC 端
+
+Windows 包必须在 Windows 电脑上构建。安装 Python 3.10+ 和项目依赖后执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-windows-clean.ps1
+```
+
+脚本使用独立暂存目录打包最新源码，产物包括：
+
+```text
+build\windows\                              可运行程序及其依赖
+build\release\meeting-in-beiyang-windows-1.8.95.zip
+```
+
+Windows 版不是单文件程序，不能只发送 `.exe`。发布时应发送 `build\release\` 中生成的 ZIP，使用者解压后再运行其中的 EXE。
 
 ## 界面与数据路径
 

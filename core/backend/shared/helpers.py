@@ -8,7 +8,7 @@
 import socket
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 class Helpers:
@@ -59,7 +59,7 @@ class Helpers:
                             gw_match = re.search(r':\s*([\d.]+)', line)
                             if gw_match:
                                 gateway = gw_match.group(1)
-                    
+
                     if ip and mask:
                         interfaces.append({
                             "name": adapter_name,
@@ -70,7 +70,7 @@ class Helpers:
                         })
             except Exception:
                 pass
-                
+
         # Generic desktop fallback.
         if not interfaces:
             try:
@@ -87,12 +87,12 @@ class Helpers:
                         })
             except Exception:
                 pass
-                
+
         # 补全 broadcast 地址
         for iface in interfaces:
             if not iface.get("broadcast"):
                 iface["broadcast"] = Helpers._calculate_broadcast(iface["ip"], iface["mask"])
-                
+
         return interfaces
 
     @staticmethod
@@ -124,36 +124,36 @@ class Helpers:
     def _get_best_ip(ifaces: List[dict]) -> str:
         if not ifaces:
             return "127.0.0.1"
-            
+
         virtual_keywords = [
-            'vpn', 'tun', 'tap', 'docker', 'vbox', 'virtualbox', 'vmware', 
-            'loopback', 'wsl', 'xray', 'hamachi', 'radmin', 'clash', 
+            'vpn', 'tun', 'tap', 'docker', 'vbox', 'virtualbox', 'vmware',
+            'loopback', 'wsl', 'xray', 'hamachi', 'radmin', 'clash',
             'singbox', 'sing-box', 'wintun', 'nekoray', 'v2ray', 'bypass'
         ]
-        
+
         def score_iface(iface):
             name_lower = iface["name"].lower()
             ip = iface.get("ip", "")
             score = 0
-            
+
             # 判断是否是虚拟/代理网卡或代理网段（Clash默认使用198.18/19网段，sing-box常用172.19网段）
             is_virtual = any(kw in name_lower for kw in virtual_keywords)
             is_proxy_subnet = ip.startswith("198.18.") or ip.startswith("198.19.") or ip.startswith("172.19.")
-            
+
             if is_virtual or is_proxy_subnet:
                 score -= 1000  # 给予极低分，避免排在首位
             else:
                 score += 100
-                
+
             gw = iface.get("gateway")
             if gw and gw != "0.0.0.0":
                 score += 50
-                
+
             if any(k in name_lower for k in ["wlan", "wireless", "wi-fi", "ethernet", "本地连接"]):
                 score += 30
-                
+
             return score
-            
+
         sorted_ifaces = sorted(ifaces, key=score_iface, reverse=True)
         return sorted_ifaces[0]["ip"]
 
@@ -165,18 +165,18 @@ class Helpers:
         now = time.time()
         if Helpers._cached_local_ips is not None and (now - Helpers._last_cache_time < 10.0):
             return Helpers._cached_local_ips
-            
+
         ifaces = Helpers._detect_interfaces()
         ips = ["127.0.0.1"]
         for iface in ifaces:
             ip = iface["ip"]
             if ip not in ips and not ip.startswith("127."):
                 ips.append(ip)
-                
+
         default_ip = Helpers.get_default_ip()
         if default_ip and default_ip not in ips and not default_ip.startswith("127."):
             ips.append(default_ip)
-            
+
         Helpers._cached_local_ips = ips
         Helpers._last_cache_time = now
         return ips
@@ -190,16 +190,17 @@ class Helpers:
         now = time.time()
         if Helpers._cached_default_ip is not None and (now - Helpers._last_cache_time < 10.0):
             return Helpers._cached_default_ip
-            
+
         ifaces = Helpers._detect_interfaces()
         best_ip = Helpers._get_best_ip(ifaces)
-        
-        is_proxy_or_invalid = lambda ip: (
-            not ip or ip == "127.0.0.1" or 
-            ip.startswith("198.18.") or ip.startswith("198.19.") or 
-            ip.startswith("172.19.")
-        )
-        
+
+        def is_proxy_or_invalid(ip):
+            return (
+                not ip or ip == "127.0.0.1" or
+                ip.startswith("198.18.") or ip.startswith("198.19.") or
+                ip.startswith("172.19.")
+            )
+
         # 如果判定获取到的是代理 IP 或环回 IP，则通过向特定地址建连进行路由探测
         if is_proxy_or_invalid(best_ip):
             # 优先选择天大内部 DNS 或国内公共 DNS，因为系统代理一般会直连/绕过局域网及国内直连
@@ -221,7 +222,7 @@ class Helpers:
                         break
                 except Exception:
                     continue
-                    
+
         # 兜底：如果探测后依然无法获得有效物理 IP，且本地接口中存在非代理的物理 IP，则强制返回第一个
         if is_proxy_or_invalid(best_ip) and ifaces:
             for iface in ifaces:
@@ -229,7 +230,7 @@ class Helpers:
                 if not is_proxy_or_invalid(ip):
                     best_ip = ip
                     break
-                    
+
         Helpers._cached_default_ip = best_ip
         return best_ip
 
@@ -374,16 +375,16 @@ class Helpers:
         try:
             ip_parts = [int(p) for p in ip.split('.')]
             mask_parts = [int(p) for p in mask.split('.')]
-            
+
             # 计算网络地址和主机数量
             net_parts = []
             for i in range(4):
                 net_parts.append(ip_parts[i] & mask_parts[i])
-                
+
             # 计算总的主机数量
             wildcard_parts = [255 - m for m in mask_parts]
             total_hosts = (wildcard_parts[0] << 24) + (wildcard_parts[1] << 16) + (wildcard_parts[2] << 8) + wildcard_parts[3]
-            
+
             # 限制在 /22 Subnet (最多 1022 个主机)，避免卡死或造成网络风暴
             # 如果是大型网络（如校园网，掩码为 /16 或 /17），退化为扫描当前 IP 所在的近邻 /24 子网网段 (最多 254 个主机)
             if total_hosts > 1024 or total_hosts <= 0:
@@ -400,7 +401,7 @@ class Helpers:
                 except Exception:
                     pass
                 return []
-                
+
             hosts = []
             net_val = (net_parts[0] << 24) + (net_parts[1] << 16) + (net_parts[2] << 8) + net_parts[3]
             for i in range(1, total_hosts):  # 排除网络地址 (i=0) 和广播地址 (i=total_hosts)

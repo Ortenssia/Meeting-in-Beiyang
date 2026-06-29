@@ -9,7 +9,7 @@ class NetworkPolicy:
 
     profile_name: str = "campus_lan"
 
-    tcp_connect_timeout: float = 4.0
+    tcp_connect_timeout: float = 6.0
     tcp_heartbeat_interval: float = 30.0
     ip_monitor_interval: float = 15.0
 
@@ -20,8 +20,8 @@ class NetworkPolicy:
     message_heartbeat_interval: float = 15.0
     file_chunk_size: int = 256 * 1024
     file_ack_interval: int = 32
-    file_ack_timeout: float = 30.0
-    file_max_attempts: int = 3
+    file_ack_timeout: float = 45.0
+    file_max_attempts: int = 5
     file_progress_min_interval: float = 0.125
     file_progress_pct_step: int = 5
 

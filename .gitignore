@@ -29,3 +29,6 @@ env/
 .idea/
 .vscode/
 build/
+.apk-build-clean/
+.apk-output-clean/
+.windows-build-clean/

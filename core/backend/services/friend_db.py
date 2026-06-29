@@ -117,6 +117,17 @@ class FriendDB:
                 )
             """)
 
+            # ---- 好友分组表 ---- #
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS friend_categories (
+                    name        TEXT    PRIMARY KEY,
+                    sort_order  INTEGER DEFAULT 0,
+                    color       TEXT    DEFAULT '',
+                    icon        TEXT    DEFAULT '',
+                    created_at  TEXT    NOT NULL
+                )
+            """)
+
             # ---- 个人资料表 ---- #
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS my_profile (
@@ -128,7 +139,7 @@ class FriendDB:
                     bio         TEXT    DEFAULT ''
                 )
             """)
-            
+
             # 兼容老版本，动态添加新增字段
             try:
                 cursor.execute("ALTER TABLE my_profile ADD COLUMN avatar TEXT DEFAULT ''")
@@ -160,6 +171,14 @@ class FriendDB:
                 pass
             try:
                 cursor.execute("ALTER TABLE friends ADD COLUMN background TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE my_profile ADD COLUMN card_bg TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE friends ADD COLUMN card_bg TEXT DEFAULT ''")
             except Exception:
                 pass
 
@@ -231,8 +250,32 @@ class FriendDB:
                     created_at  TEXT    NOT NULL
                 )
             """)
+            # ---- 空间动态评论表 ---- #
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS moment_comments (
+                    comment_id  TEXT    PRIMARY KEY,
+                    post_id     TEXT    NOT NULL,
+                    author      TEXT    NOT NULL,
+                    content     TEXT    NOT NULL,
+                    timestamp   TEXT    NOT NULL,
+                    created_at  TEXT    NOT NULL,
+                    FOREIGN KEY(post_id) REFERENCES moments(post_id) ON DELETE CASCADE
+                )
+            """)
+            # ---- 系统通知表 ---- #
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS system_notifications (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title       TEXT    NOT NULL,
+                    content     TEXT    NOT NULL,
+                    category    TEXT    DEFAULT 'info',
+                    timestamp   TEXT    NOT NULL,
+                    is_read     INTEGER DEFAULT 0
+                )
+            """)
 
             self.conn.commit()
+            self._migrate_friend_categories()
             self._repair_blank_friend_names()
             logger.info("好友数据库初始化完成: %s", self.db_path)
 
@@ -256,7 +299,7 @@ class FriendDB:
                    tags: List[str] = None, bio: str = "",
                    category: str = "朋友", user_id: str = "",
                    status: str = "accepted", avatar: str = "",
-                   background: str = "") -> bool:
+                   background: str = "", card_bg: str = "") -> bool:
         """
         添加好友到地址簿。
 
@@ -283,6 +326,8 @@ class FriendDB:
             avatar = ""
         if background is None:
             background = ""
+        if card_bg is None:
+            card_bg = ""
         if user_id is None:
             user_id = ""
 
@@ -296,7 +341,7 @@ class FriendDB:
                 if user_id:
                     cursor.execute(
                         """
-                        SELECT id, user_id, avatar, background
+                        SELECT id, user_id, avatar, background, card_bg
                         FROM friends
                         WHERE user_id = ? OR name = ?
                         """,
@@ -305,7 +350,7 @@ class FriendDB:
                 else:
                     cursor.execute(
                         """
-                        SELECT id, user_id, avatar, background
+                        SELECT id, user_id, avatar, background, card_bg
                         FROM friends
                         WHERE name = ?
                         """,
@@ -318,27 +363,28 @@ class FriendDB:
                     # 更新已有好友信息
                     existing_avatar = existing["avatar"] if "avatar" in existing.keys() else ""
                     existing_background = existing["background"] if "background" in existing.keys() else ""
+                    existing_card_bg = existing["card_bg"] if "card_bg" in existing.keys() else ""
                     cursor.execute("""
                         UPDATE friends
                         SET user_id = ?, name = ?, ip = ?, port = ?, tags = ?,
-                            bio = ?, avatar = ?, background = ?, category = ?,
+                            bio = ?, avatar = ?, background = ?, card_bg = ?, category = ?,
                             status = ?, last_seen = ?
                         WHERE id = ?
                     """, (
                         stored_user_id, name, ip, port, tags_json, bio,
                         avatar or existing_avatar, background or existing_background,
-                        category, status, now, existing["id"],
+                        card_bg or existing_card_bg, category, status, now, existing["id"],
                     ))
                 else:
                     # 插入新好友
                     cursor.execute("""
                         INSERT INTO friends
-                        (user_id, name, ip, port, tags, bio, avatar, background,
+                        (user_id, name, ip, port, tags, bio, avatar, background, card_bg,
                          category, status, added_at, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         user_id, name, ip, port, tags_json, bio, avatar,
-                        background, category, status, now, now,
+                        background, card_bg, category, status, now, now,
                     ))
 
                 if user_id:
@@ -402,6 +448,45 @@ class FriendDB:
         except Exception as e:
             logger.error("修复空好友名称失败: %s", e)
 
+    def _migrate_friend_categories(self) -> None:
+        """Seed the category table from defaults and legacy JSON settings."""
+        try:
+            cursor = self.conn.cursor()
+            existing = cursor.execute(
+                "SELECT COUNT(*) AS count FROM friend_categories"
+            ).fetchone()
+            if existing and int(existing["count"] or 0) > 0:
+                return
+
+            cats = ["同学", "朋友"]
+            legacy = cursor.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                ("custom_friend_categories",),
+            ).fetchone()
+            if legacy:
+                try:
+                    parsed = json.loads(legacy["value"] or "[]")
+                    if isinstance(parsed, list) and parsed:
+                        cats = [str(item).strip() for item in parsed if str(item).strip()]
+                except Exception:
+                    pass
+            if "朋友" not in cats:
+                cats.append("朋友")
+
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for index, category in enumerate(dict.fromkeys(cats)):
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO friend_categories
+                    (name, sort_order, color, icon, created_at)
+                    VALUES (?, ?, '', '', ?)
+                    """,
+                    (category, index, now),
+                )
+            self.conn.commit()
+        except Exception as e:
+            logger.error("迁移好友分组失败: %s", e)
+
     def update_friend_avatar(
         self,
         name: str = "",
@@ -430,6 +515,34 @@ class FriendDB:
             logger.error("更新好友头像失败 [%s/%s]: %s", name, user_id, e)
             return False
 
+    def update_friend_card_bg(
+        self,
+        name: str = "",
+        card_bg: str = "",
+        user_id: str = "",
+    ) -> bool:
+        """Update a friend's locally cached card background path."""
+        if not card_bg or not (name or user_id):
+            return False
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                if user_id:
+                    cursor.execute(
+                        "UPDATE friends SET card_bg = ? WHERE user_id = ? OR name = ?",
+                        (card_bg, user_id, name),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE friends SET card_bg = ? WHERE name = ?",
+                        (card_bg, name),
+                    )
+                self.conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("更新好友名片背景失败 [%s/%s]: %s", name, user_id, e)
+            return False
+
     def remove_friend(self, name: str) -> bool:
         """
         从地址簿中移除好友。
@@ -445,7 +558,16 @@ class FriendDB:
         try:
             with self._lock:
                 cursor = self.conn.cursor()
+                # 获取 user_id 方便更精确地清理好友请求
+                cursor.execute("SELECT user_id FROM friends WHERE name = ?", (name,))
+                row = cursor.fetchone()
+                user_id = row[0] if row else None
+
                 cursor.execute("DELETE FROM friends WHERE name = ?", (name,))
+                if user_id:
+                    cursor.execute("DELETE FROM friend_requests WHERE user_id = ?", (user_id,))
+                else:
+                    cursor.execute("DELETE FROM friend_requests WHERE name = ?", (name,))
                 cursor.execute(
                     "DELETE FROM chat_history WHERE friend_name = ?", (name,)
                 )
@@ -594,6 +716,101 @@ class FriendDB:
             logger.error("设置好友分类失败 [%s -> %s]: %s", name, category, e)
             return False
 
+    def add_friend_category(
+        self,
+        name: str,
+        color: str = "",
+        icon: str = "",
+    ) -> bool:
+        """Add a local friend category if it does not already exist."""
+        category = (name or "").strip()
+        if not category or category == "全部":
+            return False
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                row = cursor.execute(
+                    "SELECT MAX(sort_order) AS max_order FROM friend_categories"
+                ).fetchone()
+                sort_order = int(row["max_order"] if row and row["max_order"] is not None else -1) + 1
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO friend_categories
+                    (name, sort_order, color, icon, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (category, sort_order, color or "", icon or "", now),
+                )
+                self.conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("添加好友分组失败 [%s]: %s", name, e)
+            return False
+
+    def delete_friend_category(self, name: str, fallback: str = "朋友") -> bool:
+        """Delete a local friend category and move its friends to fallback."""
+        category = (name or "").strip()
+        fallback_category = (fallback or "朋友").strip()
+        if not category or category == fallback_category:
+            return False
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                fallback_row = cursor.execute(
+                    "SELECT name FROM friend_categories WHERE name = ?",
+                    (fallback_category,),
+                ).fetchone()
+                if not fallback_row:
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO friend_categories
+                        (name, sort_order, color, icon, created_at)
+                        VALUES (?, 0, '', '', ?)
+                        """,
+                        (fallback_category, now),
+                    )
+                cursor.execute(
+                    "UPDATE friends SET category = ? WHERE category = ?",
+                    (fallback_category, category),
+                )
+                cursor.execute(
+                    "DELETE FROM friend_categories WHERE name = ?",
+                    (category,),
+                )
+                deleted = cursor.rowcount > 0
+                self.conn.commit()
+                return deleted
+        except Exception as e:
+            logger.error("删除好友分组失败 [%s]: %s", name, e)
+            return False
+
+    def get_friend_category_records(self) -> List[Dict[str, Any]]:
+        """Return local friend categories with display metadata."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT name, sort_order, color, icon, created_at
+                FROM friend_categories
+                ORDER BY sort_order ASC, name ASC
+                """
+            )
+            return [
+                {
+                    "name": row["name"],
+                    "sort_order": row["sort_order"],
+                    "color": row["color"] or "",
+                    "icon": row["icon"] or "",
+                    "created_at": row["created_at"],
+                }
+                for row in cursor.fetchall()
+            ]
+        except Exception as e:
+            logger.error("获取好友分组记录失败: %s", e)
+            return []
+
     def get_friend_categories(self) -> List[str]:
         """
         获取所有好友分类（去重）。
@@ -603,10 +820,27 @@ class FriendDB:
         """
         try:
             cursor = self.conn.cursor()
-            cursor.execute(
-                "SELECT DISTINCT category FROM friends ORDER BY category"
-            )
-            return [row["category"] for row in cursor.fetchall()]
+            configured = [
+                row["name"]
+                for row in cursor.execute(
+                    """
+                    SELECT name FROM friend_categories
+                    ORDER BY sort_order ASC, name ASC
+                    """
+                ).fetchall()
+            ]
+            used = [
+                row["category"]
+                for row in cursor.execute(
+                    """
+                    SELECT DISTINCT category
+                    FROM friends
+                    WHERE category IS NOT NULL AND TRIM(category) != ''
+                    ORDER BY category
+                    """
+                ).fetchall()
+            ]
+            return list(dict.fromkeys(configured + used))
 
         except Exception as e:
             logger.error("获取好友分类失败: %s", e)
@@ -995,23 +1229,6 @@ class FriendDB:
             logger.error("删除待转发消息失败 [%s]: %s", msg_id, e)
             return False
 
-    def clear_pending_messages(self) -> bool:
-        """
-        清空所有待转发消息。
-
-        Returns:
-            True 表示清空成功。
-        """
-        try:
-            with self._lock:
-                cursor = self.conn.cursor()
-                cursor.execute("DELETE FROM pending_messages")
-                self.conn.commit()
-            return True
-
-        except Exception as e:
-            logger.error("清空待转发消息失败: %s", e)
-            return False
 
     # ================================================================== #
     #  聊天记录
@@ -1163,6 +1380,7 @@ class FriendDB:
             "bio": row["bio"] or "",
             "avatar": (row["avatar"] if "avatar" in row.keys() else "") or "",
             "background": (row["background"] if "background" in row.keys() else "") or "",
+            "card_bg": (row["card_bg"] if "card_bg" in row.keys() else "") or "",
             "category": row["category"] or "朋友",
             "status": (row["status"] if "status" in row.keys() else "accepted") or "accepted",
             "added_at": row["added_at"],
@@ -1214,6 +1432,7 @@ class FriendDB:
                 bio = row["bio"]
                 avatar = row["avatar"] if "avatar" in row.keys() else ""
                 background = row["background"] if "background" in row.keys() else ""
+                card_bg = row["card_bg"] if "card_bg" in row.keys() else ""
                 with self._lock:
                     cursor.execute("DELETE FROM my_profile WHERE id != ?", (row["id"],))
                     if not user_id or not device_id:
@@ -1233,10 +1452,11 @@ class FriendDB:
                 bio = ""
                 avatar = ""
                 background = ""
+                card_bg = ""
                 with self._lock:
                     cursor.execute(
-                        "INSERT INTO my_profile (user_id, device_id, name, tags, bio, avatar, background) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (user_id, device_id, name, "[]", "", "", ""),
+                        "INSERT INTO my_profile (user_id, device_id, name, tags, bio, avatar, background, card_bg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (user_id, device_id, name, "[]", "", "", "", ""),
                     )
                     self.conn.commit()
 
@@ -1249,6 +1469,7 @@ class FriendDB:
                 "bio": bio,
                 "avatar": avatar,
                 "background": background,
+                "card_bg": card_bg,
                 "conditions": conditions,
             }
         except Exception as e:
@@ -1262,6 +1483,7 @@ class FriendDB:
                 "bio": "",
                 "avatar": "",
                 "background": "",
+                "card_bg": "",
                 "conditions": {},
             }
 
@@ -1309,12 +1531,13 @@ class FriendDB:
                 bio = profile.get("bio", "")
                 avatar = profile.get("avatar", "")
                 background = profile.get("background", "")
+                card_bg = profile.get("card_bg", "")
 
                 # 更新个人资料（单行 —— DELETE + INSERT）
                 cursor.execute("DELETE FROM my_profile")
                 cursor.execute(
                     "INSERT INTO my_profile (user_id, device_id, name, tags,"
-                    " bio, avatar, background) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    " bio, avatar, background, card_bg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         user_id,
                         device_id,
@@ -1323,6 +1546,7 @@ class FriendDB:
                         bio,
                         avatar,
                         background,
+                        card_bg,
                     ),
                 )
 
@@ -1693,4 +1917,131 @@ class FriendDB:
             return cursor.fetchone() is not None
         except Exception as e:
             logger.error("检查空间发帖ID失败: %s", e)
+            return False
+
+    def delete_moment(self, post_id: str) -> bool:
+        """删除指定的空间动态。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM moments WHERE post_id = ?", (post_id,))
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("删除空间发帖失败: %s", e)
+            return False
+
+    def save_moment_comment(self, comment_id: str, post_id: str, author: str, content: str, timestamp: str) -> bool:
+        """保存空间动态的评论。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO moment_comments (comment_id, post_id, author, content, timestamp, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (comment_id, post_id, author, content, timestamp, created_at),
+                )
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("保存空间评论失败: %s", e)
+            return False
+
+    def get_moment_comments(self, post_id: str) -> List[Dict[str, Any]]:
+        """获取指定动态的所有评论，按时间升序排列。"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT * FROM moment_comments WHERE post_id = ? ORDER BY timestamp ASC",
+                (post_id,),
+            )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error("获取空间评论失败: %s", e)
+            return []
+
+    def delete_moment_comment(self, comment_id: str) -> bool:
+        """删除指定评论。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM moment_comments WHERE comment_id = ?", (comment_id,))
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("删除空间评论失败: %s", e)
+            return False
+
+    # ================================================================== #
+    #  系统通知管理
+    # ================================================================== #
+
+    def add_system_notification(self, title: str, content: str, category: str = "info") -> bool:
+        """添加一条系统通知。"""
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    INSERT INTO system_notifications (title, content, category, timestamp)
+                    VALUES (?, ?, ?, ?)
+                """, (title, content, category, now))
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("添加系统通知失败: %s", e)
+            return False
+
+    def get_system_notifications(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """获取最近的系统通知列表，按时间倒序排列。"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT * FROM system_notifications
+                ORDER BY timestamp DESC LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error("获取系统通知失败: %s", e)
+            return []
+
+    def clear_system_notifications(self) -> bool:
+        """清空所有的系统通知。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM system_notifications")
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("清空系统通知失败: %s", e)
+            return False
+
+    def mark_all_notifications_read(self) -> bool:
+        """将所有通知标记为已读。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("UPDATE system_notifications SET is_read = 1")
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("标记通知已读失败: %s", e)
+            return False
+
+    def mark_notification_read(self, notif_id: int) -> bool:
+        """将单条通知标记为已读。"""
+        try:
+            with self._lock:
+                cursor = self.conn.cursor()
+                cursor.execute("UPDATE system_notifications SET is_read = 1 WHERE id = ?", (notif_id,))
+                self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("标记通知已读失败: %s", e)
             return False

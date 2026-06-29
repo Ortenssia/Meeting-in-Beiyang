@@ -6,6 +6,7 @@ and hosts the custom FloatingNavigationBar + per-screen views.
 """
 import threading
 import time
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import flet as ft
@@ -30,7 +31,7 @@ class FloatingNavBar(ft.Container):
         self.tabs = tabs
         self.on_change = on_change
         self._selected_index = 0
-        
+
         super().__init__(
             bgcolor=ft.Colors.with_opacity(0.92, ft.Colors.SURFACE_CONTAINER_HIGH),
             border_radius=28,
@@ -45,15 +46,15 @@ class FloatingNavBar(ft.Container):
         )
         self.content = self.controls_row
         self._build_tabs()
-        
+
     def _build_tabs(self):
         self.controls_row.controls.clear()
         for idx, (label, key, icon) in enumerate(self.tabs):
             is_selected = (idx == self._selected_index)
-            
+
             icon_color = ft.Colors.WHITE if is_selected else ft.Colors.ON_SURFACE_VARIANT
             text_color = ft.Colors.WHITE if is_selected else ft.Colors.ON_SURFACE_VARIANT
-            
+
             # Action item
             tab_item = ft.GestureDetector(
                 mouse_cursor=ft.MouseCursor.CLICK,
@@ -63,9 +64,9 @@ class FloatingNavBar(ft.Container):
                         [
                             ft.Icon(icon, color=icon_color, size=20),
                             ft.Text(
-                                label, 
-                                size=T.FS_BODY, 
-                                color=text_color, 
+                                label,
+                                size=T.FS_BODY,
+                                color=text_color,
                                 weight=ft.FontWeight.BOLD if is_selected else ft.FontWeight.W_500,
                                 visible=is_selected  # Show text only when selected (sleek slide-out look)
                             )
@@ -81,17 +82,17 @@ class FloatingNavBar(ft.Container):
                 )
             )
             self.controls_row.controls.append(tab_item)
-            
+
     @property
     def selected_index(self):
         return self._selected_index
-        
+
     @selected_index.setter
     def selected_index(self, value):
         if self._selected_index != value:
             self._selected_index = value
             self._build_tabs()
-            
+
     def _handle_tap(self, idx):
         self.selected_index = idx
         if self.on_change:
@@ -158,10 +159,12 @@ class BeiyangApp:
             lambda: self._on_message(n, c, t, mid))
         self.runtime.on_friend_request = self._on_friend_request
         self.runtime.on_friend_accepted = lambda n, ip: self._safe(self._on_online)
+        self.runtime.on_friend_deleted = lambda n: self._safe(lambda: self._on_friend_deleted(n))
         self.runtime.on_error = lambda msg: print(f"[BeiyangSocial] error: {msg}")
         self.runtime.on_group_message_received = lambda gid, s, c, ts: self._safe(
             lambda: self._on_group_message(gid, s, c, ts))
         self.runtime.on_moments_changed = lambda: self._safe(self._on_moments_changed)
+        self.runtime.on_notifications_changed = lambda: self._safe(self._on_notifications_changed)
         self.message_service.on_friend_profile_update_available = (
             lambda name: self._safe(lambda: self._on_profile_update_available(name))
         )
@@ -225,8 +228,12 @@ class BeiyangApp:
         # FilePicker is a Service in Flet 0.85+, not a visual overlay control.
         self.profile_file_picker = ft.FilePicker()
         self.chat_file_picker = ft.FilePicker()
+        self.receive_dir_picker = ft.FilePicker()
+        self.moment_image_picker = ft.FilePicker()
         page.services.append(self.profile_file_picker)
         page.services.append(self.chat_file_picker)
+        page.services.append(self.receive_dir_picker)
+        page.services.append(self.moment_image_picker)
 
         # Register local custom Noto Sans SC font from assets
         page.fonts = {
@@ -242,7 +249,12 @@ class BeiyangApp:
 
         # Safe-area aware padding: on Android/iOS reserve space for the
         # system status bar so it doesn't overlap app content.
-        is_mobile = str(page.platform) in ("PagePlatform.ANDROID", "PagePlatform.IOS")
+        is_mobile = str(page.platform).lower() in (
+            "android",
+            "ios",
+            "pageplatform.android",
+            "pageplatform.ios",
+        )
         if is_mobile:
             page.padding = ft.Padding.only(top=40, left=0, right=0, bottom=0)
         else:
@@ -343,7 +355,11 @@ class BeiyangApp:
                     ft.Container(
                         content=self._stack,
                         expand=True,
-                        padding=T.pad_only(left=T.SP_LG, right=T.SP_LG, top=T.SP_LG),
+                        padding=T.pad_only(
+                            left=8 if is_mobile else T.SP_LG,
+                            right=8 if is_mobile else T.SP_LG,
+                            top=8 if is_mobile else T.SP_LG,
+                        ),
                     ),
                     self.nav,
                 ],
@@ -371,7 +387,7 @@ class BeiyangApp:
     def show_view(self, key: str, **kwargs):
         if key not in self.views:
             return
-        
+
         # chat window mode hides both top header and bottom nav bar for maximum immersion
         if key == "chat" and kwargs.get("friend") and self.nav:
             self.nav.visible = False
@@ -381,7 +397,7 @@ class BeiyangApp:
                 self.nav.visible = True
             if hasattr(self, "top_header") and self.top_header:
                 self.top_header.visible = True
-                
+
         # update selected index
         if self.nav and key in [k for _, k, _ in T.TABS]:
             self.nav.selected_index = [k for _, k, _ in T.TABS].index(key)
@@ -391,10 +407,10 @@ class BeiyangApp:
             is_group = kwargs.get("is_group", False)
             group_id = kwargs.get("group_id", "")
             view.open_chat(kwargs["friend"], is_group=is_group, group_id=group_id)
-            
+
         self._stack.controls = [view.build()]
         self.page.update()
-        
+
         if key != "chat" or not kwargs.get("friend"):
             self._safe(view.on_enter)
 
@@ -476,6 +492,13 @@ class BeiyangApp:
         if "moments" in self.views:
             self.views["moments"].on_moments_changed()
 
+    def _on_notifications_changed(self):
+        if "chat" in self.views:
+            try:
+                self.views["chat"].refresh_notifications()
+            except Exception:
+                pass
+
     def _on_file_offer_received(self, from_name, filename, size, file_id):
         """Forward file offer to the chat view so it appears inline."""
         if not self.page:
@@ -487,13 +510,32 @@ class BeiyangApp:
         self.show_toast(f"📁 {from_name} 发来文件: {filename}")
 
     def _on_file_received(self, name, path, timestamp):
-        # Avatar transfers also arrive through the file channel. Once the DB
-        # has been updated by MessageService, refresh avatar consumers.
+        # Avatar and card-background transfers also arrive through the file
+        # channel. Once the DB has been updated by MessageService, refresh
+        # avatar/card consumers.
         if "friends" in self.views:
             self.views["friends"].refresh()
         chat = self.views.get("chat")
         if chat and chat.current_friend:
             chat.refresh_header()
+        if self._open_profile_dlg and self._open_profile_dlg_name == name:
+            try:
+                self._open_profile_dlg.open = False
+                self.page.update()
+                self.page.overlay.remove(self._open_profile_dlg)
+            except Exception:
+                pass
+            self._open_profile_dlg = None
+            self._open_profile_dlg_name = ""
+            self.show_friend_profile(name)
+        try:
+            received_path = Path(path).resolve()
+            avatar_root = self.paths.received_avatars_dir.resolve()
+            is_profile_media = received_path == avatar_root or avatar_root in received_path.parents
+        except Exception:
+            is_profile_media = False
+        if not is_profile_media:
+            self.show_toast(f"文件接收成功：{Path(path).name}\n保存位置：{path}")
         if self.page:
             self.page.update()
 
@@ -535,22 +577,15 @@ class BeiyangApp:
             self.page.update()
 
     def _on_friend_request(self, profile, is_match, from_ip=None):
-        # Flet dialogs must be opened on the UI thread
         profile = dict(profile or {})
-        if from_ip:
-            profile["ip"] = from_ip
-        def _run():
-            try:
-                self.views["discover"].show_friend_request(profile, is_match)
-                if self.page:
-                    self.page.update()
-            except Exception as exc:
-                print(f"[BeiyangApp] friend request dialog error: {exc}")
-        try:
-            if self.page:
-                self.page.run_thread(_run) if hasattr(self.page, "run_thread") else _run()
-        except Exception:
-            _run()
+        sender_name = profile.get("name", "未知用户")
+        self.show_toast(f"👤 收到来自「{sender_name}」的好友申请，请前往「系统通知」查看和处理。")
+        self._on_notifications_changed()
+
+    def _on_friend_deleted(self, friend_name):
+        self.show_toast(f"ℹ️ 好友「{friend_name}」已将您从好友列表中删除。")
+        self._on_friends()
+        self._on_online()
 
     # -- UI-facing API ------------------------------------------------------
 
@@ -612,7 +647,7 @@ class BeiyangApp:
     def update_theme_and_background(self):
         if not self.page or not self.friend_db:
             return
-        
+
         # 1. Update Theme Color
         theme_color = self.friend_db.get_app_setting("theme_color", "DEEP_PURPLE")
         import core.frontend.theme as T
@@ -641,7 +676,7 @@ class BeiyangApp:
                 self.root_bg.visible = False
         else:
             self.root_bg.visible = False
-        
+
         self.page.update()
 
     def has_friend_profile_update(self, name):
@@ -711,6 +746,15 @@ class BeiyangApp:
         if friend:
             ip = friend.get("ip")
             port = friend.get("port")
+
+            # 发送 FRIEND_DELETE 消息通知对方删除自己
+            if self.message_service:
+                try:
+                    self.message_service.send_friend_delete(name)
+                except Exception:
+                    pass
+                time.sleep(0.2)  # 给操作系统足够的时间发送 TCP 缓存，避免被接下来的主动断连中断
+
             if ip and self.connection_manager:
                 endpoint = f"{ip}:{port}" if port else ip
                 self.connection_manager.disconnect_friend(endpoint)
@@ -722,6 +766,24 @@ class BeiyangApp:
         if self.friend_db:
             self.friend_db.set_friend_category(name, category)
             self._on_friends()
+
+    def get_system_notifications(self):
+        return self.friend_db.get_system_notifications() if self.friend_db else []
+
+    def clear_system_notifications(self):
+        if self.friend_db:
+            self.friend_db.clear_system_notifications()
+            self._on_notifications_changed()
+
+    def mark_all_notifications_read(self):
+        if self.friend_db:
+            self.friend_db.mark_all_notifications_read()
+            self._on_notifications_changed()
+
+    def mark_notification_read(self, notif_id):
+        if self.friend_db:
+            self.friend_db.mark_notification_read(notif_id)
+            self._on_notifications_changed()
 
     def open_chat_with(self, name, is_group=False, group_id=""):
         if not is_group:
@@ -877,6 +939,11 @@ class BeiyangApp:
         bio = profile.get("bio", "这个用户很懒，什么都没写。")
         tags = profile.get("tags", [])
         has_update = (not is_me) and self.has_friend_profile_update(name)
+        if has_update and self.get_profile_update_mode() == "auto":
+            threading.Thread(
+                target=lambda: self.request_friend_profile_update(name, silent=True),
+                daemon=True,
+            ).start()
 
         import json
         if isinstance(tags, str):
@@ -916,8 +983,16 @@ class BeiyangApp:
             except Exception:
                 pass
 
+        space_btn = ft.ElevatedButton(
+            "个人空间",
+            on_click=lambda _e: (close_dlg(None), self.show_personal_moments(name)),
+            bgcolor=ft.Colors.DEEP_PURPLE_500,
+            color=ft.Colors.WHITE,
+        )
+
         actions_row = ft.Row(
             [
+                space_btn,
                 *([update_btn] if has_update else []),
                 ft.TextButton("关闭", on_click=close_dlg),
             ],
@@ -925,22 +1000,63 @@ class BeiyangApp:
             spacing=8,
         )
 
-        dlg = ft.AlertDialog(
-            title=ft.Row(
+        card_bg_path = profile.get("card_bg", "").strip()
+        cover_container = ft.Container(
+            height=100,
+            border_radius=8,
+            gradient=T.GRADIENT_PRIMARY,
+        )
+        if card_bg_path and os.path.exists(card_bg_path):
+            cover_container.gradient = None
+            cover_container.image = ft.DecorationImage(src=card_bg_path, fit=ft.BoxFit.COVER)
+
+        profile_header = ft.Container(
+            content=ft.Stack(
                 [
-                    T.avatar_circle(self.get_avatar_for_name(name), 50),
-                    ft.Column(
-                        [
-                            ft.Text(name, size=T.FS_TITLE, weight=ft.FontWeight.BOLD),
-                            ft.Text(f"分类/关系: {category}", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
-                        ],
-                        spacing=2,
-                    )
+                    cover_container,
+                    ft.Container(
+                        content=T.avatar_circle(self.get_avatar_for_name(name), 58),
+                        top=72,
+                        left=16,
+                    ),
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    name,
+                                    size=T.FS_TITLE,
+                                    weight=ft.FontWeight.BOLD,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                ),
+                                ft.Text(
+                                    f"分类/关系: {category}",
+                                    size=T.FS_CAPTION,
+                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                ),
+                            ],
+                            spacing=2,
+                            tight=True,
+                        ),
+                        top=108,
+                        left=88,
+                        right=8,
+                    ),
                 ],
-                spacing=T.SP_MD,
+                height=150,
             ),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            border_radius=8,
+            border=T.border_all(1, ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
+        )
+
+        dlg = ft.AlertDialog(
             content=ft.Column(
                 [
+                    profile_header,
+                    ft.Divider(height=16, thickness=1, color=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
                     T.section_title("基本信息"),
                     ft.Row(
                         [
@@ -1026,7 +1142,129 @@ class BeiyangApp:
             return self.friend_db.get_moments(limit=50)
         return []
 
+    def delete_moment(self, post_id: str) -> bool:
+        if self.message_service:
+            return self.message_service.publish_moment_delete(post_id)
+        elif self.friend_db:
+            ok = self.friend_db.delete_moment(post_id)
+            if ok:
+                self._on_moments_changed()
+            return ok
+        return False
+
+    def get_moment_comments(self, post_id: str) -> List[Dict[str, Any]]:
+        if self.friend_db:
+            return self.friend_db.get_moment_comments(post_id)
+        return []
+
+    def delete_moment_comment(self, comment_id: str) -> bool:
+        if self.friend_db:
+            ok = self.friend_db.delete_moment_comment(comment_id)
+            if ok:
+                self._on_moments_changed()
+            return ok
+        return False
+
+    def publish_moment_comment(self, post_id: str, content: str) -> bool:
+        if self.message_service:
+            return self.message_service.publish_moment_comment(post_id, content)
+        return False
+
     def sync_moments(self):
         if self.message_service and self.connection_manager:
             for f in self.connection_manager.get_online_friends():
                 self.message_service.sync_moments_with_friend(f["name"])
+
+    def show_personal_moments(self, name: str):
+        if not self.page:
+            return
+
+        my_profile = self.friend_db.get_my_profile() if self.friend_db else None
+        is_me = (name == self.device_name or (my_profile and name == my_profile.get("name", "")))
+        if is_me:
+            profile = my_profile or {}
+        else:
+            profile = self.friend_db.get_friend(name) if self.friend_db else {}
+
+        card_bg_path = profile.get("card_bg", "").strip()
+        cover_container = ft.Container(
+            height=120,
+            border_radius=10,
+            gradient=T.GRADIENT_PRIMARY,
+        )
+        if card_bg_path and os.path.exists(card_bg_path):
+            cover_container.gradient = None
+            cover_container.image = ft.DecorationImage(src=card_bg_path, fit=ft.BoxFit.COVER)
+
+        personal_feed = ft.Column(spacing=T.SP_SM, scroll=ft.ScrollMode.AUTO, height=400)
+
+        def refresh_personal_feed():
+            personal_feed.controls.clear()
+            all_m = self.get_moments() or []
+            user_m = [m for m in all_m if m.get("author") == name]
+
+            if not user_m:
+                personal_feed.controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, size=40, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4),
+                                ft.Text("该空间暂无动态~", color=ft.Colors.ON_SURFACE_VARIANT, size=T.FS_CAPTION),
+                            ],
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=4,
+                        ),
+                        alignment=ft.alignment.Alignment.CENTER,
+                        padding=20,
+                    )
+                )
+            else:
+                for m in user_m:
+                    if "moments" in self.views:
+                        personal_feed.controls.append(self.views["moments"]._build_moment_card(m))
+            try:
+                personal_feed.update()
+            except Exception:
+                pass
+
+        self._open_personal_space_name = name
+        self._refresh_personal_space_feed = refresh_personal_feed
+
+        refresh_personal_feed()
+
+        def close_space(_e):
+            self._open_personal_space_name = ""
+            self._refresh_personal_space_feed = None
+            dlg.open = False
+            self.page.update()
+            try:
+                self.page.overlay.remove(dlg)
+            except Exception:
+                pass
+
+        dlg = ft.AlertDialog(
+            title=ft.Row(
+                [
+                    T.avatar_circle(self.get_avatar_for_name(name), 30),
+                    ft.Text(f"「{name}」的个人空间", weight=ft.FontWeight.BOLD, size=16),
+                ],
+                spacing=8,
+            ),
+            content=ft.Column(
+                [
+                    cover_container,
+                    ft.Text("空间动态列表：", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
+                    personal_feed,
+                ],
+                spacing=T.SP_SM,
+                tight=True,
+                width=360,
+            ),
+            actions=[
+                ft.TextButton("返回", on_click=close_space)
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()

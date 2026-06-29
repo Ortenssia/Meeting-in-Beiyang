@@ -61,7 +61,7 @@ class MockConnectionManager:
 def social_env(tmp_path):
     # Setup database
     db_path = tmp_path / "test_social_flow.db"
-    
+
     db = FriendDB(str(db_path))
     # Configure user profile
     db.save_profile({
@@ -83,9 +83,9 @@ def social_env(tmp_path):
         receive_dir=str(tmp_path / "received_files"),
         avatar_dir=str(tmp_path / "received_avatars"),
     )
-    
+
     yield db, conn_mgr, msg_service
-    
+
     db.close()
 
 
@@ -94,7 +94,7 @@ class TestSocialFlow:
 
     def test_send_message_online(self, social_env):
         db, conn_mgr, msg_service = social_env
-        
+
         # 加好友
         db.add_friend("Alice", "192.168.1.5", 7779, ["kivy"], "Alice Bio")
         # Alice 在线
@@ -102,7 +102,7 @@ class TestSocialFlow:
 
         success = msg_service.send_message("Alice", "Hi Alice!", msg_id="ui-msg-1")
         assert success is True
-        
+
         # 验证消息直接通过 TCP 送达了
         assert len(conn_mgr.sent_messages) == 1
         target, data = conn_mgr.sent_messages[0]
@@ -148,7 +148,7 @@ class TestSocialFlow:
 
     def test_send_message_offline_relay(self, social_env):
         db, conn_mgr, msg_service = social_env
-        
+
         # 离线的目标好友
         db.add_friend("Bob", "192.168.1.6", 7779, ["kivy"], "Bob Bio")
         # 在线的其他好友（作为中继节点）
@@ -349,26 +349,26 @@ class TestSocialFlow:
 
     def test_flush_pending_messages(self, social_env):
         db, conn_mgr, msg_service = social_env
-        
+
         # 离线的目标好友
         db.add_friend("Bob", "192.168.1.6", 7779, ["kivy"], "Bob Bio")
         conn_mgr.connect_success = False
-        
+
         # 发送离线消息给 Bob，进入 pending 队列
         msg_service.send_message("Bob", "Hello Bob offline!")
         pending = db.get_pending_messages("Bob")
         assert len(pending) == 1
         assert pending[0]["content"] == "Hello Bob offline!"
-        
+
         # 模拟 Bob 连接上线
         conn_mgr.online_friends["Bob"] = "192.168.1.6"
-        
+
         # 触发 flush_pending_messages
         msg_service.flush_pending_messages("Bob")
-        
+
         # 验证消息已从数据库清除
         assert len(db.get_pending_messages("Bob")) == 0
-        
+
         # 验证消息通过 TCP 发送了出去，并且内容是原本的 CHAT_MESSAGE 格式（非 RELAY）
         assert len(conn_mgr.sent_messages) == 1
         target, data = conn_mgr.sent_messages[0]
@@ -762,3 +762,261 @@ class TestSocialFlow:
             assert f.read() == payload
         assert db.get_chat_history("Alice") == []
         assert callbacks[0][0] == "Alice"
+
+    def test_delete_friend_clears_requests(self, social_env):
+        db, _conn_mgr, _msg_service = social_env
+        db.add_friend("Alice", "192.168.1.5", 7779, ["kivy"], "Alice Bio", user_id="user_alice")
+        # Prepopulate friend_requests with accepted request
+        db.upsert_friend_request(
+            user_id="user_alice",
+            name="Alice",
+            ip="192.168.1.5",
+            port=7779,
+            direction="incoming",
+            status="accepted"
+        )
+        assert db.get_relationship_status(user_id="user_alice") == "accepted"
+
+        # Remove friend
+        db.remove_friend("Alice")
+        assert db.get_friend("Alice") is None
+        assert db.get_relationship_status(user_id="user_alice") == "none"
+
+    def test_handle_friend_accept_ignores_non_pending(self, social_env):
+        db, _conn_mgr, msg_service = social_env
+
+        # Scenario 1: Receive FRIEND_ACCEPT when status is "none" (not pending_sent). Should ignore.
+        accept_data = {
+            "type": MessageService.FRIEND_ACCEPT,
+            "msg_id": "accept_msg_none",
+            "profile": {
+                "user_id": "user_alice",
+                "name": "Alice",
+                "tags": ["kivy"],
+                "bio": "Alice Bio",
+                "tcp_port": 7779,
+            }
+        }
+        msg_service.handle_message("192.168.1.5", accept_data)
+        assert db.get_friend("Alice") is None
+
+        # Scenario 2: Relationship status is "pending_sent". Should accept.
+        db.upsert_friend_request(
+            user_id="user_alice",
+            name="Alice",
+            ip="192.168.1.5",
+            port=7779,
+            direction="outgoing",
+            status="pending"
+        )
+        assert db.get_relationship_status(user_id="user_alice") == "pending_sent"
+
+        accept_data_2 = dict(accept_data)
+        accept_data_2["msg_id"] = "accept_msg_pending"
+        msg_service.handle_message("192.168.1.5", accept_data_2)
+        friend = db.get_friend("Alice")
+        assert friend is not None
+        assert friend["status"] == "accepted"
+
+    def test_handle_friend_delete_removes_friend_from_db(self, social_env):
+        db, _conn_mgr, msg_service = social_env
+
+        deleted_names = []
+        msg_service.on_friend_deleted = lambda name: deleted_names.append(name)
+
+        db.add_friend("Alice", "192.168.1.5", 7779, ["kivy"], "Alice Bio", user_id="user_alice")
+        db.upsert_friend_request(
+            user_id="user_alice",
+            name="Alice",
+            ip="192.168.1.5",
+            port=7779,
+            direction="incoming",
+            status="accepted"
+        )
+        assert db.get_friend("Alice") is not None
+        assert db.get_relationship_status(user_id="user_alice") == "accepted"
+
+        delete_data = {
+            "type": Protocol.FRIEND_DELETE,
+            "msg_id": "delete_msg_1",
+            "profile": {
+                "user_id": "user_alice",
+                "name": "Alice",
+            }
+        }
+        msg_service.handle_message("192.168.1.5", delete_data)
+
+        # Verify Alice is completely removed from DB
+        assert db.get_friend("Alice") is None
+        assert db.get_relationship_status(user_id="user_alice") == "none"
+
+        # Verify callback was triggered
+        assert deleted_names == ["Alice"]
+
+    def test_system_notifications(self, social_env):
+        db, _conn_mgr, msg_service = social_env
+
+        # Track notifications callback
+        changed_notifs_calls = 0
+        def on_changed():
+            nonlocal changed_notifs_calls
+            changed_notifs_calls += 1
+
+        msg_service.on_notifications_changed = on_changed
+
+        # 1. Test database helpers via message service
+        assert len(db.get_system_notifications()) == 0
+        msg_service.add_system_notification("Title 1", "Content 1", "info")
+        assert changed_notifs_calls == 1
+
+        notifs = db.get_system_notifications()
+        assert len(notifs) == 1
+        assert notifs[0]["title"] == "Title 1"
+        assert notifs[0]["content"] == "Content 1"
+        assert notifs[0]["is_read"] == 0
+
+        # 2. Test callback on incoming FRIEND_DELETE
+        db.add_friend("Bob", "192.168.1.6", 7779, [], "Bob Bio", user_id="user_bob")
+        delete_data = {
+            "type": Protocol.FRIEND_DELETE,
+            "msg_id": "delete_msg_notif",
+            "profile": {
+                "user_id": "user_bob",
+                "name": "Bob",
+            }
+        }
+        msg_service.handle_message("192.168.1.6", delete_data)
+
+        # Verify Bob is removed
+        assert db.get_friend("Bob") is None
+        # Verify on_notifications_changed callback was triggered for deletion notification
+        assert changed_notifs_calls == 2
+
+        # Verify notification entry is saved
+        notifs = db.get_system_notifications()
+        assert len(notifs) == 2
+        assert any("Bob" in n["content"] for n in notifs)
+
+        # 3. Test mark all read
+        db.mark_all_notifications_read()
+        notifs = db.get_system_notifications()
+        assert all(n["is_read"] == 1 for n in notifs)
+
+        # 4. Test clear
+        db.clear_system_notifications()
+        assert len(db.get_system_notifications()) == 0
+
+    def test_file_offer_system_notifications(self, social_env):
+        db, _conn_mgr, msg_service = social_env
+
+        # Track notifications callback
+        changed_notifs_calls = 0
+        def on_changed():
+            nonlocal changed_notifs_calls
+            changed_notifs_calls += 1
+
+        msg_service.on_notifications_changed = on_changed
+        db.add_friend("Charlie", "192.168.1.7", 7779, [], "Charlie Bio", user_id="user_charlie")
+        my_name = db.get_my_profile().get("name", "")
+
+        offer_data = {
+            "type": msg_service.FILE_OFFER,
+            "file_id": "test_file_id_123",
+            "from_name": "Charlie",
+            "to_name": my_name,
+            "filename": "hello.zip",
+            "size": 1024 * 1024,
+            "chunk_size": 256 * 1024,
+            "chunk_count": 4,
+            "sha256": "abcdef",
+            "timestamp": "2026-06-29 03:00:00",
+            "purpose": "chat_file",
+        }
+
+        # Handle the offer message
+        msg_service.handle_message("192.168.1.7", offer_data)
+
+        # Verify notifications changed callback was triggered
+        assert changed_notifs_calls == 1
+
+        # Verify notification entry is saved in DB with correct category and formatted size
+        notifs = db.get_system_notifications()
+        assert len(notifs) == 1
+        assert notifs[0]["category"] == "file_offer"
+        assert "Charlie" in notifs[0]["content"]
+        assert "hello.zip" in notifs[0]["content"]
+        assert "1.0 MiB" in notifs[0]["content"]
+        assert "test_file_id_123" in notifs[0]["content"]
+
+    def test_file_offer_deduplication(self, social_env):
+        db, _conn_mgr, msg_service = social_env
+        db.add_friend("Charlie", "192.168.1.7", 7779, [], "Charlie Bio", user_id="user_charlie")
+        my_name = db.get_my_profile().get("name", "")
+
+        offer_data = {
+            "type": msg_service.FILE_OFFER,
+            "file_id": "duplicate_file_id_999",
+            "from_name": "Charlie",
+            "to_name": my_name,
+            "filename": "duplicate_test.zip",
+            "size": 1024 * 1024,
+            "chunk_size": 256 * 1024,
+            "chunk_count": 4,
+            "sha256": "abcdef",
+            "timestamp": "2026-06-29 03:00:00",
+            "purpose": "chat_file",
+        }
+
+        # Handle the offer message first time
+        msg_service.handle_message("192.168.1.7", offer_data)
+
+        # Handle the duplicate offer message
+        msg_service.handle_message("192.168.1.7", offer_data)
+
+        # Verify only 1 notification is recorded (it filtered out the duplicate!)
+        notifs = db.get_system_notifications()
+        count = sum(1 for n in notifs if "duplicate_file_id_999" in n["content"])
+        assert count == 1
+
+    def test_moment_deletion_sync(self, social_env):
+        db, conn_mgr, msg_service = social_env
+        db.add_friend("Charlie", "192.168.1.7", 7779, [], "Charlie Bio", user_id="user_charlie")
+
+        # Save a moment from Charlie
+        db.save_moment("char-post-1", "Charlie", "Dynamic content 1", "", "2026-06-29 03:00:00")
+        db.save_moment("char-post-2", "Charlie", "Dynamic content 2", "", "2026-06-29 03:01:00")
+        assert db.has_moment("char-post-1") is True
+        assert db.has_moment("char-post-2") is True
+
+        # 1. Test real-time MOMENT_DELETE handling
+        delete_data = {
+            "type": "MOMENT_DELETE",
+            "post_id": "char-post-1",
+        }
+        msg_service.handle_message("192.168.1.7", delete_data)
+        assert db.has_moment("char-post-1") is False
+        assert db.has_moment("char-post-2") is True
+
+        # 2. Test fallback synchronization deletion:
+        # Charlie sends MOMENTS_SYNC_RESP containing only char-post-3
+        sync_resp_data = {
+            "type": "MOMENTS_SYNC_RESP",
+            "posts": [
+                {
+                    "post_id": "char-post-3",
+                    "author": "Charlie",
+                    "content": "Dynamic content 3",
+                    "media_name": "",
+                    "media_data": "",
+                    "timestamp": "2026-06-29 03:02:00",
+                }
+            ],
+            "comments": [],
+            "sender_name": "Charlie",
+        }
+        msg_service.handle_message("192.168.1.7", sync_resp_data)
+
+        # char-post-2 (which was not in sync list) should be deleted!
+        assert db.has_moment("char-post-2") is False
+        # char-post-3 should be added!
+        assert db.has_moment("char-post-3") is True

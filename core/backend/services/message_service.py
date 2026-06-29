@@ -138,6 +138,8 @@ class MessageService:
         self.on_message_received: Optional[Callable[[str, str, str, str], None]] = None
         self.on_friend_request: Optional[Callable[..., None]] = None
         self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
+        self.on_friend_deleted: Optional[Callable[[str], None]] = None
+        self.on_notifications_changed: Optional[Callable[[], None]] = None
         self.on_friend_profile_update_available: Optional[Callable[[str], None]] = None
         self.on_friend_profile_updated: Optional[Callable[[str], None]] = None
         self.on_file_received: Optional[Callable[[str, str, str], None]] = None
@@ -469,6 +471,56 @@ class MessageService:
         )
         return False
 
+    def send_friend_delete(self, friend_name: str, friend_ip: str = "") -> bool:
+        """向好友发送 FRIEND_DELETE 消息通知对方删除自己。"""
+        friend = self.friend_db.get_friend(friend_name)
+        if not friend:
+            logger.warning("[MessageService] 找不到好友资料，无法发送删除通知 [%s]", friend_name)
+            return False
+
+        profile = self.friend_db.get_my_profile()
+        sender_name = profile.get("name", "Unknown")
+        sender_user_id = profile.get("user_id", "")
+
+        delete_msg = {
+            "type": Protocol.FRIEND_DELETE,
+            "msg_id": str(uuid.uuid4()),
+            "profile": {
+                "user_id": sender_user_id,
+                "name": sender_name,
+            }
+        }
+
+        port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
+        target_ip = friend_ip or friend.get("ip", "")
+
+        logger.info("[MessageService] 尝试发送 FRIEND_DELETE 通知给 %s", friend_name)
+
+        # 1) Try name-based lookup
+        if self._send_data_to_friend(friend_name, delete_msg):
+            return True
+
+        # 2) Try endpoint-based lookup
+        if target_ip:
+            endpoint = f"{target_ip}:{port}" if port else target_ip
+            if self._send_data_to_friend(endpoint, delete_msg):
+                return True
+
+        # 3) Establish fresh outbound connection to send if not connected
+        if target_ip:
+            try:
+                conn_ok = self.connection_manager.connect_to_friend(
+                    target_ip, port, friend_name
+                )
+                if conn_ok:
+                    time.sleep(0.3)
+                    if self._send_data_to_friend(friend_name, delete_msg):
+                        return True
+            except Exception as e:
+                logger.error("[MessageService] 发送删除通知时主动连接 %s:%s 失败: %s", target_ip, port, e)
+
+        return False
+
     def send_file(
         self,
         to_name: str,
@@ -489,8 +541,10 @@ class MessageService:
             logger.warning("[MessageService] 文件不存在: %s", file_path)
             return False
         if require_online and not self.connection_manager.is_friend_online(to_name):
-            logger.warning("[MessageService] 好友不在线，无法发送文件: %s", to_name)
-            return False
+            logger.info("[MessageService] 文件发送前主动重连: %s", to_name)
+            if not self._reconnect_file_peer(to_name):
+                logger.warning("[MessageService] 好友不在线，无法发送文件: %s", to_name)
+                return False
 
         my_profile = self.friend_db.get_my_profile()
         my_name = my_profile.get("name", "Unknown")
@@ -517,7 +571,7 @@ class MessageService:
             "avatar_owner": avatar_owner or my_name,
             "avatar_user_id": avatar_user_id or my_user_id,
         }
-        
+
         complete = {
             "type": self.FILE_COMPLETE,
             "file_id": file_id,
@@ -552,7 +606,14 @@ class MessageService:
                     if not self._reconnect_file_peer(to_name):
                         continue
 
+                if not self.connection_manager.is_friend_online(to_name):
+                    if not self._reconnect_file_peer(to_name):
+                        time.sleep(min(1.5, 0.25 * attempt))
+                        continue
+
                 if not self._send_data_to_friend(to_name, offer):
+                    self._reconnect_file_peer(to_name)
+                    time.sleep(min(1.5, 0.25 * attempt))
                     continue
 
                 completed_chunks, reliable, binary_chunks = self._negotiate_file_resume(
@@ -910,6 +971,8 @@ class MessageService:
                 self._handle_friend_request(from_ip, data)
             elif msg_type == self.FRIEND_ACCEPT:
                 self._handle_friend_accept(from_ip, data)
+            elif msg_type == Protocol.FRIEND_DELETE:
+                self._handle_friend_delete(from_ip, data)
             elif msg_type == self.HEARTBEAT:
                 self._handle_heartbeat(from_ip, data)
             elif msg_type == self.PROFILE_UPDATE_NOTICE:
@@ -942,6 +1005,10 @@ class MessageService:
                 self._handle_moments_sync_req(from_ip, data)
             elif msg_type == self.MOMENTS_SYNC_RESP:
                 self._handle_moments_sync_resp(from_ip, data)
+            elif msg_type == "MOMENT_COMMENT":
+                self._handle_moment_comment(from_ip, data)
+            elif msg_type == "MOMENT_DELETE":
+                self._handle_moment_delete(from_ip, data)
             elif msg_type == self.FILE_CANCEL:
                 self._handle_file_cancel(from_ip, data)
             elif msg_type == self.FILE_DECLINE:
@@ -1172,12 +1239,14 @@ class MessageService:
                 "tags": profile.get("tags", []),
                 "bio": profile.get("bio", ""),
                 "background": profile.get("background", ""),
+                "card_bg": profile.get("card_bg", ""),
             },
             "version": self._my_profile_version(),
         }
         if requester:
             self._send_data_to_friend_with_fallback(requester, payload, from_ip)
             self._send_avatar_to_friend(requester)
+            self._send_card_bg_to_friend(requester)
 
     def _handle_profile_sync_resp(self, from_ip: str, data: Dict[str, Any]):
         profile = dict(data.get("profile") or {})
@@ -1199,6 +1268,7 @@ class MessageService:
             status=friend.get("status", "accepted"),
             avatar=friend.get("avatar", ""),
             background=profile.get("background", friend.get("background", "")),
+            card_bg=profile.get("card_bg", friend.get("card_bg", "")),
         )
         user_id = profile.get("user_id", "")
         key = self._profile_update_key(name, user_id)
@@ -1289,12 +1359,26 @@ class MessageService:
             self.send_friend_accept(sender_name, from_ip)
             logger.info(f"[MessageService] 自动接受好友请求: {sender_name}")
 
+            self.add_system_notification(
+                title="好友申请通过 🤝",
+                content=f"已自动同意「{sender_name}」的好意申请，你们现在可以开始聊天了！",
+                category="success"
+            )
+
             if self.on_friend_accepted:
                 try:
                     self.on_friend_accepted(sender_name, from_ip)
                 except Exception as e:
                     logger.error(f"[MessageService] on_friend_accepted 回调异常: {e}")
         else:
+            # 检查是否已有处于 pending 状态的来向请求
+            existing_req = self.friend_db.get_friend_request(user_id=sender_user_id, name=sender_name)
+            is_already_pending = (
+                existing_req is not None
+                and existing_req.get("status") == "pending"
+                and existing_req.get("direction") == "incoming"
+            )
+
             self.friend_db.upsert_friend_request(
                 name=sender_name,
                 ip=from_ip,
@@ -1306,25 +1390,34 @@ class MessageService:
                 user_id=sender_user_id,
                 msg_id=msg_id,
             )
-            # 需要人工审核
-            logger.info(
-                f"[MessageService] 好友请求待审核: {sender_name} "
-                f"(条件匹配={conditions_matched})"
-            )
-            if self.on_friend_request:
-                try:
-                    profile = dict(profile)
-                    profile.setdefault("ip", from_ip)
+
+            if not is_already_pending:
+                # 首次收到，需要人工审核并通知
+                logger.info(
+                    f"[MessageService] 好友请求待审核: {sender_name} "
+                    f"(条件匹配={conditions_matched})"
+                )
+                self.add_system_notification(
+                    title="新好友申请 👤",
+                    content=f"收到来自「{sender_name}」的好友申请，快来同意吧！",
+                    category="friend_request"
+                )
+                if self.on_friend_request:
                     try:
-                        param_count = len(inspect.signature(self.on_friend_request).parameters)
-                    except (TypeError, ValueError):
-                        param_count = 2
-                    if param_count >= 3:
-                        self.on_friend_request(profile, conditions_matched, from_ip)
-                    else:
-                        self.on_friend_request(profile, conditions_matched)
-                except Exception as e:
-                    logger.error(f"[MessageService] on_friend_request 回调异常: {e}")
+                        profile = dict(profile)
+                        profile.setdefault("ip", from_ip)
+                        try:
+                            param_count = len(inspect.signature(self.on_friend_request).parameters)
+                        except (TypeError, ValueError):
+                            param_count = 2
+                        if param_count >= 3:
+                            self.on_friend_request(profile, conditions_matched, from_ip)
+                        else:
+                            self.on_friend_request(profile, conditions_matched)
+                    except Exception as e:
+                        logger.error(f"[MessageService] on_friend_request 回调异常: {e}")
+            else:
+                logger.info(f"[MessageService] 收到来自 {sender_name} 的重复好友请求，仅更新请求记录，不重复通知。")
 
     # ------------------------------------------------------------------ #
     #  FRIEND_ACCEPT 处理
@@ -1370,6 +1463,21 @@ class MessageService:
             )
             logger.info(f"[MessageService] 好友 {friend_name} 已存在，更新 IP")
         else:
+            # 只有当对方是我们主动请求过的好友（pending_sent）时，才接受 FRIEND_ACCEPT。
+            # 这能防止被删除的好友在连通时因自愈机制被自动加回。
+            status = self.friend_db.get_relationship_status(
+                user_id=friend_user_id,
+                name=friend_name,
+                ip=from_ip,
+                port=port,
+            )
+            if status != "pending_sent":
+                logger.info(
+                    f"[MessageService] 收到来自 {friend_name} 的 FRIEND_ACCEPT 消息，"
+                    f"但当前关系状态为 {status}，忽略添加好友。"
+                )
+                return
+
             self.friend_db.add_friend(
                 name=friend_name,
                 ip=from_ip,
@@ -1382,6 +1490,11 @@ class MessageService:
                 avatar=self._shared_avatar_reference(profile.get("avatar", "")),
             )
             logger.info(f"[MessageService] 好友已添加: {friend_name} ({from_ip})")
+            self.add_system_notification(
+                title="好友申请通过 🤝",
+                content=f"「{friend_name}」同意了您的好友申请，你们现在可以开始聊天了！",
+                category="success"
+            )
 
         self.friend_db.set_friend_request_status(
             "accepted",
@@ -1399,6 +1512,57 @@ class MessageService:
                 logger.error(f"[MessageService] on_friend_accepted 回调异常: {e}")
 
     # ------------------------------------------------------------------ #
+    #  FRIEND_DELETE 处理
+    # ------------------------------------------------------------------ #
+
+    def _handle_friend_delete(self, from_ip: str, data: Dict[str, Any]):
+        """处理好友主动删除我的通知。
+
+        将对方从我的好友列表和好友请求表中删除，并触发回调刷新 UI。
+        """
+        profile = data.get("profile", {})
+        friend_name = profile.get("name", "Unknown")
+        friend_user_id = profile.get("user_id", "")
+
+        logger.info(
+            f"[MessageService] 收到来自 {friend_name} 的 FRIEND_DELETE 消息，执行双向删除。"
+        )
+
+        # 1. 断开与该好友的任何活跃连接
+        if self.connection_manager:
+            friend = self.friend_db.get_friend(friend_name) or self.friend_db.get_friend_by_user_id(friend_user_id)
+            if friend:
+                ip = friend.get("ip")
+                port = friend.get("port")
+                if ip:
+                    endpoint = f"{ip}:{port}" if port else ip
+                    if hasattr(self.connection_manager, "disconnect_friend"):
+                        self.connection_manager.disconnect_friend(endpoint)
+
+        # 2. 从本地数据库中移除好友
+        if self.friend_db:
+            self.add_system_notification(
+                title="好友删除通知 ⚠️",
+                content=f"好友「{friend_name}」已将您从好友列表中删除。",
+                category="warning"
+            )
+            self.friend_db.remove_friend(friend_name)
+
+        # 3. 触发 UI 刷新回调
+        if self.on_friend_accepted:
+            try:
+                self.on_friend_accepted(friend_name, from_ip)
+            except Exception as e:
+                logger.error(f"[MessageService] handle_friend_delete 触发回调异常: {e}")
+
+        # 4. 触发删除通知回调
+        if self.on_friend_deleted:
+            try:
+                self.on_friend_deleted(friend_name)
+            except Exception as e:
+                logger.error(f"[MessageService] on_friend_deleted 回调异常: {e}")
+
+    # ------------------------------------------------------------------ #
     #  HEARTBEAT 处理
     # ------------------------------------------------------------------ #
 
@@ -1413,10 +1577,10 @@ class MessageService:
             old_ip = friend.get("ip", "")
             old_port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or 0)
             new_port = int(data.get("port", old_port) or old_port)
-            
+
             new_avatar = self._shared_avatar_reference(data.get("avatar", ""))
             user_id = data.get("user_id", friend.get("user_id", ""))
-            
+
             if old_ip != from_ip or (new_port and old_port != new_port) or friend.get("avatar", "") != new_avatar:
                 self.friend_db.add_friend(
                     name=friend_name,
@@ -1452,6 +1616,21 @@ class MessageService:
         if not file_id or not from_name:
             return
 
+        # Prevent duplicate handling of the same file offer ID
+        with self._file_offer_lock:
+            if file_id in self._pending_file_offers:
+                return
+        with self._file_lock:
+            if file_id in self._incoming_files:
+                return
+
+        try:
+            for notif in self.friend_db.get_system_notifications():
+                if f"[文件ID:{file_id}]" in notif.get("content", ""):
+                    return
+        except Exception:
+            pass
+
         purpose = data.get("purpose", "chat_file")
 
         # Always create the incoming state so chunks can be buffered.
@@ -1472,6 +1651,21 @@ class MessageService:
         file_size = int(data.get("size", 0) or 0)
         with self._file_offer_lock:
             self._pending_file_offers[file_id] = True
+
+        # Add a persistent system notification so that the file offer is visible
+        # in the notification center and survives restarts/switches.
+        sz = file_size
+        sz_str = f"{sz} B"
+        for unit in ("B", "KiB", "MiB", "GiB"):
+            if sz < 1024 or unit == "GiB":
+                sz_str = f"{sz:.0f} {unit}" if unit == "B" else f"{sz:.1f} {unit}"
+                break
+            sz /= 1024
+        self.add_system_notification(
+            title="文件传输请求 📁",
+            content=f"收到来自「{from_name}」的文件传输请求，文件名：「{filename}」({sz_str})。\n[文件ID:{file_id}]",
+            category="file_offer"
+        )
 
         if self.on_file_offer_received:
             try:
@@ -1552,7 +1746,7 @@ class MessageService:
                 )
             except Exception:
                 logger.debug("Failed to save local decline chat message", exc_info=True)
-        
+
         if self.on_file_status_changed:
             try:
                 self.on_file_status_changed(file_id, "已拒绝接收")
@@ -1895,6 +2089,21 @@ class MessageService:
             self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
             return
 
+        if purpose == "card_bg":
+            self.friend_db.update_friend_card_bg(
+                name=avatar_owner or from_name,
+                user_id=avatar_user_id,
+                card_bg=final_path,
+            )
+            logger.info("好友名片背景接收完成: %s -> %s", avatar_owner or from_name, final_path)
+            if self.on_file_received:
+                try:
+                    self.on_file_received(avatar_owner or from_name, final_path, timestamp)
+                except Exception:
+                    logger.debug("[MessageService] on_file_received 回调异常", exc_info=True)
+            self._send_file_complete_ack(from_name, file_id, True, fallback=from_ip)
+            return
+
         content = self._file_message_content(filename, final_path, file_id)
 
         self.friend_db.save_chat_message(
@@ -1905,6 +2114,11 @@ class MessageService:
             msg_id=file_id,
         )
         logger.info("[MessageService] 文件接收完成: %s", final_path)
+        self.add_system_notification(
+            title="文件接收通知 📁",
+            content=f"成功接收来自「{from_name}」的文件：{filename}\n保存位置：{final_path}",
+            category="info"
+        )
         with self._file_lock:
             self._completed_file_transfers[file_id] = {
                 "final_path": final_path,
@@ -2089,6 +2303,26 @@ class MessageService:
             require_online=False,
         )
 
+    def _send_card_bg_to_friend(self, friend_name: str) -> bool:
+        profile = self.friend_db.get_my_profile()
+        card_bg_path = (profile.get("card_bg") or "").strip()
+        if card_bg_path and not os.path.isabs(card_bg_path):
+            candidate = get_app_paths().assets_dir / card_bg_path.replace("\\", "/")
+            if candidate.is_file():
+                card_bg_path = str(candidate)
+        if not card_bg_path or not os.path.isfile(card_bg_path):
+            return False
+        if not card_bg_path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
+            return False
+        return self.send_file(
+            friend_name,
+            card_bg_path,
+            purpose="card_bg",
+            avatar_owner=profile.get("name", ""),
+            avatar_user_id=profile.get("user_id", ""),
+            require_online=False,
+        )
+
     def broadcast_avatar_update(self) -> int:
         """Push the current avatar file to all online friends immediately."""
         sent = 0
@@ -2128,6 +2362,18 @@ class MessageService:
             return True
         if fallback and fallback != friend_name:
             return self._send_data_to_friend(fallback, data)
+        return False
+
+    def add_system_notification(self, title: str, content: str, category: str = "info") -> bool:
+        """添加一条系统通知并调用回调刷新 UI。"""
+        if self.friend_db:
+            ok = self.friend_db.add_system_notification(title, content, category)
+            if ok and self.on_notifications_changed:
+                try:
+                    self.on_notifications_changed()
+                except Exception as e:
+                    logger.error(f"[MessageService] on_notifications_changed 回调异常: {e}")
+            return ok
         return False
 
     def _online_friend_name(self, friend: Any) -> str:
@@ -2216,9 +2462,9 @@ class MessageService:
         my_name = self.runtime.device_name
         if my_name not in members:
             members.append(my_name)
-        
+
         self.friend_db.save_group(group_id, group_name, members, owner=my_name, only_owner_manage=0)
-        
+
         payload = {
             "type": self.GROUP_CREATE,
             "group_id": group_id,
@@ -2227,7 +2473,7 @@ class MessageService:
             "owner": my_name,
             "only_owner_manage": 0,
         }
-        
+
         for m in members:
             if m != my_name:
                 self._send_data_to_friend(m, payload)
@@ -2237,13 +2483,13 @@ class MessageService:
         group = self.friend_db.get_group(group_id)
         if not group:
             return False
-        
+
         my_name = self.runtime.device_name
         msg_id = msg_id or str(uuid.uuid4())
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        
+
         self.friend_db.save_group_chat_message(msg_id, group_id, my_name, content, timestamp)
-        
+
         payload = {
             "type": self.GROUP_CHAT,
             "msg_id": msg_id,
@@ -2252,7 +2498,7 @@ class MessageService:
             "content": content,
             "timestamp": timestamp,
         }
-        
+
         members = group.get("members", [])
         for m in members:
             if m != my_name:
@@ -2267,7 +2513,7 @@ class MessageService:
             if friend_name in members and my_name in members:
                 history = self.friend_db.get_group_chat_history(g["group_id"], limit=1)
                 last_timestamp = history[0]["timestamp"] if history else "1970-01-01 00:00:00"
-                
+
                 payload = {
                     "type": self.GROUP_SYNC_REQ,
                     "group_id": g["group_id"],
@@ -2287,7 +2533,7 @@ class MessageService:
         my_name = self.runtime.device_name
         post_id = str(uuid.uuid4())
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        
+
         media_data = ""
         if media_path and os.path.exists(media_path):
             try:
@@ -2296,9 +2542,9 @@ class MessageService:
                     media_data = base64.b64encode(f.read()).decode("utf-8")
             except Exception:
                 pass
-        
+
         self.friend_db.save_moment(post_id, my_name, content, media_path, timestamp)
-        
+
         payload = {
             "type": self.MOMENTS_PUBLISH,
             "post_id": post_id,
@@ -2308,12 +2554,38 @@ class MessageService:
             "media_data": media_data,
             "timestamp": timestamp,
         }
-        
+
         for friend in self.connection_manager.get_online_friends():
             friend_name = self._online_friend_name(friend)
             if friend_name:
                 self._send_data_to_friend(friend_name, payload)
         return True
+
+    def publish_moment_comment(self, post_id: str, content: str) -> bool:
+        if not self.friend_db:
+            return False
+        comment_id = f"comment_{uuid.uuid4().hex}"
+        my_name = self.runtime.device_name
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+        ok = self.friend_db.save_moment_comment(comment_id, post_id, my_name, content, timestamp)
+        if ok:
+            payload = {
+                "type": "MOMENT_COMMENT",
+                "comment_id": comment_id,
+                "post_id": post_id,
+                "author": my_name,
+                "content": content,
+                "timestamp": timestamp,
+            }
+            for friend in self.connection_manager.get_online_friends():
+                friend_name = self._online_friend_name(friend)
+                if friend_name:
+                    self._send_data_to_friend(friend_name, payload)
+            if hasattr(self.runtime, "on_moments_changed") and self.runtime.on_moments_changed:
+                self.runtime.on_moments_changed()
+            return True
+        return False
 
     def _handle_group_create(self, from_ip: str, data: Dict[str, Any]):
         group_id = data.get("group_id", "")
@@ -2332,25 +2604,25 @@ class MessageService:
         sender = data.get("sender", "")
         content = data.get("content", "")
         timestamp = data.get("timestamp", "")
-        
+
         if not group_id or not sender:
             return
-        
+
         if not self.friend_db.get_group(group_id):
             self.friend_db.save_group(group_id, f"群聊_{group_id[:8]}", [sender, self.runtime.device_name])
-        
+
         self.friend_db.save_group_chat_message(msg_id, group_id, sender, content, timestamp)
-        
+
         if hasattr(self.runtime, "on_group_message_received") and self.runtime.on_group_message_received:
             self.runtime.on_group_message_received(group_id, sender, content, timestamp)
 
     def _handle_group_sync_req(self, from_ip: str, data: Dict[str, Any]):
         group_id = data.get("group_id", "")
         last_timestamp = data.get("last_timestamp", "1970-01-01 00:00:00")
-        
+
         if not group_id:
             return
-        
+
         # Get messages newer than last_timestamp
         conn = self.friend_db.conn
         cursor = conn.cursor()
@@ -2360,7 +2632,7 @@ class MessageService:
         )
         rows = cursor.fetchall()
         messages = [dict(r) for r in rows]
-        
+
         friend_name = self._get_friend_name_by_ip(from_ip)
         if friend_name:
             payload = {
@@ -2373,21 +2645,21 @@ class MessageService:
     def _handle_group_sync_resp(self, from_ip: str, data: Dict[str, Any]):
         group_id = data.get("group_id", "")
         messages = data.get("messages", [])
-        
+
         updated = False
         for msg in messages:
             msg_id = msg.get("msg_id", "")
             sender = msg.get("sender", "")
             content = msg.get("content", "")
             timestamp = msg.get("timestamp", "")
-            
+
             if not msg_id or not group_id:
                 continue
-            
+
             if not self.friend_db.has_group_message(msg_id):
                 self.friend_db.save_group_chat_message(msg_id, group_id, sender, content, timestamp)
                 updated = True
-                
+
                 if hasattr(self.runtime, "on_group_message_received") and self.runtime.on_group_message_received:
                     self.runtime.on_group_message_received(group_id, sender, content, timestamp)
 
@@ -2398,10 +2670,10 @@ class MessageService:
         media_name = data.get("media_name", "")
         media_data = data.get("media_data", "")
         timestamp = data.get("timestamp", "")
-        
+
         if not post_id or not author:
             return
-        
+
         local_media_path = ""
         if media_name and media_data:
             try:
@@ -2412,17 +2684,28 @@ class MessageService:
                 local_media_path = save_path
             except Exception as e:
                 logger.error("保存空间图片失败: %s", e)
-        
+
         self.friend_db.save_moment(post_id, author, content, local_media_path, timestamp)
-        
+
         if hasattr(self.runtime, "on_moments_changed") and self.runtime.on_moments_changed:
             self.runtime.on_moments_changed()
+
+    def _handle_moment_comment(self, from_ip: str, data: Dict[str, Any]):
+        comment_id = data.get("comment_id")
+        post_id = data.get("post_id")
+        author = data.get("author")
+        content = data.get("content")
+        timestamp = data.get("timestamp")
+        if comment_id and post_id and author and content and timestamp:
+            self.friend_db.save_moment_comment(comment_id, post_id, author, content, timestamp)
+            if hasattr(self.runtime, "on_moments_changed") and self.runtime.on_moments_changed:
+                self.runtime.on_moments_changed()
 
     def _handle_moments_sync_req(self, from_ip: str, data: Dict[str, Any]):
         my_name = self.runtime.device_name
         moments = self.friend_db.get_moments(limit=50)
         my_moments = [m for m in moments if m["author"] == my_name]
-        
+
         posts = []
         for m in my_moments:
             media_path = m.get("media_path", "")
@@ -2442,12 +2725,20 @@ class MessageService:
                 "media_data": media_data,
                 "timestamp": m["timestamp"],
             })
-        
+
+        # Collect all comments for each of our moments
+        my_comments = []
+        for m in my_moments:
+            comments = self.friend_db.get_moment_comments(m["post_id"]) or []
+            my_comments.extend(comments)
+
         payload = {
             "type": self.MOMENTS_SYNC_RESP,
             "posts": posts,
+            "comments": my_comments,
+            "sender_name": my_name,
         }
-        
+
         friend_name = data.get("sender_name", "") or self._get_friend_name_by_ip(from_ip)
         if friend_name:
             self._send_data_to_friend(friend_name, payload)
@@ -2455,6 +2746,21 @@ class MessageService:
     def _handle_moments_sync_resp(self, from_ip: str, data: Dict[str, Any]):
         posts = data.get("posts", [])
         updated = False
+
+        friend_name = data.get("sender_name", "") or self._get_friend_name_by_ip(from_ip)
+        if friend_name and self.friend_db:
+            try:
+                local_moments = self.friend_db.get_moments(limit=200)
+                friend_local_moments = [m for m in local_moments if m.get("author") == friend_name]
+                active_post_ids = {p.get("post_id") for p in posts if p.get("post_id")}
+                for m in friend_local_moments:
+                    pid = m.get("post_id")
+                    if pid and pid not in active_post_ids:
+                        self.friend_db.delete_moment(pid)
+                        updated = True
+            except Exception:
+                pass
+
         for p in posts:
             post_id = p.get("post_id", "")
             author = p.get("author", "")
@@ -2462,10 +2768,10 @@ class MessageService:
             media_name = p.get("media_name", "")
             media_data = p.get("media_data", "")
             timestamp = p.get("timestamp", "")
-            
+
             if not post_id or not author:
                 continue
-            
+
             if not self.friend_db.has_moment(post_id):
                 local_media_path = ""
                 if media_name and media_data:
@@ -2477,10 +2783,21 @@ class MessageService:
                         local_media_path = save_path
                     except Exception:
                         pass
-                
+
                 self.friend_db.save_moment(post_id, author, content, local_media_path, timestamp)
                 updated = True
-        
+
+        comments = data.get("comments") or []
+        for c in comments:
+            cid = c.get("comment_id")
+            pid = c.get("post_id")
+            cauth = c.get("author")
+            ccont = c.get("content")
+            cts = c.get("timestamp")
+            if cid and pid and cauth and ccont and cts:
+                if self.friend_db.save_moment_comment(cid, pid, cauth, ccont, cts):
+                    updated = True
+
         if updated and hasattr(self.runtime, "on_moments_changed") and self.runtime.on_moments_changed:
             self.runtime.on_moments_changed()
 
@@ -2509,7 +2826,7 @@ class MessageService:
             if sender:
                 filename = sender["filename"]
                 to_name = sender["to_name"]
-                
+
         from_name = ""
         with self._file_lock:
             state = self._incoming_files.pop(file_id, None)
@@ -2523,7 +2840,7 @@ class MessageService:
                     os.remove(part_path)
                 except Exception:
                     pass
-                        
+
         if to_name:
             cancel_msg = {
                 "type": self.FILE_CANCEL,
@@ -2536,7 +2853,7 @@ class MessageService:
                 "file_id": file_id,
             }
             self._send_data_to_friend(from_name, cancel_msg)
-            
+
         try:
             old_content = self.friend_db.get_chat_message_content(file_id)
             if old_content:
@@ -2639,7 +2956,7 @@ class MessageService:
                 self.on_file_status_changed(file_id, "对方已拒绝")
             except Exception:
                 pass
-                        
+
         logger.info("[MessageService] 对端已取消文件传输: %s", file_id)
         if hasattr(self.runtime, "on_friends_changed") and self.runtime.on_friends_changed:
             self.runtime.on_friends_changed()
@@ -2649,7 +2966,7 @@ class MessageService:
         file_id = data.get("file_id", "")
         if not file_id:
             return
-        
+
         try:
             old_content = self.friend_db.get_chat_message_content(file_id)
             if old_content:
@@ -2690,13 +3007,13 @@ class MessageService:
                 final_path = self._unique_receive_path(filename)
             else:
                 final_path = candidate
-            
+
             import tempfile
             part_path = os.path.join(
                 tempfile.gettempdir(),
                 f"meeting_in_beiyang_{file_id}_{filename}.part"
             )
-        
+
         completed_chunks = 0
         if state and state.get("already_complete"):
             completed_chunks = int(state.get("chunk_count", 0) or 0)
@@ -2712,7 +3029,7 @@ class MessageService:
                 if state else self.FILE_CHUNK_SIZE
             )
             completed_chunks = existing_size // chunk_size
-            
+
         payload = {
             "type": self.FILE_RESUME_RESP,
             "file_id": file_id,
@@ -2720,7 +3037,7 @@ class MessageService:
             "supports_ack": True,
             "supports_binary": True,
         }
-        
+
         friend_name = self._get_friend_name_by_ip(from_ip) or state_from_name
         if friend_name:
             self._send_data_to_friend_with_fallback(friend_name, payload, from_ip)
@@ -2733,7 +3050,7 @@ class MessageService:
         completed_chunks = int(data.get("completed_chunks", 0) or 0)
         if not file_id:
             return
-            
+
         with self._file_lock:
             self._file_resume_progress[file_id] = completed_chunks
             self._file_ack_capable[file_id] = bool(data.get("supports_ack", False))
@@ -2743,3 +3060,51 @@ class MessageService:
             event = self._file_resume_events.get(file_id)
             if event:
                 event.set()
+
+    def publish_moment_delete(self, post_id: str) -> bool:
+        if not self.friend_db:
+            return False
+
+        ok = self.friend_db.delete_moment(post_id)
+        if not ok:
+            return False
+
+        payload = {
+            "type": "MOMENT_DELETE",
+            "post_id": post_id,
+            "sender_name": self.runtime.device_name,
+        }
+        for f in self.connection_manager.get_online_friends():
+            try:
+                self._send_data_to_friend(f["name"], payload)
+            except Exception:
+                pass
+
+        if hasattr(self.runtime, "on_moments_changed") and self.runtime.on_moments_changed:
+            self.runtime.on_moments_changed()
+
+        return True
+
+    def _handle_moment_delete(self, from_ip: str, data: Dict[str, Any]):
+        post_id = data.get("post_id", "")
+        if not post_id:
+            return
+
+        sender_name = data.get("sender_name", "") or self._get_friend_name_by_ip(from_ip)
+        if self.friend_db:
+            try:
+                moments = self.friend_db.get_moments(limit=100)
+                target = None
+                for m in moments:
+                    if m.get("post_id") == post_id:
+                        target = m
+                        break
+
+                if target:
+                    author = target.get("author", "")
+                    if author == sender_name or not sender_name:
+                        self.friend_db.delete_moment(post_id)
+                        if hasattr(self.runtime, "on_moments_changed") and self.runtime.on_moments_changed:
+                            self.runtime.on_moments_changed()
+            except Exception:
+                pass

@@ -42,6 +42,7 @@ class Protocol:
     FRIEND_REQUEST = "FRIEND_REQUEST"       # 发送好友请求
     FRIEND_ACCEPT = "FRIEND_ACCEPT"         # 接受好友请求
     FRIEND_REJECT = "FRIEND_REJECT"         # 拒绝好友请求
+    FRIEND_DELETE = "FRIEND_DELETE"         # 删除好友关系通知
     CHAT_MESSAGE = "CHAT_MESSAGE"           # 文本聊天消息
     RELAY_MESSAGE = "RELAY_MESSAGE"         # 转发消息（洪泛中继）
     HEARTBEAT = "HEARTBEAT"                 # 心跳 / IP 宣告
@@ -410,6 +411,24 @@ class Protocol:
             Protocol.FRIEND_REJECT,
             name=name,
             reason=reason,
+        )
+
+    # -- 便捷方法：FRIEND_DELETE ---------------------------------------- #
+
+    @staticmethod
+    def create_friend_delete(name: str) -> bytes:
+        """
+        创建 FRIEND_DELETE 消息（主动删除好友关系通知）。
+
+        Args:
+            name: 删除方用户名。
+
+        Returns:
+            带长度头的完整消息字节串。
+        """
+        return Protocol.create_message(
+            Protocol.FRIEND_DELETE,
+            name=name,
         )
 
     # -- 便捷方法：CHAT_MESSAGE ----------------------------------------- #

@@ -1,6 +1,6 @@
 [project]
 name = "meeting-in-beiyang"
-version = "1.0.0"
+version = "1.8.95"
 description = "相识北洋校园局域网社交应用"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,7 +20,7 @@ module = "main"
 [tool.flet.android]
 min_sdk_version = 24
 target_sdk_version = 35
-adaptive_icon_background = "#673AB7"
+adaptive_icon_background = "#FFFFFF"
 
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true

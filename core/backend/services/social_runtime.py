@@ -69,9 +69,11 @@ class SocialRuntime:
         self.on_message_received: Optional[Callable[[str, str, str, str], None]] = None
         self.on_friend_request: Optional[Callable[..., None]] = None
         self.on_friend_accepted: Optional[Callable[[str, str], None]] = None
+        self.on_friend_deleted: Optional[Callable[[str], None]] = None
         self.on_error: Optional[Callable[[str], None]] = None
         self.on_group_message_received: Optional[Callable[[str, str, str, str], None]] = None
         self.on_moments_changed: Optional[Callable[[], None]] = None
+        self.on_notifications_changed: Optional[Callable[[], None]] = None
 
     def initialize(self):
         db_path = self.paths.resolve_db_path(self.config.db_path)
@@ -315,6 +317,8 @@ class SocialRuntime:
         self.message_service.on_message_received = self._handle_message_received
         self.message_service.on_friend_request = self._handle_friend_request
         self.message_service.on_friend_accepted = self._handle_friend_accepted
+        self.message_service.on_friend_deleted = self._handle_friend_deleted
+        self.message_service.on_notifications_changed = self._handle_notifications_changed
         self.message_service.on_file_received = self._handle_file_received
 
     def _handle_device_found(self, device_info):
@@ -343,6 +347,13 @@ class SocialRuntime:
 
             def flush_pending():
                 try:
+                    # Self-healing reconciliation: if we have them as an accepted friend,
+                    # make sure they also have us as a friend by sending them FRIEND_ACCEPT.
+                    if self.friend_db:
+                        friend = self.friend_db.get_friend(name)
+                        if friend and friend.get("status") == "accepted":
+                            self.message_service.send_friend_accept(name)
+
                     self.message_service.flush_pending_messages(name)
                     self.message_service.sync_groups_with_friend(name)
                     self.message_service.sync_moments_with_friend(name)
@@ -382,9 +393,21 @@ class SocialRuntime:
         if self.on_friend_accepted:
             self.on_friend_accepted(friend_name, friend_ip)
 
+    def _handle_friend_deleted(self, friend_name):
+        if self.on_online_changed:
+            self.on_online_changed()
+        if self.on_friends_changed:
+            self.on_friends_changed()
+        if self.on_friend_deleted:
+            self.on_friend_deleted(friend_name)
+
     def _handle_file_received(self, _friend_name, _path, _timestamp):
         if self.on_friends_changed:
             self.on_friends_changed()
+
+    def _handle_notifications_changed(self):
+        if self.on_notifications_changed:
+            self.on_notifications_changed()
 
     def _handle_error(self, message: str):
         if self.on_error:

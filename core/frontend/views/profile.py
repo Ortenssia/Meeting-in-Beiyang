@@ -11,6 +11,13 @@ from pathlib import Path
 
 import flet as ft
 
+from core.backend.services.update_service import (
+    UpdateCheckError,
+    check_for_updates,
+    current_app_version,
+    default_manifest_url,
+)
+
 from .. import theme as T
 from ..image_crop import CropState, image_size, render_crop
 
@@ -184,6 +191,7 @@ class ProfileView:
         self._draft_bio = ""
         self._draft_avatar = ""
         self._draft_bg = ""
+        self._draft_card_bg = ""
         self._draft_user_id = ""
 
         self.profile_display_name = ft.Text("", size=T.FS_TITLE, weight=ft.FontWeight.W_800)
@@ -246,6 +254,14 @@ class ProfileView:
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
         )
+        self.card_bg_in = ft.TextField(
+            label="自定义名片背景路径",
+            on_change=lambda e: setattr(self, '_draft_card_bg', e.control.value or ''),
+            on_blur=lambda _e: self._auto_save("card_bg"),
+            border_radius=12,
+            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+        )
         self.bg_fit_dd = ft.Dropdown(
             label="填充模式",
             value="cover",
@@ -298,9 +314,14 @@ class ProfileView:
         )
         self.bg_opacity_dd.on_select = self._on_bg_param_change
 
-        self.bg_params_row = ft.Row(
-            [self.bg_fit_dd, self.bg_align_dd, self.bg_opacity_dd],
-            spacing=T.SP_SM,
+        self.bg_opacity_dd.label = None
+        self.bg_opacity_dd.hint_text = "选择背景透明度..."
+        self.bg_params_row = ft.Column(
+            [
+                ft.Text("背景透明度", size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT),
+                self.bg_opacity_dd,
+            ],
+            spacing=4,
         )
         self.bio_in = ft.TextField(
             label="个人简介",
@@ -355,6 +376,7 @@ class ProfileView:
             on_change=lambda _e: self._auto_save("conditions"),
             active_color=ft.Colors.DEEP_PURPLE_500,
         )
+        self._auto_accept_layout = ft.Container()
 
         # Profile update mode cards component
         self._update_mode_value = "auto"
@@ -404,7 +426,7 @@ class ProfileView:
         # System settings tab controls
         self.settings_device_name = ft.Text("--", size=T.FS_BODY, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE)
         self.settings_tcp_port = ft.TextField(
-            label="TCP 端口", value="7779",
+            value="7779",
             keyboard_type=ft.KeyboardType.NUMBER, width=120,
             border_radius=10, border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
@@ -414,6 +436,34 @@ class ProfileView:
         self.settings_tcp_hint = ft.Text("", size=T.FS_CAPTION)
         self.settings_pending_count = ft.Text("0 条消息", size=T.FS_BODY, weight=ft.FontWeight.BOLD, color=ft.Colors.DEEP_PURPLE_400)
         self.settings_receive_dir = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True, overflow=ft.TextOverflow.ELLIPSIS)
+        self.settings_receive_note = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.receive_dir_button = ft.ElevatedButton(
+            "选择保存目录",
+            icon=ft.Icons.FOLDER_OPEN_ROUNDED,
+            on_click=self._choose_receive_dir,
+            bgcolor=ft.Colors.DEEP_PURPLE_500,
+            color=ft.Colors.WHITE,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+        )
+        self.current_version = current_app_version(self.app.paths.project_root)
+        self.update_manifest_url = ft.TextField(
+            label=None,
+            hint_text="latest.json 地址，例如 GitHub Release/Pages 的直链",
+            border_radius=12,
+            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            content_padding=10,
+            expand=True,
+        )
+        self.update_status = ft.Text("", size=T.FS_CAPTION)
+        self.update_check_btn = ft.ElevatedButton(
+            "检查更新",
+            icon=ft.Icons.SYSTEM_UPDATE_ROUNDED,
+            on_click=self._check_updates,
+            bgcolor=ft.Colors.DEEP_PURPLE_500,
+            color=ft.Colors.WHITE,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+        )
         self._theme_selector_row = ft.Container()
 
         self._built = None
@@ -478,9 +528,9 @@ class ProfileView:
                 ft.Text("个性化主题", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
                 ft.Text("点击选择系统主题色：", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
                 self._theme_selector_row,
-                
+
                 ft.Divider(height=24, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
-                
+
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=ft.Colors.DEEP_PURPLE_400, size=18),
@@ -488,7 +538,7 @@ class ProfileView:
                     ],
                     spacing=6,
                 ),
-                ft.Text("相识北洋 版本 3.0.0", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Text(f"相识北洋 版本 {self.current_version}", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
                 ft.Text("P2P 局域网无网社交平台", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
                 ft.Text("洪泛中继路由 · 离线消息漫游", size=10, color=ft.Colors.ON_SURFACE_VARIANT),
             ],
@@ -506,16 +556,20 @@ class ProfileView:
             return c
 
         # Right Column: Unified scrolling form sections with elegant divider lines
+        self.name_in.col = {"sm": 12, "md": 6}
+        self.user_id_in.col = {"sm": 12, "md": 6}
+        self.basic_fields_layout = ft.ResponsiveRow(
+            [self.name_in, self.user_id_in],
+            columns=12,
+            spacing=T.SP_MD,
+            run_spacing=T.SP_SM,
+        )
         self.right_panel = ft.Column(
             [
                 # Section 1: 基本资料
                 make_section(ft.Column([
                     ft.Text("基本资料", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                    ft.Row(
-                        [self.name_in, self.user_id_in],
-                        spacing=T.SP_MD,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
-                    ),
+                    self.basic_fields_layout,
                     ft.Text(
                         "用户ID留空则自动生成；修改后旧ID将不再被好友识别",
                         size=11,
@@ -524,9 +578,9 @@ class ProfileView:
                     self._path_row("头像路径", self.avatar_in, "选择并裁剪"),
                     self.default_avatars_row,
                 ], spacing=12)),
-                
+
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
-                
+
                 # Section 2: 个性展示
                 make_section(ft.Column([
                     ft.Text("个性展示", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
@@ -534,9 +588,9 @@ class ProfileView:
                     ft.Container(height=4),
                     self.bio_in,
                 ], spacing=12)),
-                
+
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
-                
+
                 # Section 3: 自动同意匹配条件与同步偏好
                 make_section(ft.Column([
                     ft.Text("自动同意匹配条件", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
@@ -547,21 +601,37 @@ class ProfileView:
                     ),
                     self.req_input,
                     self.opt_input,
-                    ft.Row(
-                        [
-                            ft.Container(content=self.min_match_row, expand=True),
-                            self.auto_accept,
-                        ],
-                        spacing=20,
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    ),
+                    self._auto_accept_layout,
                     ft.Container(height=8),
                     self._update_mode_container,
                 ], spacing=12)),
-                
+
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
-                
-                # Section 4: 网络与设备
+
+                # Section 4: 应用更新
+                make_section(ft.Column([
+                    ft.Text("应用更新", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                    self._setting_row("当前版本", ft.Text(self.current_version, size=T.FS_BODY, weight=ft.FontWeight.BOLD)),
+                    ft.Text("更新地址", size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Row(
+                        [
+                            self.update_manifest_url,
+                            self.update_check_btn,
+                        ],
+                        spacing=T.SP_SM,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    self.update_status,
+                    ft.Text(
+                        "建议使用 GitHub Releases/Pages 托管 latest.json，APK/EXE 作为 Release assets。",
+                        size=11,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                ], spacing=12)),
+
+                ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
+
+                # Section 5: 网络与设备
                 make_section(ft.Column([
                     ft.Text("网络与设备", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
                     self._setting_row("本机主机名", self.settings_device_name),
@@ -582,26 +652,21 @@ class ProfileView:
                     self.settings_tcp_hint,
                     self._setting_row("UDP 广播端口", self.settings_udp_port),
                 ], spacing=12)),
-                
+
                 ft.Divider(height=32, thickness=1, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
-                
-                # Section 5: 文件接收与背景
+
+                # Section 6: 文件接收与背景
                 make_section(ft.Column([
                     ft.Text("文件接收与背景", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
                     self._setting_row("保存位置", self.settings_receive_dir),
+                    self.settings_receive_note,
                     ft.Row(
                         [
-                            ft.ElevatedButton(
-                                "选择保存目录",
-                                icon=ft.Icons.FOLDER_OPEN_ROUNDED,
-                                on_click=self._choose_receive_dir,
-                                bgcolor=ft.Colors.DEEP_PURPLE_500,
-                                color=ft.Colors.WHITE,
-                                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
-                            ),
+                            self.receive_dir_button,
                         ]
                     ),
                     ft.Divider(height=24, thickness=1, color=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
+                    self._path_row("名片背景", self.card_bg_in, "选择并裁剪"),
                     self._path_row("背景图片", self.bg_in, "选择并裁剪"),
                     self.bg_params_row,
                 ], spacing=12)),
@@ -613,9 +678,9 @@ class ProfileView:
 
         self.main_layout = ft.Container(
             expand=True,
-            padding=ft.Padding.only(left=20, right=20, top=10, bottom=20),
+            padding=ft.Padding.only(left=8, right=8, top=6, bottom=12),
         )
-        
+
         return self.main_layout
 
     def _path_row(self, label, control, pick_label):
@@ -628,10 +693,21 @@ class ProfileView:
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
         )
         control.expand = True
-        return ft.Row(
-            [control, btn],
-            spacing=T.SP_SM,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        control.label = None
+        control.hint_text = f"选择{label}路径..."
+        control.col = {"sm": 12, "md": 9}
+        btn.col = {"sm": 12, "md": 3}
+        return ft.Column(
+            [
+                ft.Text(label, size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.ResponsiveRow(
+                    [control, btn],
+                    columns=12,
+                    spacing=T.SP_SM,
+                    run_spacing=T.SP_SM,
+                ),
+            ],
+            spacing=4,
         )
 
     async def _browse(self, target):
@@ -680,8 +756,16 @@ class ProfileView:
     def _open_crop_editor(self, source_path, target):
         """Open a draggable, zoomable crop viewport for avatar or cover media."""
         is_avatar = target == self.avatar_in
-        viewport_width, viewport_height = ((300, 300) if is_avatar else (336, 112))
-        output_size = ((512, 512) if is_avatar else (1500, 500))
+        is_card_bg = target == self.card_bg_in
+        if is_avatar:
+            viewport_width, viewport_height = (300, 300)
+            output_size = (512, 512)
+        elif is_card_bg:
+            viewport_width, viewport_height = (336, 112)
+            output_size = (1500, 500)
+        else:
+            viewport_width, viewport_height = (210, 370)
+            output_size = (1080, 1920)
         try:
             source_width, source_height = image_size(source_path)
             state = CropState(
@@ -704,14 +788,14 @@ class ProfileView:
             temp_dir = Path(self.app.paths.data_dir) / "temp_previews"
             temp_dir.mkdir(parents=True, exist_ok=True)
             temp_file = temp_dir / f"preview_{time.time_ns()}.jpg"
-            
+
             with Image.open(source_path) as img:
                 img = ImageOps.exif_transpose(img)
                 # Downscale to max 1024px while keeping aspect ratio
                 img.thumbnail((1024, 1024))
                 img.save(temp_file, "JPEG", quality=80)
                 preview_path = str(temp_file)
-        except Exception as exc:
+        except Exception:
             pass
 
         preview = ft.Image(
@@ -776,9 +860,16 @@ class ProfileView:
             active_color=ft.Colors.DEEP_PURPLE_400,
         )
 
+        if target == self.avatar_in:
+            title_str = "裁剪头像"
+        elif target == self.card_bg_in:
+            title_str = "裁剪名片背景"
+        else:
+            title_str = "裁剪全局背景"
+
         dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text("裁剪头像" if is_avatar else "裁剪个人背景"),
+            title=ft.Text(title_str),
             content=ft.Column(
                 [
                     ft.Container(viewport, alignment=ft.alignment.Alignment.CENTER),
@@ -815,7 +906,8 @@ class ProfileView:
             try:
                 media_dir = Path(self.app.paths.data_dir) / "profile_media"
                 stamp = time.time_ns()
-                filename = f"{'avatar' if is_avatar else 'background'}_crop_{stamp}{'.png' if is_avatar else '.jpg'}"
+                prefix = "avatar" if target == self.avatar_in else ("card_bg" if target == self.card_bg_in else "background")
+                filename = f"{prefix}_crop_{stamp}{'.png' if target == self.avatar_in else '.jpg'}"
                 output_path = render_crop(
                     source_path,
                     str(media_dir / filename),
@@ -851,9 +943,13 @@ class ProfileView:
             )
             self._build_default_avatars()
             source = "avatar"
+        elif target == self.card_bg_in:
+            self._draft_card_bg = output_path
+            self.cover_container.gradient = None
+            self.cover_container.image = ft.DecorationImage(src=output_path, fit=ft.BoxFit.COVER)
+            source = "card_bg"
         else:
             self._draft_bg = output_path
-            # A crop already defines the composition; keep rendering centered.
             self.bg_fit_dd.value = "cover"
             self.bg_align_dd.value = "center"
             self.app.friend_db.set_app_setting("bg_fit", "cover")
@@ -868,8 +964,8 @@ class ProfileView:
         if bg_path and os.path.exists(bg_path):
             self.main_layout.image = ft.DecorationImage(
                 src=bg_path,
-                fit=self._get_bg_fit(self.bg_fit_dd.value),
-                alignment=self._get_bg_align(self.bg_align_dd.value),
+                fit=ft.BoxFit.COVER,
+                alignment=ft.alignment.Alignment.CENTER,
                 opacity=float(self.bg_opacity_dd.value or "0.15"),
             )
             self.cover_container.gradient = None
@@ -935,12 +1031,14 @@ class ProfileView:
             self.profile_display_id.value = f"@{profile.get('user_id', '')}"
             self.bio_in.value = profile.get("bio", "")
             self.bg_in.value = profile.get("background", "")
+            self.card_bg_in.value = profile.get("card_bg", "")
             # Sync draft values so _auto_save uses the loaded data.
             self._draft_name = profile.get("name", "")
             self._draft_user_id = profile.get("user_id", "")
             self._draft_bio = profile.get("bio", "")
             self._draft_avatar = profile.get("avatar", "")
             self._draft_bg = profile.get("background", "")
+            self._draft_card_bg = profile.get("card_bg", "")
             self.tags_input.set_tags(profile.get("tags", []))
             cond = profile.get("conditions", {})
             self.req_input.set_tags(cond.get("required_tags", []))
@@ -960,6 +1058,10 @@ class ProfileView:
             if hasattr(self.app, "tcp_port"):
                 self.settings_tcp_port.value = str(self.app.tcp_port)
             self.settings_receive_dir.value = self.app.get_receive_dir()
+            self.update_manifest_url.value = (
+                self.app.friend_db.get_app_setting("update_manifest_url", "")
+                or default_manifest_url()
+            )
 
             self._build_default_avatars()
 
@@ -976,9 +1078,16 @@ class ProfileView:
             self.bg_align_dd.value = bg_align
             self.bg_opacity_dd.value = bg_opacity
 
-            # Apply the selected image both as the page ambience and profile cover.
+            # Apply the selected images for page background and profile card banner.
             bg_path = profile.get("background", "").strip()
+            card_bg_path = profile.get("card_bg", "").strip()
             self.cover_container.content = None
+            if card_bg_path and os.path.exists(card_bg_path):
+                self.cover_container.gradient = None
+                self.cover_container.image = ft.DecorationImage(src=card_bg_path, fit=ft.BoxFit.COVER)
+            else:
+                self.cover_container.image = None
+                self.cover_container.gradient = T.GRADIENT_PRIMARY
             self._apply_background_preview(bg_path)
 
             self._theme_selector_row.content = self._build_theme_selector()
@@ -996,7 +1105,7 @@ class ProfileView:
 
         # Responsive window size listener wiring
         if self.page:
-            self.page.on_resized = self._on_page_resize
+            self.page.on_resize = self._on_page_resize
             self._update_responsive_layout()
 
     # -- auto-save engine ----------------------------------------------------
@@ -1084,7 +1193,7 @@ class ProfileView:
         self._apply_background_preview(bg_path)
         if self.page:
             self.page.update()
-        
+
         # Save settings
         self.app.friend_db.set_app_setting("bg_fit", self.bg_fit_dd.value)
         self.app.friend_db.set_app_setting("bg_align", self.bg_align_dd.value)
@@ -1139,6 +1248,7 @@ class ProfileView:
             "bio": (self._draft_bio or self.bio_in.value or "").strip(),
             "avatar": (self._draft_avatar or self.avatar_in.value or "").strip(),
             "background": (self._draft_bg or self.bg_in.value or "").strip(),
+            "card_bg": (self._draft_card_bg or self.card_bg_in.value or "").strip(),
             "conditions": {
                 "required_tags": self.req_input.get_tags(),
                 "optional_tags": self.opt_input.get_tags(),
@@ -1207,7 +1317,7 @@ class ProfileView:
     def _build_update_mode_selector(self):
         current_mode = getattr(self, "_update_mode_value", "auto")
         is_auto = (current_mode == "auto")
-        
+
         auto_card = ft.GestureDetector(
             on_tap=lambda _: self._set_update_mode("auto"),
             mouse_cursor=ft.MouseCursor.CLICK,
@@ -1217,13 +1327,13 @@ class ProfileView:
                         ft.Row(
                             [
                                 ft.Icon(
-                                    ft.Icons.SYNC_ROUNDED, 
-                                    color=ft.Colors.WHITE if is_auto else ft.Colors.DEEP_PURPLE_400, 
+                                    ft.Icons.SYNC_ROUNDED,
+                                    color=ft.Colors.WHITE if is_auto else ft.Colors.DEEP_PURPLE_400,
                                     size=16
                                 ),
                                 ft.Text(
-                                    "自动同步", 
-                                    size=13, 
+                                    "自动同步",
+                                    size=13,
                                     weight=ft.FontWeight.BOLD,
                                     color=ft.Colors.WHITE if is_auto else ft.Colors.ON_SURFACE
                                 ),
@@ -1257,13 +1367,13 @@ class ProfileView:
                         ft.Row(
                             [
                                 ft.Icon(
-                                    ft.Icons.TOUCH_APP_ROUNDED, 
-                                    color=ft.Colors.WHITE if is_manual else ft.Colors.DEEP_PURPLE_400, 
+                                    ft.Icons.TOUCH_APP_ROUNDED,
+                                    color=ft.Colors.WHITE if is_manual else ft.Colors.DEEP_PURPLE_400,
                                     size=16
                                 ),
                                 ft.Text(
-                                    "手动请求", 
-                                    size=13, 
+                                    "手动请求",
+                                    size=13,
                                     weight=ft.FontWeight.BOLD,
                                     color=ft.Colors.WHITE if is_manual else ft.Colors.ON_SURFACE
                                 ),
@@ -1287,8 +1397,21 @@ class ProfileView:
             )
         )
 
-        self._update_mode_row.controls = [auto_card, manual_card]
-        return self._update_mode_row
+        # Check if narrow layout
+        width = self.page.width if (self.page and self.page.width) else 1000
+        is_narrow = (width < 850)
+
+        if is_narrow:
+            auto_card.content.expand = False
+            manual_card.content.expand = False
+            layout = ft.Column([auto_card, manual_card], spacing=10)
+        else:
+            auto_card.content.expand = True
+            manual_card.content.expand = True
+            layout = ft.Row([auto_card, manual_card], spacing=10, expand=True)
+
+        self._update_mode_container.content = layout
+        return self._update_mode_container
 
     def _set_update_mode(self, mode):
         self._update_mode_value = mode
@@ -1306,7 +1429,7 @@ class ProfileView:
             self._save_status.color = ft.Colors.GREEN_400
             if self.page:
                 self.page.update()
-            
+
             def _clear():
                 time.sleep(2)
                 try:
@@ -1324,22 +1447,62 @@ class ProfileView:
     def _update_responsive_layout(self):
         if not self.main_layout or not self.main_layout.page:
             return
-            
+
         width = self.page.width if self.page else 1000
-        
-        if width < 850:
+        is_narrow = (width < 850)
+        platform_name = str(getattr(self.page, "platform", "")).lower()
+        is_android = platform_name in ("android", "pageplatform.android")
+        is_mobile = is_android or platform_name in ("ios", "pageplatform.ios") or width < 600
+        self.main_layout.padding = ft.Padding.only(
+            left=2 if is_mobile else 20,
+            right=2 if is_mobile else 20,
+            top=4 if is_mobile else 10,
+            bottom=8 if is_mobile else 20,
+        )
+        if is_android:
+            self.receive_dir_button.disabled = True
+            self.receive_dir_button.text = "Android 由系统管理"
+            self.settings_receive_note.value = "接收文件保存在应用私有目录；成功后会在聊天和系统通知中显示完整路径。"
+        else:
+            self.receive_dir_button.disabled = False
+            self.receive_dir_button.text = "选择保存目录"
+            self.settings_receive_note.value = ""
+
+        # Dynamically set auto-accept layout controls
+        if is_narrow:
+            self._auto_accept_layout.content = ft.Column(
+                [
+                    self.min_match_row,
+                    self.auto_accept,
+                ],
+                spacing=10,
+            )
+        else:
+            self._auto_accept_layout.content = ft.Row(
+                [
+                    ft.Container(content=self.min_match_row, expand=True),
+                    self.auto_accept,
+                ],
+                spacing=20,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            )
+
+        # Rebuild update mode selector layout dynamically
+        self._build_update_mode_selector()
+
+        if is_narrow:
             # Stacked vertical mode (e.g. narrow windows)
             self.left_panel.width = None
-            
+
             # Disable right panel internal scroll to avoid nested scrollbars
             self.right_panel.scroll = None
             self.right_panel.expand = False
-            
+
             # Clear section padding so fields take up full width
             self._right_panel_padding = None
             for c in getattr(self, "_section_containers", []):
                 c.padding = None
-            
+
             # Combined single scrolling column
             stacked_content = ft.Column(
                 [
@@ -1364,16 +1527,16 @@ class ProfileView:
         else:
             # Side-by-side desktop mode
             self.left_panel.width = 320
-            
+
             # Enable right panel internal scroll
             self.right_panel.scroll = ft.ScrollMode.AUTO
             self.right_panel.expand = True
-            
+
             # Set section padding to shift content left, leaving room for the scrollbar
             self._right_panel_padding = ft.Padding.only(right=24)
             for c in getattr(self, "_section_containers", []):
                 c.padding = self._right_panel_padding
-            
+
             side_by_side = ft.Column(
                 [
                     ft.Row(
@@ -1456,7 +1619,7 @@ class ProfileView:
                         ],
                         spacing=T.SP_SM,
                     ),
-                    ft.Text("版本 3.0.0", size=T.FS_BODY, weight=ft.FontWeight.BOLD,
+                    ft.Text(f"版本 {self.current_version}", size=T.FS_BODY, weight=ft.FontWeight.BOLD,
                             color=ft.Colors.with_opacity(0.8, ft.Colors.WHITE)),
                     ft.Text("P2P 校园网无网社交 · 洪泛中继路由 · 离线消息漫游",
                             size=T.FS_CAPTION, color=ft.Colors.with_opacity(0.7, ft.Colors.WHITE)),
@@ -1481,6 +1644,20 @@ class ProfileView:
                 T.surface_card(
                     T.section_title("自定义背景"),
                     self._path_row("背景图片", self.bg_in, "选择并裁剪"),
+                ),
+                T.surface_card(
+                    T.section_title("应用更新"),
+                    self._setting_row("当前版本", ft.Text(self.current_version, size=T.FS_BODY, weight=ft.FontWeight.BOLD)),
+                    ft.Text("更新地址", size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Row(
+                        [
+                            self.update_manifest_url,
+                            self.update_check_btn,
+                        ],
+                        spacing=T.SP_SM,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    self.update_status,
                 ),
                 T.surface_card(
                     T.section_title("网络与设备"),
@@ -1546,14 +1723,161 @@ class ProfileView:
         )
 
     def _setting_row(self, label, value_control):
-        return ft.Row(
-            [
-                ft.Text(label, size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT, width=120),
-                ft.Container(expand=True),
-                value_control,
-            ],
+        label_control = ft.Text(label, size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT)
+        label_control.col = {"sm": 12, "md": 4}
+        value_container = ft.Container(content=value_control)
+        value_container.col = {"sm": 12, "md": 8}
+        return ft.ResponsiveRow(
+            [label_control, value_container],
+            columns=12,
+            spacing=T.SP_SM,
+            run_spacing=4,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+
+    def _check_updates(self, _e):
+        manifest_url = (self.update_manifest_url.value or "").strip()
+        if not manifest_url:
+            self.update_status.value = "请先填写 latest.json 更新地址"
+            self.update_status.color = ft.Colors.RED_400
+            if self.page:
+                self.page.update()
+            return
+
+        self.app.friend_db.set_app_setting("update_manifest_url", manifest_url)
+        self.update_check_btn.disabled = True
+        self.update_status.value = "正在检查更新..."
+        self.update_status.color = ft.Colors.ON_SURFACE_VARIANT
+        if self.page:
+            self.page.update()
+
+        def worker():
+            try:
+                info = check_for_updates(
+                    manifest_url,
+                    current_version=self.current_version,
+                    target_platform=self._current_update_platform(),
+                )
+            except UpdateCheckError as exc:
+                self._set_update_status(f"检查失败：{exc}", ft.Colors.RED_400)
+                self.update_check_btn.disabled = False
+                return
+            except Exception as exc:
+                self._set_update_status(f"检查失败：{exc}", ft.Colors.RED_400)
+                self.update_check_btn.disabled = False
+                return
+
+            self.update_check_btn.disabled = False
+            if not info.has_update:
+                self._set_update_status(
+                    f"已是最新版本：{info.current_version}",
+                    ft.Colors.GREEN_400,
+                )
+                return
+            self._show_update_dialog(info)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_update_status(self, text, color):
+        self.update_status.value = text
+        self.update_status.color = color
+        try:
+            if self.page:
+                self.page.update()
+        except Exception:
+            pass
+
+    def _show_update_dialog(self, info):
+        asset = info.asset
+        download_url = asset.url if asset else ""
+        notes = info.notes.strip() or "暂无更新说明"
+        sha256 = asset.sha256 if asset else ""
+        status = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
+
+        def copy_url(_e):
+            if download_url and self.page:
+                self.page.set_clipboard(download_url)
+                status.value = "下载链接已复制"
+                status.color = ft.Colors.GREEN_400
+                self.page.update()
+
+        def open_url(_e):
+            if not download_url:
+                return
+            if self._open_url(download_url):
+                self._close(dlg)
+            else:
+                copy_url(_e)
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("发现新版本", weight=ft.FontWeight.BOLD),
+            content=ft.Column(
+                [
+                    ft.Text(f"当前版本：{info.current_version}", size=T.FS_BODY),
+                    ft.Text(f"最新版本：{info.latest_version}", size=T.FS_BODY, weight=ft.FontWeight.BOLD),
+                    ft.Divider(height=16, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
+                    ft.Text("更新说明", size=T.FS_BODY, weight=ft.FontWeight.BOLD),
+                    ft.Text(notes, size=T.FS_CAPTION, selectable=True),
+                    ft.Text(f"SHA256：{sha256}" if sha256 else "SHA256：清单未提供", size=11, selectable=True),
+                    status,
+                ],
+                width=320,
+                tight=True,
+                spacing=8,
+            ),
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        actions = [ft.TextButton("关闭", on_click=lambda _e: self._close(dlg))]
+        if download_url:
+            actions.insert(0, ft.TextButton("复制链接", on_click=copy_url))
+            actions.insert(
+                1,
+                ft.ElevatedButton(
+                    "打开下载",
+                    icon=ft.Icons.OPEN_IN_BROWSER_ROUNDED,
+                    on_click=open_url,
+                    bgcolor=ft.Colors.DEEP_PURPLE_500,
+                    color=ft.Colors.WHITE,
+                ),
+            )
+            self._set_update_status(
+                f"发现新版本 {info.latest_version}",
+                ft.Colors.GREEN_400,
+            )
+        else:
+            self._set_update_status(
+                f"发现新版本 {info.latest_version}，但清单没有当前平台下载地址",
+                ft.Colors.ORANGE_400,
+            )
+        dlg.actions = actions
+
+        try:
+            self.page.overlay.append(dlg)
+            dlg.open = True
+            self.page.update()
+        except Exception:
+            pass
+
+    def _open_url(self, url):
+        try:
+            launcher = getattr(self.page, "launch_url", None)
+            if callable(launcher):
+                launcher(url)
+                return True
+        except Exception:
+            pass
+        try:
+            import webbrowser
+            return bool(webbrowser.open(url))
+        except Exception:
+            return False
+
+    def _current_update_platform(self):
+        if self.page and str(self.page.platform).lower() in ("android", "pageplatform.android"):
+            return "android"
+        return None
 
     def _save_tcp(self, _e):
         try:
@@ -1581,6 +1905,10 @@ class ProfileView:
         threading.Thread(target=_clear, daemon=True).start()
 
     async def _choose_receive_dir(self, _e):
+        platform_name = str(getattr(self.page, "platform", "")).lower() if self.page else ""
+        if platform_name in ("android", "pageplatform.android"):
+            self.app.show_toast(f"Android 接收目录由系统管理：{self.app.get_receive_dir()}")
+            return
         try:
             import tkinter as tk
         except ImportError:
@@ -1613,6 +1941,10 @@ class ProfileView:
         page = self.page
         if page and picker not in page.services:
             page.services.append(picker)
+            try:
+                page.update()
+            except Exception:
+                pass
         await picker.get_directory_path(
             dialog_title="选择接收文件保存目录",
             initial_directory=self.app.get_receive_dir(),
@@ -1634,14 +1966,17 @@ class ProfileView:
             self.settings_tcp_hint.value = "✨ 文件保存位置已更新"
             self.settings_tcp_hint.color = ft.Colors.GREEN_400
         except Exception as exc:
-            self.settings_tcp_hint.value = f"❌ 保存位置更新失败: {exc}"
+            msg = str(exc)
+            is_android = str(self.page.platform).lower() in ("android", "pageplatform.android") if self.page else False
+            if is_android:
+                msg += "\n💡 提示: 安卓平台受限制，建议使用默认或私有目录"
+            self.settings_tcp_hint.value = f"❌ 保存位置更新失败: {msg}"
             self.settings_tcp_hint.color = ft.Colors.RED_400
         if self.page:
             self.page.update()
 
     def _clear_chat(self):
         def do_clear(_e):
-            dlg.open = False
             for f in self.app.get_all_friends():
                 self.app.clear_chat_history(f.get("name", ""))
             self.settings_tcp_hint.value = "✨ 本地聊天记录清理成功"
@@ -1653,7 +1988,6 @@ class ProfileView:
 
     def _clear_pending(self):
         def do_clear(_e):
-            dlg.open = False
             for f in self.app.get_all_friends():
                 self.app.clear_pending_messages(f.get("name", ""))
             self.settings_pending_count.value = "0 条消息"
@@ -1669,17 +2003,21 @@ class ProfileView:
             modal=True,
             title=ft.Text("确认操作 ⚠️", weight=ft.FontWeight.BOLD),
             content=ft.Text(message),
-            actions=[
-                ft.TextButton("取消", on_click=lambda _e: self._close(dlg)),
-                ft.ElevatedButton(
-                    ok_text, 
-                    on_click=on_ok,
-                    bgcolor=ft.Colors.RED_600, 
-                    color=ft.Colors.WHITE
-                ),
-            ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
+        def handle_ok(e):
+            self._close(dlg)
+            on_ok(e)
+
+        dlg.actions = [
+            ft.TextButton("取消", on_click=lambda _e: self._close(dlg)),
+            ft.ElevatedButton(
+                ok_text,
+                on_click=handle_ok,
+                bgcolor=ft.Colors.RED_600,
+                color=ft.Colors.WHITE
+            ),
+        ]
         self.page.overlay.append(dlg)
         dlg.open = True
         self.page.update()

@@ -20,6 +20,7 @@ class ChatView:
     def __init__(self, app):
         self.app = app
         self.page = app.page
+        self._lock = threading.Lock()
         self.current_friend = ""
         self.is_group = False
         self.current_group_id = ""
@@ -32,9 +33,11 @@ class ChatView:
         self._header_status = None
         self._scroll_generation = 0
         self._transfer_widgets = {}
+        self._transfer_states = {}
         self._transfer_watchdogs = set()
         self._closed_file_transfers = set()
         self._pending_file_offers: dict = {}  # file_id → {from_name, filename, size, widget}
+        self._notifications_col = None
         self.file_picker = getattr(app, "chat_file_picker", None) or ft.FilePicker()
         self.compress_checkbox = ft.Checkbox(
             label="压缩",
@@ -42,6 +45,17 @@ class ChatView:
             fill_color=ft.Colors.DEEP_PURPLE_400,
             scale=0.9,
         )
+
+    def _is_mobile_ui(self):
+        platform_name = str(getattr(self.page, "platform", "")).lower()
+        width = float(getattr(self.page, "width", 0) or 0)
+        return platform_name in ("android", "ios", "pageplatform.android", "pageplatform.ios") or (0 < width < 600)
+
+    def _file_bubble_width(self):
+        width = float(getattr(self.page, "width", 0) or 0)
+        if self._is_mobile_ui() and width:
+            return max(220, min(300, width - 92))
+        return 320
 
     # -- build -------------------------------------------------------------
 
@@ -54,9 +68,11 @@ class ChatView:
         tab_bar = ft.TabBar(
             tabs=[
                 ft.Tab(label="会话列表", icon=ft.Icons.CHAT_ROUNDED),
+                ft.Tab(label="系统通知", icon=ft.Icons.NOTIFICATIONS_ROUNDED),
                 ft.Tab(label="雷达发现", icon=ft.Icons.RADAR_ROUNDED),
             ]
         )
+        self._tab_bar = tab_bar
 
         self._list_col = ft.Column(spacing=T.SP_SM, expand=True, scroll=ft.ScrollMode.AUTO)
         self._list_root = ft.Column(
@@ -85,13 +101,19 @@ class ChatView:
             expand=True,
             controls=[
                 self._list_root,
+                self._build_notifications_view(),
                 discover_view.build(),
             ]
         )
 
+        def on_tab_change(_e):
+            if self.tabs.selected_index == 1:
+                self.app.mark_all_notifications_read()
+
         self.tabs = ft.Tabs(
-            length=2,
+            length=3,
             expand=True,
+            on_change=on_tab_change,
             content=ft.Column(
                 controls=[
                     tab_bar,
@@ -101,9 +123,19 @@ class ChatView:
             )
         )
         self._render_list()
+        self._render_notifications()
         return self.tabs
 
     def _build_window(self):
+        mobile_ui = self._is_mobile_ui()
+        self.compress_checkbox.label = None if mobile_ui else "压缩"
+        self.compress_checkbox.tooltip = "发送前压缩" if mobile_ui else None
+        # Clear any obsolete widget references from pending file offers, since
+        # the message list is being rebuilt.
+        for offer in self._pending_file_offers.values():
+            if isinstance(offer, dict):
+                offer.pop("widget", None)
+
         if self.is_group:
             group = self.app.friend_db.get_group(self.current_group_id)
             member_count = len(group.get("members", [])) if group else 0
@@ -114,8 +146,8 @@ class ChatView:
             )
             self._header_name = ft.Text(self.current_friend, size=T.FS_TITLE, weight=ft.FontWeight.BOLD)
             self._header_status = ft.Text(
-                f"{member_count} 个成员", 
-                size=T.FS_CAPTION, 
+                f"{member_count} 个成员",
+                size=T.FS_CAPTION,
                 color=ft.Colors.ON_SURFACE_VARIANT,
                 weight=ft.FontWeight.NORMAL
             )
@@ -134,18 +166,18 @@ class ChatView:
             )
             self._header_name = ft.Text(self.current_friend, size=T.FS_TITLE, weight=ft.FontWeight.BOLD)
             self._header_status = ft.Text(
-                "在线" if online else "离线", 
-                size=T.FS_CAPTION, 
+                "在线" if online else "离线",
+                size=T.FS_CAPTION,
                 color=ft.Colors.GREEN_400 if online else ft.Colors.ON_SURFACE_VARIANT,
                 weight=ft.FontWeight.BOLD if online else ft.FontWeight.NORMAL
             )
-        
+
         self._msg_list = ft.Column(
-            spacing=T.SP_MD, 
-            expand=True, 
+            spacing=T.SP_MD,
+            expand=True,
             scroll=ft.ScrollMode.AUTO,
         )
-        
+
         self._input = ft.TextField(
             hint_text="输入消息…",
             expand=True,
@@ -156,7 +188,7 @@ class ChatView:
             content_padding=T.pad_symmetric(horizontal=16, vertical=10),
             on_submit=self._on_send,
         )
-        
+
         attach_btn = ft.IconButton(
             icon=ft.Icons.ADD_ROUNDED,
             icon_color=ft.Colors.DEEP_PURPLE_400,
@@ -164,7 +196,7 @@ class ChatView:
             on_click=self._pick_file,
             tooltip="发送文件",
         )
-        
+
         send_btn = ft.IconButton(
             icon=ft.Icons.SEND_ROUNDED,
             icon_color=ft.Colors.WHITE,
@@ -177,14 +209,14 @@ class ChatView:
             ),
             tooltip="发送消息",
         )
-        
+
         # Header bar for the chat window
         chat_header = ft.Container(
             content=ft.Row(
                 [
                     ft.IconButton(
-                        icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, 
-                        icon_size=16, 
+                        icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED,
+                        icon_size=16,
                         on_click=self._back_to_list,
                         tooltip="返回消息列表"
                     ),
@@ -214,6 +246,7 @@ class ChatView:
             margin=T.pad_only(left=-T.SP_LG, right=-T.SP_LG, top=-T.SP_LG),  # Overlap shell padding
         )
 
+        composer_controls = [attach_btn, self.compress_checkbox, self._input, send_btn]
         self._window_root = ft.Column(
             [
                 chat_header,
@@ -223,7 +256,11 @@ class ChatView:
                     expand=True,
                 ),
                 ft.Container(
-                    content=ft.Row([attach_btn, self.compress_checkbox, self._input, send_btn], spacing=T.SP_SM, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    content=ft.Row(
+                        composer_controls,
+                        spacing=4 if mobile_ui else T.SP_SM,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                     padding=T.pad_only(bottom=T.SP_SM),
                 ),
             ],
@@ -237,6 +274,328 @@ class ChatView:
     def on_enter(self):
         if not self.current_friend:
             self._render_list()
+            self._render_notifications()
+
+    def _build_notifications_view(self):
+        self._notifications_col = ft.Column(spacing=T.SP_SM, expand=True, scroll=ft.ScrollMode.AUTO)
+
+        view_root = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Text("系统通知", size=T.FS_TITLE, weight=ft.FontWeight.BOLD),
+                        ft.Row(
+                            [
+                                ft.TextButton(
+                                    "全部已读",
+                                    icon=ft.Icons.DONE_ALL_ROUNDED,
+                                    icon_color=ft.Colors.DEEP_PURPLE_400,
+                                    on_click=self._on_mark_all_read,
+                                    style=ft.ButtonStyle(
+                                        padding=T.pad_symmetric(horizontal=8, vertical=4)
+                                    )
+                                ),
+                                ft.IconButton(
+                                    icon=ft.Icons.DELETE_SWEEP_ROUNDED,
+                                    icon_color=ft.Colors.RED_400,
+                                    tooltip="清空通知",
+                                    on_click=self._on_clear_notifications,
+                                ),
+                            ],
+                            spacing=0,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                self._notifications_col,
+            ],
+            spacing=T.SP_SM,
+            expand=True,
+        )
+        return view_root
+
+    def _render_notifications(self):
+        if not hasattr(self, "_notifications_col") or self._notifications_col is None:
+            return
+
+        with self._lock:
+            self._notifications_col.controls.clear()
+            notifications = self.app.get_system_notifications()
+
+            # Update tab label and icon based on unread count
+            unread_count = sum(1 for n in notifications if n.get("is_read", 0) == 0)
+            if hasattr(self, "_tab_bar") and self._tab_bar:
+                if unread_count > 0:
+                    self._tab_bar.tabs[1].label = f"系统通知 ({unread_count})"
+                    self._tab_bar.tabs[1].icon = ft.Icons.NOTIFICATION_IMPORTANT_ROUNDED
+                else:
+                    self._tab_bar.tabs[1].label = "系统通知"
+                    self._tab_bar.tabs[1].icon = ft.Icons.NOTIFICATIONS_ROUNDED
+
+            if not notifications:
+                self._notifications_col.controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Icon(ft.Icons.NOTIFICATIONS_NONE_ROUNDED, size=48, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.5),
+                                ft.Text("暂无系统通知", size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT, weight=ft.FontWeight.W_500),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=T.SP_SM,
+                        ),
+                        alignment=ft.alignment.Alignment.CENTER,
+                        expand=True,
+                        padding=T.SP_2XL,
+                    )
+                )
+            else:
+                for notif in notifications:
+                    is_read = notif.get("is_read", 0) == 1
+                    category = notif.get("category", "info")
+
+                    icon = ft.Icons.INFO_ROUNDED
+                    icon_color = ft.Colors.BLUE_400
+                    if category == "success":
+                        icon = ft.Icons.CHECK_CIRCLE_ROUNDED
+                        icon_color = ft.Colors.GREEN_400
+                    elif category == "warning":
+                        icon = ft.Icons.WARNING_ROUNDED
+                        icon_color = ft.Colors.ORANGE_400
+                    elif category == "error":
+                        icon = ft.Icons.ERROR_ROUNDED
+                        icon_color = ft.Colors.RED_400
+                    elif category == "friend_request":
+                        icon = ft.Icons.PERSON_ADD_ROUNDED
+                        icon_color = ft.Colors.DEEP_PURPLE_400
+                    elif category == "file_offer":
+                        icon = ft.Icons.FOLDER_ZIP_ROUNDED
+                        icon_color = ft.Colors.BLUE_400
+
+                    # Interactive buttons for pending friend requests / file offers
+                    action_row = ft.Container()
+                    if category == "friend_request":
+                        import re
+                        match = re.search(r"「([^」]+)」", notif.get("content", ""))
+                        sender_name = match.group(1) if match else ""
+
+                        is_pending = False
+                        req = None
+                        if sender_name:
+                            req = self.app.friend_db.get_friend_request(name=sender_name)
+                            if req and req.get("status") == "pending":
+                                is_pending = True
+
+                        if is_pending:
+                            def make_accept_cb(s_name, req_info, n_id):
+                                def on_accept_click(e):
+                                    self.app.friend_db.add_friend(
+                                        name=s_name, ip=req_info["ip"], port=req_info["port"],
+                                        tags=req_info.get("tags", []), bio=req_info.get("bio", ""), category="朋友",
+                                        user_id=req_info.get("user_id", ""), status="accepted",
+                                    )
+                                    self.app.friend_db.set_friend_request_status(
+                                        "accepted", user_id=req_info.get("user_id", ""),
+                                        name=s_name, ip=req_info["ip"], port=req_info["port"],
+                                    )
+                                    import threading
+                                    threading.Thread(
+                                        target=self.app.message_service.send_friend_accept,
+                                        args=(s_name, req_info["ip"]), daemon=True,
+                                    ).start()
+                                    self.app.mark_notification_read(n_id)
+                                    self.app.views["friends"].refresh()
+                                    if "discover" in self.app.views:
+                                        self.app.views["discover"].refresh_online()
+                                    self._render_notifications()
+                                return on_accept_click
+
+                            def make_ignore_cb(req_info, n_id):
+                                def on_ignore_click(e):
+                                    self.app.friend_db.set_friend_request_status(
+                                        "rejected", user_id=req_info.get("user_id", ""),
+                                        name=req_info["name"], ip=req_info["ip"], port=req_info["port"],
+                                    )
+                                    self.app.mark_notification_read(n_id)
+                                    self._render_notifications()
+                                return on_ignore_click
+
+                            action_row = ft.Container(
+                                content=ft.Row(
+                                    [
+                                        ft.ElevatedButton(
+                                            "同意并添加",
+                                            icon=ft.Icons.CHECK_ROUNDED,
+                                            on_click=make_accept_cb(sender_name, req, notif["id"]),
+                                            bgcolor=ft.Colors.DEEP_PURPLE_400,
+                                            color=ft.Colors.WHITE,
+                                            style=ft.ButtonStyle(
+                                                padding=T.pad_symmetric(horizontal=12, vertical=6)
+                                            ),
+                                            height=32,
+                                        ),
+                                        ft.OutlinedButton(
+                                            "忽略",
+                                            icon=ft.Icons.CLOSE_ROUNDED,
+                                            on_click=make_ignore_cb(req, notif["id"]),
+                                            style=ft.ButtonStyle(
+                                                padding=T.pad_symmetric(horizontal=12, vertical=6)
+                                            ),
+                                            height=32,
+                                        ),
+                                    ],
+                                    spacing=T.SP_SM,
+                                ),
+                                margin=ft.Margin.only(top=T.SP_SM)
+                            )
+                        else:
+                            status_text = "已同意"
+                            text_color = ft.Colors.GREEN_400
+                            if req and req.get("status") == "rejected":
+                                status_text = "已忽略"
+                                text_color = ft.Colors.ON_SURFACE_VARIANT
+
+                            action_row = ft.Container(
+                                content=ft.Text(status_text, size=12, color=text_color, weight=ft.FontWeight.BOLD),
+                                margin=ft.Margin.only(top=T.SP_XS)
+                            )
+                    elif category == "file_offer":
+                        import re
+                        match = re.search(r"\[文件ID:([^\]]+)\]", notif.get("content", ""))
+                        file_id = match.group(1) if match else ""
+
+                        is_pending = False
+                        if file_id and self.app.message_service:
+                            is_pending = file_id in self.app.message_service._pending_file_offers
+
+                        if is_pending:
+                            def make_file_accept_cb(f_id, n_id):
+                                def on_file_accept_click(e):
+                                    self.app.message_service.accept_file_offer(f_id)
+                                    self.app.mark_notification_read(n_id)
+                                    self._pending_file_offers.pop(f_id, None)
+                                    self._render_notifications()
+                                    if self.current_friend:
+                                        self.reload_current()
+                                return on_file_accept_click
+
+                            def make_file_decline_cb(f_id, n_id):
+                                def on_file_decline_click(e):
+                                    self.app.message_service.decline_file_offer(f_id)
+                                    self.app.mark_notification_read(n_id)
+                                    self._pending_file_offers.pop(f_id, None)
+                                    self._render_notifications()
+                                    if self.current_friend:
+                                        self.reload_current()
+                                return on_file_decline_click
+
+                            action_row = ft.Container(
+                                content=ft.Row(
+                                    [
+                                        ft.ElevatedButton(
+                                            "同意并接收",
+                                            icon=ft.Icons.CHECK_ROUNDED,
+                                            on_click=make_file_accept_cb(file_id, notif["id"]),
+                                            bgcolor=ft.Colors.DEEP_PURPLE_400,
+                                            color=ft.Colors.WHITE,
+                                            style=ft.ButtonStyle(
+                                                padding=T.pad_symmetric(horizontal=12, vertical=6)
+                                            ),
+                                            height=32,
+                                        ),
+                                        ft.OutlinedButton(
+                                            "拒绝",
+                                            icon=ft.Icons.CLOSE_ROUNDED,
+                                            on_click=make_file_decline_cb(file_id, notif["id"]),
+                                            style=ft.ButtonStyle(
+                                                padding=T.pad_symmetric(horizontal=12, vertical=6)
+                                            ),
+                                            height=32,
+                                        ),
+                                    ],
+                                    spacing=T.SP_SM,
+                                ),
+                                margin=ft.Margin.only(top=T.SP_SM)
+                            )
+                        else:
+                            status_text = "已处理"
+                            text_color = ft.Colors.ON_SURFACE_VARIANT
+                            if self.app.message_service:
+                                with self.app.message_service._file_lock:
+                                    state = self.app.message_service._incoming_files.get(file_id)
+                                if state:
+                                    if state.get("error"):
+                                        status_text = "传输失败"
+                                        text_color = ft.Colors.RED_400
+                                    elif state.get("completed", False):
+                                        status_text = "已完成"
+                                        text_color = ft.Colors.GREEN_400
+                                    elif state.get("pending_accept") is False:
+                                        status_text = "已同意"
+                                        text_color = ft.Colors.GREEN_400
+                                    else:
+                                        status_text = "正在接收"
+                                        text_color = ft.Colors.BLUE_400
+                                else:
+                                    if file_id in self._closed_file_transfers:
+                                        status_text = "已拒绝"
+                                        text_color = ft.Colors.RED_400
+
+                            action_row = ft.Container(
+                                content=ft.Text(status_text, size=12, color=text_color, weight=ft.FontWeight.BOLD),
+                                margin=ft.Margin.only(top=T.SP_XS)
+                            )
+
+                    card = ft.Container(
+                        content=ft.Row(
+                            [
+                                ft.Icon(icon, color=icon_color, size=24),
+                                ft.Column(
+                                    [
+                                        ft.Row(
+                                            [
+                                                ft.Text(notif.get("title", ""), size=T.FS_BODY, weight=ft.FontWeight.BOLD),
+                                                ft.Text(
+                                                    notif.get("timestamp", "")[-8:] if len(notif.get("timestamp", "")) >= 8 else "",
+                                                    size=T.FS_CAPTION,
+                                                    color=ft.Colors.ON_SURFACE_VARIANT
+                                                ),
+                                            ],
+                                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                        ),
+                                        ft.Text(
+                                            notif.get("content", ""),
+                                            size=T.FS_BODY,
+                                            color=ft.Colors.ON_SURFACE if not is_read else ft.Colors.ON_SURFACE_VARIANT,
+                                            weight=ft.FontWeight.NORMAL if is_read else ft.FontWeight.W_500,
+                                        ),
+                                        action_row,
+                                    ],
+                                    spacing=T.SP_XS,
+                                    expand=True,
+                                )
+                            ],
+                            alignment=ft.MainAxisAlignment.START,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        padding=T.SP_MD,
+                        border_radius=T.R_SM,
+                        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH if is_read else ft.Colors.with_opacity(0.08, ft.Colors.DEEP_PURPLE),
+                        border=T.border_all(1, ft.Colors.with_opacity(0.05, ft.Colors.ON_SURFACE)),
+                    )
+                    self._notifications_col.controls.append(card)
+
+            if self.page:
+                self.page.update()
+
+    def _on_mark_all_read(self, e):
+        self.app.mark_all_notifications_read()
+
+    def _on_clear_notifications(self, e):
+        self.app.clear_system_notifications()
+
+    def refresh_notifications(self):
+        self._render_notifications()
 
     def open_chat(self, friend_name, is_group=False, group_id=""):
         self.current_friend = friend_name
@@ -257,84 +616,86 @@ class ChatView:
         widget tree would otherwise cause a visible flicker even though the
         underlying image file is already on local disk.
         """
-        if not self.current_friend or not self._header_avatar:
-            return
-
-        if self.is_group:
-            group = self.app.friend_db.get_group(self.current_group_id)
-            member_count = len(group.get("members", [])) if group else 0
-            new_status = f"{member_count} 个成员"
-            if (getattr(self, "_last_group_members", 0) == member_count
-                    and self._header_status.value == new_status):
-                return  # nothing changed
-            self._last_group_members = member_count
-            self._header_avatar.content = T.avatar_circle("group", T.AVATAR_MD)
-            self._header_status.value = new_status
-            self._header_status.color = ft.Colors.ON_SURFACE_VARIANT
-            self._header_status.weight = ft.FontWeight.NORMAL
-        else:
-            online = self.current_friend in [
-                f.get("name") for f in self.app.get_online_friends()
-            ]
-            avatar_src = self.app.get_avatar_for_name(self.current_friend)
-            new_status = "在线" if online else "离线"
-            new_color = ft.Colors.GREEN_400 if online else ft.Colors.ON_SURFACE_VARIANT
-            new_weight = ft.FontWeight.BOLD if online else ft.FontWeight.NORMAL
-
-            # Skip the entire rebuild when nothing changed — same avatar
-            # source AND same online status.  This is the key flicker fix.
-            if (getattr(self, "_last_avatar_src", "") == avatar_src
-                    and getattr(self, "_last_online", None) == online
-                    and self._header_status.value == new_status):
+        with self._lock:
+            if not self.current_friend or not self._header_avatar:
                 return
 
-            self._last_avatar_src = avatar_src
-            self._last_online = online
-            self._header_avatar.content = T.avatar_circle(
-                avatar_src, T.AVATAR_MD, online=online,
-            )
-            self._header_status.value = new_status
-            self._header_status.color = new_color
-            self._header_status.weight = new_weight
+            if self.is_group:
+                group = self.app.friend_db.get_group(self.current_group_id)
+                member_count = len(group.get("members", [])) if group else 0
+                new_status = f"{member_count} 个成员"
+                if (getattr(self, "_last_group_members", 0) == member_count
+                        and self._header_status.value == new_status):
+                    return  # nothing changed
+                self._last_group_members = member_count
+                self._header_avatar.content = T.avatar_circle("group", T.AVATAR_MD)
+                self._header_status.value = new_status
+                self._header_status.color = ft.Colors.ON_SURFACE_VARIANT
+                self._header_status.weight = ft.FontWeight.NORMAL
+            else:
+                online = self.current_friend in [
+                    f.get("name") for f in self.app.get_online_friends()
+                ]
+                avatar_src = self.app.get_avatar_for_name(self.current_friend)
+                new_status = "在线" if online else "离线"
+                new_color = ft.Colors.GREEN_400 if online else ft.Colors.ON_SURFACE_VARIANT
+                new_weight = ft.FontWeight.BOLD if online else ft.FontWeight.NORMAL
 
-        if self.page:
-            self.page.update()
+                # Skip the entire rebuild when nothing changed — same avatar
+                # source AND same online status.  This is the key flicker fix.
+                if (getattr(self, "_last_avatar_src", "") == avatar_src
+                        and getattr(self, "_last_online", None) == online
+                        and self._header_status.value == new_status):
+                    return
+
+                self._last_avatar_src = avatar_src
+                self._last_online = online
+                self._header_avatar.content = T.avatar_circle(
+                    avatar_src, T.AVATAR_MD, online=online,
+                )
+                self._header_status.value = new_status
+                self._header_status.color = new_color
+                self._header_status.weight = new_weight
+
+            if self.page:
+                self.page.update()
 
     # -- chat list ---------------------------------------------------------
 
     def _render_list(self):
-        if self._list_root is None:
-            return
-        col = self._list_root.controls[1]
-        col.controls.clear()
-        chat_list = self.app.get_chat_list() or []
-        for entry in chat_list:
-            col.controls.append(self._list_item(entry))
-        if not chat_list:
-            col.controls.append(
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Icon(ft.Icons.CHAT_BUBBLE_OUTLINE_ROUNDED, size=40, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4),
-                            ft.Text(
-                                "暂无聊天记录\n去「发现」认识新朋友",
-                                text_align=ft.TextAlign.CENTER, 
-                                size=T.FS_BODY,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                                weight=ft.FontWeight.W_500
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=T.SP_SM,
-                    ),
-                    padding=T.SP_2XL, 
-                    alignment=ft.alignment.Alignment.CENTER,
-                    expand=True,
+        with self._lock:
+            if self._list_root is None:
+                return
+            col = self._list_root.controls[1]
+            col.controls.clear()
+            chat_list = self.app.get_chat_list() or []
+            for entry in chat_list:
+                col.controls.append(self._list_item(entry))
+            if not chat_list:
+                col.controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Icon(ft.Icons.CHAT_BUBBLE_OUTLINE_ROUNDED, size=40, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4),
+                                ft.Text(
+                                    "暂无聊天记录\n去「发现」认识新朋友",
+                                    text_align=ft.TextAlign.CENTER,
+                                    size=T.FS_BODY,
+                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                    weight=ft.FontWeight.W_500
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=T.SP_SM,
+                        ),
+                        padding=T.SP_2XL,
+                        alignment=ft.alignment.Alignment.CENTER,
+                        expand=True,
+                    )
                 )
-            )
-        if self.page:
-            self.page.update()
+            if self.page:
+                self.page.update()
 
     def _list_item(self, entry):
         name = entry.get("name", "未知")
@@ -350,7 +711,7 @@ class ChatView:
             )
             if unread > 0 else None
         )
-        
+
         last_msg = entry.get("last_message", "")
         # Clean file tag descriptions for clean preview
         if last_msg.startswith("[") and "]" in last_msg:
@@ -449,11 +810,12 @@ class ChatView:
         # Render any pending file offers for this friend at the bottom.
         if not self.is_group:
             self._render_file_offers_for(self.current_friend)
+            self._render_active_transfers_for(self.current_friend)
         self._scroll_bottom()
 
     def _append_bubble(self, from_name, content, timestamp, is_self=False, msg_id=""):
         bubble_content = None
-        
+
         # Check if the message is a file transfer representation
         is_file_msg = False
         file_status = ""
@@ -464,7 +826,7 @@ class ChatView:
 
         def delete_current(_e=None):
             self._delete_message_row(row, msg_id=msg_id, file_id=file_id)
-        
+
         if is_file_message_content(content):
             idx = content.find("]")
             tag = content[1:idx]
@@ -476,19 +838,21 @@ class ChatView:
             file_status = tag
 
         if is_file_msg:
+            file_card_width = self._file_bubble_width()
+            file_text_width = max(100, file_card_width - (112 if self._is_mobile_ui() else 140))
             # Resolve file_id for active cancel action
             file_id = transfer_id
             if self.app.message_service:
                 with self.app.message_service._file_lock:
                     file_id = file_id or self.app.message_service.file_transfer.active_file_id_for(filename)
-            
+
             # Styled File Card Redesign
-            card_color = ft.Colors.with_opacity(0.08, ft.Colors.WHITE if is_self else ft.Colors.DEEP_PURPLE)
             icon_color = ft.Colors.WHITE if is_self else ft.Colors.DEEP_PURPLE_400
             status_text = file_status
+            detail_text = ""
             pb_val = 0.0
             pb_color = ft.Colors.WHITE if is_self else ft.Colors.BLUE_400
-            
+
             if "正在" in file_status:
                 pb_val = 0.0
                 status_text = "📁 " + file_status + " · 0% · --/s"
@@ -507,6 +871,16 @@ class ChatView:
                 pb_color = ft.Colors.GREEN_400 if not is_self else ft.Colors.WHITE
                 icon_color = ft.Colors.GREEN_400 if not is_self else ft.Colors.WHITE
                 status_text = "✅ " + file_status
+
+            cached_state = self._transfer_states.get(file_id, {})
+            if cached_state and not cached_state.get("final"):
+                completed = int(cached_state.get("completed", 0) or 0)
+                total = int(cached_state.get("total", 0) or 0)
+                pb_val = min(1.0, completed / total) if total else 0.0
+                percent = pb_val * 100
+                direction = "发送" if cached_state.get("sending") else "接收"
+                status_text = f"{direction}中 · {percent:.0f}%"
+                detail_text = f"{self._format_bytes(completed)} / {self._format_bytes(total)}" if total else "等待对端/网络"
 
             def open_file():
                 def worker():
@@ -644,22 +1018,22 @@ class ChatView:
             status_label = ft.Text(
                 status_text,
                 size=11,
-                color=ft.Colors.ON_SURFACE_VARIANT,
+                color=icon_color,
                 overflow=ft.TextOverflow.ELLIPSIS,
                 max_lines=1,
-                width=160,
+                width=file_text_width,
             )
             detail_label = ft.Text(
-                "",
+                detail_text,
                 size=10,
                 color=ft.Colors.ON_SURFACE_VARIANT,
                 overflow=ft.TextOverflow.ELLIPSIS,
                 max_lines=1,
-                width=160,
+                width=file_text_width,
             )
             progress_bar = ft.ProgressBar(
                 value=pb_val,
-                color=ft.Colors.DEEP_PURPLE_400 if is_self else ft.Colors.BLUE_400,
+                color=pb_color,
                 bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.ON_SURFACE),
                 height=3,
             )
@@ -691,6 +1065,7 @@ class ChatView:
                 icon_size=16,
                 tooltip="暂停传输",
                 on_click=lambda _: toggle_pause(),
+                visible=not self._is_mobile_ui(),
             )
 
             top_row = ft.Row(
@@ -699,13 +1074,13 @@ class ChatView:
                     ft.Column(
                         [
                             ft.Text(
-                                filename, 
-                                size=13, 
-                                weight=ft.FontWeight.BOLD, 
+                                filename,
+                                size=13,
+                                weight=ft.FontWeight.BOLD,
                                 color=ft.Colors.ON_SURFACE,
-                                overflow=ft.TextOverflow.ELLIPSIS, 
+                                overflow=ft.TextOverflow.ELLIPSIS,
                                 max_lines=1,
-                                width=150,
+                                width=file_text_width,
                             ),
                             status_label,
                             detail_label,
@@ -722,6 +1097,7 @@ class ChatView:
                                 icon_size=16,
                                 tooltip="取消",
                                 on_click=lambda _, fid=file_id: self.app.cancel_file_transfer(fid) if fid else None,
+                                visible=not self._is_mobile_ui(),
                             ) if ("正在" in file_status and file_id) else ft.Container(),
                             ft.IconButton(
                                 icon=ft.Icons.REFRESH_ROUNDED,
@@ -732,6 +1108,14 @@ class ChatView:
                             ) if ("失败" in file_status and is_self) else ft.Container(),
                             ft.PopupMenuButton(
                                 items=[
+                                    ft.PopupMenuItem(
+                                        content=ft.Row([
+                                            ft.Icon(ft.Icons.CANCEL_OUTLINED, size=14, color=ft.Colors.RED_400),
+                                            ft.Text("取消传输", size=12),
+                                        ], spacing=6),
+                                        on_click=lambda _, fid=file_id: self.app.cancel_file_transfer(fid) if fid else None,
+                                        visible=bool("正在" in file_status and file_id),
+                                    ),
                                     ft.PopupMenuItem(
                                         content=ft.Row([
                                             ft.Icon(ft.Icons.OPEN_IN_NEW_ROUNDED, size=14, color=ft.Colors.DEEP_PURPLE_400),
@@ -803,14 +1187,14 @@ class ChatView:
                     code_content = code_content[:-3].strip()
             elif "def " in content or "import " in content or "class " in content or "print(" in content:
                 is_code = True
-                
+
             if is_code:
                 # Code bubble
                 def copy_code():
                     if self.page:
                         self.page.set_clipboard(code_content)
                         self.show_toast("代码已复制到剪贴板 📋")
-                        
+
                 bubble_content = ft.Column(
                     [
                         ft.Container(
@@ -861,14 +1245,14 @@ class ChatView:
                 bubble_content = ft.Column(
                     [
                         ft.Text(
-                            content, 
-                            size=T.FS_TEXT, 
+                            content,
+                            size=T.FS_TEXT,
                             color=ft.Colors.WHITE if is_self else ft.Colors.ON_SURFACE,
                             selectable=True,
                             weight=ft.FontWeight.W_500
                         ),
                         ft.Text(
-                            timestamp, 
+                            timestamp,
                             size=T.FS_CAPTION,
                             color=ft.Colors.with_opacity(0.7, ft.Colors.WHITE) if is_self else ft.Colors.ON_SURFACE_VARIANT,
                             text_align=ft.TextAlign.RIGHT,
@@ -886,7 +1270,7 @@ class ChatView:
 
         bubble = ft.Container(
             content=bubble_content,
-            width=320 if is_file_msg else None,
+            width=file_card_width if is_file_msg else None,
             gradient=T.GRADIENT_PRIMARY if is_self and not is_file_msg else None,
             bgcolor=bubble_bg,
             border_radius=T.radius_only(
@@ -904,7 +1288,7 @@ class ChatView:
                 on_double_tap=lambda _: open_file(),
                 content=bubble,
             )
-        
+
         avatar = ft.GestureDetector(
             mouse_cursor=ft.MouseCursor.CLICK,
             on_tap=lambda _: self.app.show_friend_profile(from_name) if hasattr(self.app, "show_friend_profile") else None,
@@ -934,7 +1318,9 @@ class ChatView:
             controls = [ft.Container(expand=True)]
             if row_menu:
                 controls.append(row_menu)
-            controls.extend([bubble, avatar])
+            controls.append(bubble)
+            if not self._is_mobile_ui():
+                controls.append(avatar)
             row = ft.Row(
                 controls,
                 alignment=ft.MainAxisAlignment.END,
@@ -951,6 +1337,7 @@ class ChatView:
             )
 
         if is_file_msg and file_id and ("正在" in file_status or "等待" in file_status):
+            cached_state = self._transfer_states.get(file_id, {})
             self._transfer_widgets[file_id] = {
                 "row": row,
                 "progress": progress_bar,
@@ -958,8 +1345,8 @@ class ChatView:
                 "detail": detail_label,
                 "pause_button": pause_button,
                 "paused": False,
-                "percent": 0.0,
-                "last_completed": 0,
+                "percent": float(cached_state.get("percent", 0.0) or 0.0),
+                "last_completed": int(cached_state.get("completed", 0) or 0),
                 "last_time": time.monotonic(),
                 "speed": 0.0,
                 "sending": is_self,
@@ -979,6 +1366,33 @@ class ChatView:
             "path": decoded.path,
             "transfer_id": decoded.transfer_id,
         }
+
+    def _remember_transfer_state(self, file_id, **changes):
+        if not file_id:
+            return {}
+        state = self._transfer_states.setdefault(file_id, {})
+        state.update(changes)
+        state["updated_at"] = time.monotonic()
+        return state
+
+    def _render_active_transfers_for(self, friend_name):
+        if not self._msg_list or not friend_name:
+            return
+        for file_id, state in list(self._transfer_states.items()):
+            if state.get("peer_name") != friend_name or state.get("final"):
+                continue
+            content = self._file_message_content(
+                state.get("status", "正在发送文件" if state.get("sending") else "正在接收文件"),
+                state.get("filename", "文件"),
+                state.get("file_path", ""),
+                file_id,
+            )
+            self._append_bubble(
+                self.app.device_name if state.get("sending") else friend_name,
+                content,
+                state.get("timestamp", time.strftime("%H:%M:%S", time.localtime())),
+                is_self=bool(state.get("sending")),
+            )
 
     def _file_message_content(
         self, status, filename, file_path, transfer_id=""
@@ -1073,7 +1487,6 @@ class ChatView:
     def _open_file_with_os(cls, file_path: str):
         """Open a file with the OS default handler (cross-platform)."""
         import platform
-        import subprocess
         system = platform.system()
         if cls._is_android():
             # Android: use the Intent system via am
@@ -1084,7 +1497,7 @@ class ChatView:
                      "-t", "*/*"],
                     check=False,
                 )
-            except FileNotFoundError:
+            except Exception:
                 pass
         elif system == "Windows":
             os.startfile(file_path)
@@ -1098,7 +1511,6 @@ class ChatView:
     def _open_folder_with_os(cls, file_path: str, folder_path: str):
         """Open the file's containing folder (cross-platform)."""
         import platform
-        import subprocess
         system = platform.system()
         if cls._is_android():
             # Android: open the parent folder via content URI or fall back
@@ -1109,11 +1521,12 @@ class ChatView:
                      "-d", f"file://{folder_path}"],
                     check=False,
                 )
-            except FileNotFoundError:
+            except Exception:
                 cls._open_file_with_os(file_path)
         elif system == "Windows":
+            win_path = file_path.replace("/", "\\")
             subprocess.run(
-                f'explorer /select,"{file_path.replace("/", "\\")}"',
+                f'explorer /select,"{win_path}"',
                 shell=True,
             )
         elif system == "Darwin":
@@ -1193,16 +1606,50 @@ class ChatView:
             dialog_title="选择要发送的文件",
         )
         if files and files[0].path:
-            self._send_file(files[0].path)
+            selected_path = files[0].path
+            self.show_toast("正在准备文件...")
+
+            def prepare_and_send():
+                try:
+                    stable_path = self._stage_android_outgoing_file(selected_path)
+                    self._send_file(stable_path)
+                except Exception as exc:
+                    self.show_toast(f"文件准备失败: {exc}")
+
+            threading.Thread(target=prepare_and_send, daemon=True).start()
+
+    def _stage_android_outgoing_file(self, file_path):
+        """Copy Android picker results into app-private storage before sending."""
+        platform_name = str(getattr(self.page, "platform", "")).lower()
+        if platform_name not in ("android", "pageplatform.android") or not file_path or not os.path.isfile(file_path):
+            return file_path
+        import shutil
+        from pathlib import Path
+
+        cache_dir = Path(self.app.paths.data_dir) / "outgoing_files"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        source = Path(file_path)
+        destination = cache_dir / f"{time.time_ns()}_{source.name}"
+        shutil.copy2(source, destination)
+
+        # Keep the cache bounded while preserving recent files for retry.
+        cached = sorted(cache_dir.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True)
+        for stale in cached[20:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        return str(destination)
 
     def _send_file(self, file_path):
         if not self.current_friend:
             return
-            
+
         if self.compress_checkbox.value:
             try:
                 import zipfile
-                temp_zip_dir = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "beiyang_compressed")
+                import tempfile
+                temp_zip_dir = os.path.join(tempfile.gettempdir(), "beiyang_compressed")
                 os.makedirs(temp_zip_dir, exist_ok=True)
                 zip_filename = os.path.basename(file_path) + ".zip"
                 zip_path = os.path.join(temp_zip_dir, zip_filename)
@@ -1211,24 +1658,24 @@ class ChatView:
                 file_path = zip_path
             except Exception as e:
                 self.show_toast(f"自动压缩失败: {e}")
-                
+
         filename = os.path.basename(file_path)
         ts = time.strftime("%H:%M:%S", time.localtime())
         transfer_id = str(uuid.uuid4()) if not self.is_group else ""
         sending_content = self._file_message_content(
             "正在发送文件", filename, file_path, transfer_id
         )
-        
+
         if self.is_group:
             sending_row = self._append_bubble(self.app.device_name, sending_content, ts, is_self=True)
             if self.page:
                 self.page.update()
-                
+
             def worker():
                 # Save group chat message & send to others
                 content = self._file_message_content("文件", filename, file_path)
                 self.app.send_group_chat_message(self.current_group_id, content)
-                
+
                 # Fetch members
                 group = self.app.friend_db.get_group(self.current_group_id)
                 if group:
@@ -1241,18 +1688,30 @@ class ChatView:
                                 target=lambda member=m: self.app.message_service.send_file(member, file_path),
                                 daemon=True
                             ).start()
-                
+
                 done_ts = time.strftime("%H:%M:%S", time.localtime())
                 self._replace_bubble(sending_row, self.app.device_name, content, done_ts, is_self=True)
                 if self.page:
                     self.page.update()
             threading.Thread(target=worker, daemon=True).start()
         else:
+            target_friend = self.current_friend
+            self._remember_transfer_state(
+                transfer_id,
+                peer_name=target_friend,
+                filename=filename,
+                file_path=file_path,
+                sending=True,
+                status="正在发送文件",
+                completed=0,
+                total=os.path.getsize(file_path) if os.path.exists(file_path) else 0,
+                percent=0.0,
+                timestamp=ts,
+                final=False,
+            )
             sending_row = self._append_bubble(self.app.device_name, sending_content, ts, is_self=True)
             if self.page:
                 self.page.update()
-            target_friend = self.current_friend
-
             def worker():
                 ok = self.app.send_file_to_friend(
                     target_friend, file_path, transfer_id
@@ -1264,7 +1723,13 @@ class ChatView:
                 content = self._file_message_content(
                     status, filename, file_path, transfer_id
                 )
-                self._replace_bubble(sending_row, self.app.device_name, content, done_ts, is_self=True)
+                self._remember_transfer_state(
+                    transfer_id,
+                    status=status,
+                    final=("等待" not in status),
+                )
+                if self._msg_list is not None and sending_row in self._msg_list.controls:
+                    self._replace_bubble(sending_row, self.app.device_name, content, done_ts, is_self=True)
                 if "等待" not in status:
                     self._transfer_widgets.pop(transfer_id, None)
                 if self.page:
@@ -1272,6 +1737,8 @@ class ChatView:
             threading.Thread(target=worker, daemon=True).start()
 
     def _back_to_list(self, _e):
+        self._transfer_widgets.clear()
+        self._msg_list = None
         self.current_friend = ""
         self.app.show_view("chat")
 
@@ -1417,6 +1884,8 @@ class ChatView:
         if not file_id:
             return
         self._closed_file_transfers.add(file_id)
+        if file_id in self._transfer_states:
+            self._transfer_states[file_id]["final"] = True
         self._transfer_widgets.pop(file_id, None)
         self._pending_file_offers.pop(file_id, None)
 
@@ -1433,6 +1902,19 @@ class ChatView:
         """
         if file_id in self._closed_file_transfers:
             return
+        progress_value = min(1.0, max(0.0, completed / total)) if total else 0.0
+        self._remember_transfer_state(
+            file_id,
+            peer_name=peer_name,
+            filename=filename,
+            sending=bool(sending),
+            status="正在发送文件" if sending else "正在接收文件",
+            completed=int(completed or 0),
+            total=int(total or 0),
+            confirmed=int(confirmed or 0),
+            percent=progress_value * 100,
+            final=False,
+        )
         widget = self._transfer_widgets.get(file_id)
         if not widget:
             old_id, old_widget = self._find_transfer_widget(
@@ -1521,6 +2003,11 @@ class ChatView:
         """Update transfer widget for *file_id* to the new status."""
         if file_id in self._closed_file_transfers:
             return
+        self._remember_transfer_state(
+            file_id,
+            status=status,
+            final=self._is_final_file_status(status),
+        )
         widget = self._transfer_widgets.get(file_id)
         if not widget:
             if self._is_final_file_status(status):
@@ -1695,11 +2182,11 @@ class ChatView:
                 ft.Column(
                     [
                         ft.Text(
-                            filename, 
-                            size=13, 
-                            weight=ft.FontWeight.BOLD, 
+                            filename,
+                            size=13,
+                            weight=ft.FontWeight.BOLD,
                             color=ft.Colors.ON_SURFACE,
-                            overflow=ft.TextOverflow.ELLIPSIS, 
+                            overflow=ft.TextOverflow.ELLIPSIS,
                             max_lines=1,
                             width=140,
                         ),
@@ -1781,7 +2268,7 @@ class ChatView:
         )
 
         row = ft.Row([avatar, bubble], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.END)
-        
+
         offer["widget"] = row
         self._msg_list.controls.append(row)
         self._scroll_bottom()
@@ -1850,10 +2337,10 @@ class ChatView:
         group = self.app.friend_db.get_group(group_id)
         if not group or not self.page:
             return
-        
+
         name = group.get("group_name", "")
         members = group.get("members", [])
-        
+
         members_chips = []
         for m in members:
             is_me = (m == self.app.device_name)
@@ -1925,7 +2412,7 @@ class ChatView:
             return
 
         selected_friends = []
-        
+
         group_name_input = ft.TextField(
             hint_text="输入群聊名称...",
             border_radius=8,
@@ -1964,7 +2451,7 @@ class ChatView:
             if not selected_friends:
                 self.app.show_toast("请选择群成员")
                 return
-            
+
             group_id = self.app.create_group(group_name, selected_friends)
             close_dialog(None)
             self.app.show_toast(f"群聊「{group_name}」创建成功！")
@@ -1997,34 +2484,34 @@ class ChatView:
         group = self.app.friend_db.get_group(group_id)
         if not group or not self.page:
             return
-        
+
         name = group.get("group_name", "")
         members = group.get("members", [])
         owner = group.get("owner", "")
         only_owner_manage = int(group.get("only_owner_manage", 0) or 0)
-        
+
         is_owner = (self.app.device_name == owner or not owner)
         can_manage = True
         if only_owner_manage and not is_owner:
             can_manage = False
-            
+
         group_name_input = ft.TextField(
             value=name,
             hint_text="修改群聊名称...",
             border_radius=8,
             disabled=not can_manage,
         )
-        
+
         permission_switch = ft.Switch(
             label="仅群主可编辑名称及邀请成员",
             value=bool(only_owner_manage),
             disabled=not is_owner,
             label_position=ft.LabelPosition.RIGHT,
         )
-        
+
         all_friends = self.app.get_all_friends() or []
         invite_candidates = [f for f in all_friends if f.get("name") not in members]
-        
+
         selected_invitees = []
         def on_invitee_change(e, m_name):
             if e.control.value:
@@ -2033,7 +2520,7 @@ class ChatView:
             else:
                 if m_name in selected_invitees:
                     selected_invitees.remove(m_name)
-                    
+
         checkboxes = []
         for cand in invite_candidates:
             cand_name = cand.get("name", "")
@@ -2045,39 +2532,39 @@ class ChatView:
                     on_change=lambda e, cn=cand_name: on_invitee_change(e, cn)
                 )
             )
-            
+
         def close_dialog(e):
             dlg.open = False
             self.page.update()
-                
+
         def do_save(e):
             new_name = (group_name_input.value or "").strip()
             if not new_name:
                 self.app.show_toast("群聊名称不能为空")
                 return
-                
+
             updated_members = list(members)
             for inv in selected_invitees:
                 if inv not in updated_members:
                     updated_members.append(inv)
-            
+
             new_owner = owner if owner else self.app.device_name
             new_only_owner_manage = 1 if permission_switch.value else 0
-                    
+
             self.app.update_group_info(group_id, new_name, updated_members, owner=new_owner, only_owner_manage=new_only_owner_manage)
             close_dialog(None)
             self.app.show_toast("群信息设置已保存并同步 👥")
-            
+
             self.current_friend = new_name
             self.refresh_header()
-            
+
         content_items = [
             ft.Text("群聊名称", size=T.FS_CAPTION, weight=ft.FontWeight.BOLD),
             group_name_input,
             ft.Text(f"群主: {owner if owner else self.app.device_name}", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
             permission_switch,
         ]
-        
+
         if not can_manage:
             content_items.append(
                 ft.Text(f"🔒 仅群主 {owner} 可管理该群", color=ft.Colors.RED_300, size=T.FS_CAPTION, weight=ft.FontWeight.BOLD)
@@ -2094,7 +2581,7 @@ class ChatView:
                 content_items.append(
                     ft.Text("暂无可邀请的好友", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
                 )
-                
+
         dlg = ft.AlertDialog(
             title=ft.Text("群聊设置 ⚙️", weight=ft.FontWeight.BOLD),
             content=ft.Column(

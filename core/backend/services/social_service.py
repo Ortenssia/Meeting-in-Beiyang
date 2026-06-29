@@ -68,34 +68,55 @@ class SocialService:
                 "can_chat": False,
             })
 
-        # Deduplicate by stable identity: prefer the entry with the most
-        # recent last_seen timestamp (or 127.0.0.1 for same-machine).
-        deduped: Dict[str, Dict[str, Any]] = {}
+        # Deduplicate by stable identity (user_id/device_id) or name, merging
+        # duplicates that may be in transition (e.g. empty user_id vs filled).
+        deduped: List[Dict[str, Any]] = []
         for card in cards:
-            uid = card.get("user_id") or card.get("device_id") or card["name"]
-            existing = deduped.get(uid)
-            if not existing:
-                deduped[uid] = card
-            elif card.get("ip") == "127.0.0.1":
-                deduped[uid] = card  # prefer loopback for same-machine
-            elif existing.get("ip") != "127.0.0.1":
-                # Keep whichever was seen more recently
-                # (last_seen not available in card, so keep first non-loopback)
-                pass
-        cards = list(deduped.values())
+            matched_index = -1
+            for idx, existing in enumerate(deduped):
+                if card.get("user_id") and existing.get("user_id") and card["user_id"] == existing["user_id"]:
+                    matched_index = idx
+                    break
+                if card.get("device_id") and existing.get("device_id") and card["device_id"] == existing["device_id"]:
+                    matched_index = idx
+                    break
+                if card["name"] == existing["name"]:
+                    matched_index = idx
+                    break
+
+            if matched_index == -1:
+                deduped.append(card)
+            else:
+                existing = deduped[matched_index]
+                existing_has_id = bool(existing.get("user_id") or existing.get("device_id"))
+                card_has_id = bool(card.get("user_id") or card.get("device_id"))
+
+                replace = False
+                if card_has_id and not existing_has_id:
+                    replace = True
+                elif existing_has_id and not card_has_id:
+                    replace = False
+                elif card.get("ip") == "127.0.0.1" and existing.get("ip") != "127.0.0.1":
+                    replace = True
+
+                if replace:
+                    deduped[matched_index] = card
+        cards = deduped
 
         return sorted(cards, key=lambda item: (item["status"] != "none", item["name"]))
 
     def get_friend_cards(self) -> List[Dict[str, Any]]:
         friends = self.friend_db.get_friends() if self.friend_db else []
         cards = []
+        seen_names = set()
         for friend in friends:
             status = friend.get("status", "accepted") or "accepted"
             if status != "accepted":
                 continue
             name = friend.get("name", "")
-            if not name:
+            if not name or name in seen_names:
                 continue
+            seen_names.add(name)
             online = self.connection_manager.is_friend_online(name) if self.connection_manager else False
             cards.append({
                 "user_id": friend.get("user_id", ""),
@@ -171,13 +192,13 @@ class SocialService:
             for g_row in group_rows:
                 group_id = g_row["group_id"]
                 group_name = g_row["group_name"]
-                
+
                 cursor.execute("""
-                    SELECT sender, content, timestamp FROM group_chat_history 
+                    SELECT sender, content, timestamp FROM group_chat_history
                     WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1
                 """, (group_id,))
                 msg_row = cursor.fetchone()
-                
+
                 if msg_row:
                     last_message = f"{msg_row['sender']}: {msg_row['content']}"
                     raw_time = msg_row["timestamp"]
@@ -186,7 +207,7 @@ class SocialService:
                     last_message = "群聊已创建"
                     raw_time = g_row["created_at"]
                     last_time = ""
-                    
+
                 chat_list.append({
                     "user_id": group_id,
                     "name": group_name,

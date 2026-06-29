@@ -1,22 +1,21 @@
 """Friends view: search, category filter, friend cards, manage dialog."""
+import threading
 import flet as ft
 
 from .. import theme as T
 from .discover import DiscoverView
 
-CATEGORIES = ["全部", "同学", "朋友", "自定义"]
-
-
 class FriendsView:
     def __init__(self, app):
         self.app = app
         self.page = app.page
+        self._lock = threading.Lock()
         self.discover_view = DiscoverView(app)
         self.root = None
         self.search = ft.TextField(
-            label="搜索好友", 
+            label="搜索好友",
             prefix_icon=ft.Icons.SEARCH_ROUNDED,
-            on_change=self._on_search, 
+            on_change=self._on_search,
             border_radius=14,
             border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
@@ -26,17 +25,39 @@ class FriendsView:
         self._category = "全部"
         self._query = ""
         self.chip_row = ft.Row(
-            [
-                T.FilterChip(label=c, selected=(c == "全部"),
-                              on_select=lambda chip, c=c: self._set_category(c, chip))
-                for c in CATEGORIES
-            ],
             spacing=T.SP_SM,
             scroll=ft.ScrollMode.AUTO,
         )
         self.list_col = ft.Column(spacing=T.SP_SM, expand=True, scroll=ft.ScrollMode.AUTO)
 
+    def _load_categories(self):
+        cats = self.app.friend_db.get_friend_categories()
+        if not cats:
+            self.app.friend_db.add_friend_category("同学")
+            self.app.friend_db.add_friend_category("朋友")
+            cats = self.app.friend_db.get_friend_categories()
+        return cats or ["朋友"]
+
+    def _build_chips(self):
+        cats = self._load_categories()
+        full_list = ["全部"] + cats
+        self.chip_row.controls.clear()
+        for c in full_list:
+            self.chip_row.controls.append(
+                T.FilterChip(
+                    label=c,
+                    selected=(c == self._category),
+                    on_select=lambda chip, val=c: self._set_category(val, chip)
+                )
+            )
+        if self.page:
+            try:
+                self.chip_row.update()
+            except Exception:
+                pass
+
     def build(self):
+        self._build_chips()
         if not self.root:
             self.root = ft.Column(
                 [
@@ -73,6 +94,12 @@ class FriendsView:
                                     tooltip="发起群聊",
                                     on_click=self._on_create_group,
                                 ),
+                                ft.IconButton(
+                                    icon=ft.Icons.LABEL_OUTLINE_ROUNDED,
+                                    icon_color=ft.Colors.DEEP_PURPLE_400,
+                                    tooltip="管理分组",
+                                    on_click=self._on_manage_categories,
+                                ),
                                 self.count,
                             ],
                             spacing=4,
@@ -91,48 +118,53 @@ class FriendsView:
         )
 
     def on_enter(self):
+        self._build_chips()
         self.refresh()
         self.discover_view.on_enter()
 
     # -- refresh -----------------------------------------------------------
 
     def refresh(self):
-        friends = self.app.get_all_friends() if self.app.runtime else []
-        items = list(friends)
-        if self._category != "全部":
-            items = [i for i in items if i.get("category", "朋友") == self._category]
-        if self._query:
-            items = [i for i in items if self._query in i.get("name", "").lower()]
+        with self._lock:
+            cats = self._load_categories()
+            if self._category != "全部" and self._category not in cats:
+                self._category = "全部"
+            friends = self.app.get_all_friends() if self.app.runtime else []
+            items = list(friends)
+            if self._category != "全部":
+                items = [i for i in items if i.get("category", "朋友") == self._category]
+            if self._query:
+                items = [i for i in items if self._query in i.get("name", "").lower()]
 
-        self.list_col.controls.clear()
-        for f in items:
-            self.list_col.controls.append(self._friend_card(f))
-        if not items:
-            self.list_col.controls.append(
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Icon(ft.Icons.PEOPLE_OUTLINE_ROUNDED, size=40, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4),
-                            ft.Text(
-                                "暂无好友\n去「发现」发送好友申请",
-                                text_align=ft.TextAlign.CENTER, 
-                                size=T.FS_BODY,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                                weight=ft.FontWeight.W_500
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=T.SP_SM,
-                    ),
-                    padding=T.SP_2XL, 
-                    alignment=ft.alignment.Alignment.CENTER,
-                    expand=True,
+            self.list_col.controls.clear()
+            for f in items:
+                self.list_col.controls.append(self._friend_card(f))
+            if not items:
+                self.list_col.controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Icon(ft.Icons.PEOPLE_OUTLINE_ROUNDED, size=40, color=ft.Colors.ON_SURFACE_VARIANT, opacity=0.4),
+                                ft.Text(
+                                    "暂无好友\n去「发现」发送好友申请",
+                                    text_align=ft.TextAlign.CENTER,
+                                    size=T.FS_BODY,
+                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                    weight=ft.FontWeight.W_500
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=T.SP_SM,
+                        ),
+                        padding=T.SP_2XL,
+                        alignment=ft.alignment.Alignment.CENTER,
+                        expand=True,
+                    )
                 )
-            )
-        self.count.value = f"{len(items)} 位好友"
-        if self.page:
-            self.page.update()
+            self.count.value = f"{len(items)} 位好友"
+            if self.page:
+                self.page.update()
 
     # -- builders ----------------------------------------------------------
 
@@ -177,7 +209,7 @@ class FriendsView:
                     ft.Container(width=6, height=6, border_radius=3, bgcolor=ft.Colors.GREEN_400 if online else ft.Colors.ON_SURFACE_VARIANT),
                     ft.Text(
                         "在线" if online else "离线",
-                        size=T.FS_CAPTION, 
+                        size=T.FS_CAPTION,
                         color=ft.Colors.GREEN_400 if online else ft.Colors.ON_SURFACE_VARIANT,
                         weight=ft.FontWeight.BOLD if online else ft.FontWeight.NORMAL,
                     ),
@@ -334,22 +366,22 @@ class FriendsView:
     def _manage(self, data):
         name = data.get("name", "")
         current = data.get("category", "朋友")
-        
-        seg = ft.SegmentedButton(
-            selected=[current] if current in ["同学", "朋友", "自定义"] else ["朋友"],
-            segments=[
-                ft.Segment(label=ft.Text("同学", weight=ft.FontWeight.W_600), value="同学"),
-                ft.Segment(label=ft.Text("朋友", weight=ft.FontWeight.W_600), value="朋友"),
-                ft.Segment(label=ft.Text("自定义", weight=ft.FontWeight.W_600), value="自定义"),
-            ],
-            allow_multiple_selection=False, 
-            allow_empty_selection=False,
+
+        cats = self._load_categories()
+        category_dd = ft.Dropdown(
+            options=[ft.dropdown.Option(c) for c in cats],
+            value=current if current in cats else cats[0],
+            border_radius=12,
+            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            expand=True,
         )
 
         def on_save(_e):
-            new_cat = seg.selected[0] if seg.selected else "朋友"
+            new_cat = category_dd.value or cats[0]
             self.app.set_friend_category(name, new_cat)
             dlg.open = False
+            self.refresh()
             self.page.update()
 
         dlg = ft.AlertDialog(
@@ -358,8 +390,8 @@ class FriendsView:
             content=ft.Column(
                 [
                     ft.Text("选择好友的分组类别：", size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT),
-                    seg
-                ], 
+                    category_dd
+                ],
                 spacing=T.SP_SM, tight=True, width=320
             ),
             actions=[
@@ -385,9 +417,9 @@ class FriendsView:
             actions=[
                 ft.TextButton("取消", on_click=lambda _e: self._close(dlg)),
                 ft.ElevatedButton(
-                    "删除好友", 
+                    "删除好友",
                     on_click=do_delete,
-                    bgcolor=ft.Colors.RED_600, 
+                    bgcolor=ft.Colors.RED_600,
                     color=ft.Colors.WHITE
                 ),
             ],
@@ -408,7 +440,7 @@ class FriendsView:
             return
 
         selected_friends = []
-        
+
         group_name_input = ft.TextField(
             hint_text="输入群聊名称...",
             border_radius=8,
@@ -447,7 +479,7 @@ class FriendsView:
             if not selected_friends:
                 self.app.show_toast("请选择群成员")
                 return
-            
+
             group_id = self.app.create_group(group_name, selected_friends)
             close_dialog(None)
             self.app.show_toast(f"群聊「{group_name}」创建成功！")
@@ -469,6 +501,120 @@ class FriendsView:
             actions=[
                 ft.TextButton("取消", on_click=close_dialog),
                 ft.ElevatedButton("创建", on_click=do_create, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
+    def _on_manage_categories(self, _e):
+        cats = self._load_categories()
+
+        cats_list_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, height=200)
+        new_cat_input = ft.TextField(
+            hint_text="输入新分组名称...",
+            border_radius=10,
+            content_padding=10,
+            expand=True,
+        )
+
+        def refresh_cats_list():
+            cats_list_col.controls.clear()
+            for c in cats:
+                def make_delete_cb(category_to_delete):
+                    def delete_cb(_e):
+                        if len(cats) <= 1:
+                            self.app.show_toast("最少保留一个分组喔~")
+                            return
+                        cats.remove(category_to_delete)
+                        fallback_group = cats[0]
+                        self.app.friend_db.delete_friend_category(
+                            category_to_delete,
+                            fallback=fallback_group,
+                        )
+
+                        refresh_cats_list()
+                        self._build_chips()
+                        self.refresh()
+                    return delete_cb
+
+                cats_list_col.controls.append(
+                    ft.Row(
+                        [
+                            ft.Text(c, weight=ft.FontWeight.BOLD, expand=True),
+                            ft.IconButton(
+                                icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
+                                icon_color=ft.Colors.RED_400,
+                                tooltip="删除此分组",
+                                on_click=make_delete_cb(c),
+                                disabled=len(cats) <= 1,
+                            )
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                    )
+                )
+            if self.page:
+                try:
+                    cats_list_col.update()
+                except Exception:
+                    pass
+
+        def add_category(_e):
+            val = (new_cat_input.value or "").strip()
+            if not val:
+                self.app.show_toast("请输入分组名称")
+                return
+            if val in cats:
+                self.app.show_toast("该分组已存在")
+                return
+            if val == "全部":
+                self.app.show_toast("不能使用内置分组名")
+                return
+            if not self.app.friend_db.add_friend_category(val):
+                self.app.show_toast("分组添加失败")
+                return
+            cats[:] = self._load_categories()
+            new_cat_input.value = ""
+            if self.page:
+                try:
+                    new_cat_input.update()
+                except Exception:
+                    pass
+            refresh_cats_list()
+            self._build_chips()
+            self.refresh()
+            self.app.show_toast(f"已添加分组「{val}」")
+
+        add_btn = ft.IconButton(
+            icon=ft.Icons.ADD_ROUNDED,
+            icon_color=ft.Colors.DEEP_PURPLE_500,
+            on_click=add_category,
+            tooltip="添加分组"
+        )
+
+        refresh_cats_list()
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("管理好友分组 🏷️", weight=ft.FontWeight.BOLD),
+            content=ft.Column(
+                [
+                    ft.Text("当前全部分组（最少保留一个）：", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
+                    cats_list_col,
+                    ft.Divider(height=16),
+                    ft.Text("添加新分组：", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Row(
+                        [new_cat_input, add_btn],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER
+                    )
+                ],
+                spacing=T.SP_SM,
+                tight=True,
+                width=300
+            ),
+            actions=[
+                ft.TextButton("完成", on_click=lambda _e: self._close(dlg))
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )

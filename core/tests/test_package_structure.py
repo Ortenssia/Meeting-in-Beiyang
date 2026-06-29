@@ -7,10 +7,12 @@ import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.backend.services.social_runtime import SocialRuntime
+from core.backend.services.network_policy import CAMPUS_NETWORK_POLICY
 from core.backend.shared.protocol import Protocol
 from core.config import get_app_paths
 from core.frontend import theme as T
@@ -275,6 +277,7 @@ class _ChatAppStub:
         self.sent_files = []
         self.cancelled_files = []
         self.deleted_messages = []
+        self.shown_views = []
 
     def get_avatar_for_name(self, name):
         return name
@@ -295,6 +298,9 @@ class _ChatAppStub:
     def send_file_to_friend(self, friend_name, file_path, file_id=""):
         self.sent_files.append((friend_name, file_path))
         return True
+
+    def show_view(self, key):
+        self.shown_views.append(key)
 
 
 def test_chat_file_status_replaces_existing_bubble_in_place():
@@ -318,6 +324,28 @@ def test_chat_file_status_replaces_existing_bubble_in_place():
     )
 
     assert len(view._msg_list.controls) == 1
+
+
+def test_android_outgoing_file_is_staged_in_private_storage(tmp_path):
+    source = tmp_path / "picked" / "photo.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"android-picker-content")
+    data_dir = tmp_path / "app-data"
+
+    app = _ChatAppStub()
+    app.page = SimpleNamespace(platform="android", width=360)
+    app.paths = SimpleNamespace(data_dir=data_dir)
+    view = ChatView(app)
+
+    staged = Path(view._stage_android_outgoing_file(str(source)))
+
+    assert staged.parent == data_dir / "outgoing_files"
+    assert staged.name.endswith("_photo.jpg")
+    assert staged.read_bytes() == source.read_bytes()
+
+
+def test_file_transfer_chunk_size_remains_256_kib():
+    assert CAMPUS_NETWORK_POLICY.file_chunk_size == 256 * 1024
 
 
 def test_active_file_bubble_has_determinate_progress_and_pause_button():
@@ -697,6 +725,78 @@ def test_incoming_retry_completion_replaces_stale_progress_bubble():
 
     assert len(view._msg_list.controls) == 1
     assert view._transfer_widgets == {}
+
+
+def test_file_progress_is_retained_without_visible_chat_widget():
+    view = ChatView(_ChatAppStub())
+
+    view.on_file_progress(
+        "background-transfer",
+        "Alice",
+        "photo.png",
+        512,
+        1024,
+        True,
+    )
+
+    state = view._transfer_states["background-transfer"]
+    assert state["completed"] == 512
+    assert state["total"] == 1024
+    assert state["peer_name"] == "Alice"
+    assert state["final"] is False
+
+
+def test_back_to_chat_list_keeps_transfer_state_but_drops_stale_widgets():
+    import flet as ft
+
+    app = _ChatAppStub()
+    view = ChatView(app)
+    view.current_friend = "Alice"
+    view._msg_list = ft.Column()
+    view._transfer_states["transfer-1"] = {"peer_name": "Alice", "final": False}
+    view._transfer_widgets["transfer-1"] = {"row": ft.Row()}
+
+    view._back_to_list(None)
+
+    assert view.current_friend == ""
+    assert view._msg_list is None
+    assert view._transfer_widgets == {}
+    assert "transfer-1" in view._transfer_states
+    assert app.shown_views == ["chat"]
+
+
+def test_android_file_bubble_fits_viewport_and_omits_self_avatar():
+    import flet as ft
+
+    class MobilePage:
+        width = 360
+        platform = "android"
+
+        def update(self):
+            pass
+
+    app = _ChatAppStub()
+    app.page = MobilePage()
+    view = ChatView(app)
+    view.page = app.page
+    view._msg_list = ft.Column()
+    view._scroll_bottom = lambda: None
+
+    row = view._append_bubble(
+        "Me",
+        view._file_message_content(
+            "正在发送文件",
+            "large-photo-with-long-name.png",
+            r"C:\Temp\large-photo.png",
+            "mobile-transfer",
+        ),
+        "12:00:00",
+        is_self=True,
+    )
+
+    assert len(row.controls) == 2
+    bubble_gesture = row.controls[-1]
+    assert bubble_gesture.content.width <= 268
 
 
 def test_root_does_not_contain_python_application_code():
