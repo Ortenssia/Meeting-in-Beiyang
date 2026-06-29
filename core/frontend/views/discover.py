@@ -265,9 +265,9 @@ class DiscoverView:
                 "accepted": "已是好友", "rejected": "可重试",
             }.get(status, "添加好友")
 
-        # Use a standard Button here. GestureDetector/abstract Button taps can be swallowed or fail on Android.
+        # Use a standard ElevatedButton here. GestureDetector/abstract Button taps can be swallowed or fail on Android.
         is_disabled = status in ("pending_sent", "pending_received", "accepted")
-        btn = ft.Button(
+        btn = ft.ElevatedButton(
             status_label,
             icon=ft.Icons.PERSON_ADD_ROUNDED if not is_disabled else None,
             disabled=is_disabled,

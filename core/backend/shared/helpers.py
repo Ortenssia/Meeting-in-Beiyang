@@ -19,8 +19,9 @@ class Helpers:
     # ================================================================== #
 
     _cached_local_ips = None
+    _cached_local_ips_time = 0.0
     _cached_default_ip = None
-    _last_cache_time = 0.0
+    _cached_default_ip_time = 0.0
 
     @staticmethod
     def _detect_interfaces() -> List[dict]:
@@ -68,6 +69,41 @@ class Helpers:
                             "gateway": gateway,
                             "broadcast": None
                         })
+            except Exception:
+                pass
+
+        # Android/Java network interfaces fallback.
+        if not interfaces:
+            try:
+                import importlib
+                j_module = importlib.import_module("j" + "nius")
+                autoclass = j_module.autoclass
+                NetworkInterface = autoclass('java.net.NetworkInterface')
+                interfaces_enum = NetworkInterface.getNetworkInterfaces()
+                if interfaces_enum:
+                    while interfaces_enum.hasMoreElements():
+                        ni = interfaces_enum.nextElement()
+                        if not ni.isUp() or ni.isLoopback():
+                            continue
+                        name = ni.getName()
+                        addrs = ni.getInterfaceAddresses()
+                        if addrs:
+                            for addr in addrs.toArray():
+                                inet_addr = addr.getAddress()
+                                if inet_addr:
+                                    ip = inet_addr.getHostAddress()
+                                    if ip and ":" not in ip and not ip.startswith("127."):
+                                        prefix = addr.getNetworkPrefixLength()
+                                        mask = Helpers._prefix_to_mask(prefix)
+                                        bcast_obj = addr.getBroadcast()
+                                        broadcast = bcast_obj.getHostAddress() if bcast_obj else None
+                                        interfaces.append({
+                                            "name": name,
+                                            "ip": ip,
+                                            "mask": mask,
+                                            "gateway": None,
+                                            "broadcast": broadcast
+                                        })
             except Exception:
                 pass
 
@@ -163,7 +199,7 @@ class Helpers:
         获取所有本地 IPv4 地址（不含回环 127.x）。
         """
         now = time.time()
-        if Helpers._cached_local_ips is not None and (now - Helpers._last_cache_time < 10.0):
+        if Helpers._cached_local_ips is not None and (now - Helpers._cached_local_ips_time < 10.0):
             return Helpers._cached_local_ips
 
         ifaces = Helpers._detect_interfaces()
@@ -178,7 +214,7 @@ class Helpers:
             ips.append(default_ip)
 
         Helpers._cached_local_ips = ips
-        Helpers._last_cache_time = now
+        Helpers._cached_local_ips_time = now
         return ips
 
     @staticmethod
@@ -188,7 +224,7 @@ class Helpers:
         自动辨识并过滤代理网卡及 TUN 虚拟 IP 范围。
         """
         now = time.time()
-        if Helpers._cached_default_ip is not None and (now - Helpers._last_cache_time < 10.0):
+        if Helpers._cached_default_ip is not None and (now - Helpers._cached_default_ip_time < 10.0):
             return Helpers._cached_default_ip
 
         ifaces = Helpers._detect_interfaces()
@@ -232,6 +268,7 @@ class Helpers:
                     break
 
         Helpers._cached_default_ip = best_ip
+        Helpers._cached_default_ip_time = now
         return best_ip
 
     @staticmethod

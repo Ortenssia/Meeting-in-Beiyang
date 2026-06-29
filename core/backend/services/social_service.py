@@ -81,9 +81,27 @@ class SocialService:
                 if card.get("device_id") and existing.get("device_id") and card["device_id"] == existing["device_id"]:
                     matched_index = idx
                     break
+                # Only match by name if there is no conflict in IDs or endpoints (different ports on same IP)
                 if card["name"] == existing["name"]:
-                    matched_index = idx
-                    break
+                    card_uid = card.get("user_id")
+                    exist_uid = existing.get("user_id")
+                    card_did = card.get("device_id")
+                    exist_did = existing.get("device_id")
+                    
+                    has_id_conflict = (
+                        (card_uid and exist_uid and card_uid != exist_uid) or
+                        (card_did and exist_did and card_did != exist_did)
+                    )
+                    has_endpoint_conflict = (
+                        card.get("ip") == existing.get("ip") and
+                        card.get("tcp_port") != existing.get("tcp_port")
+                    )
+                    
+                    if not has_id_conflict and not has_endpoint_conflict:
+                        # For different IPs, only merge if at least one lacks IDs (fallback transition card)
+                        if card.get("ip") == existing.get("ip") or not (card_uid or card_did) or not (exist_uid or exist_did):
+                            matched_index = idx
+                            break
 
             if matched_index == -1:
                 deduped.append(card)
