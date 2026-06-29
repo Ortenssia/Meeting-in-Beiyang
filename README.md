@@ -138,53 +138,6 @@ powershell -ExecutionPolicy Bypass -File operations/run_local_pair.ps1
 
 `--instance` 会为每个进程创建隔离的数据库、文件接收目录和头像缓存，路径位于 `.runtime/<instance>/`。两个实例必须使用不同的 TCP 和 UDP 监听端口，但共享项目中的字体、图标和默认头像资源。
 
-## 运行测试
-
-```powershell
-python -m pytest core/tests -q
-```
-
-当前验证结果：
-
-```text
-136 passed
-```
-
-## 打包发布
-
-### Android APK（Docker）
-
-先启动 Docker Desktop，然后在项目根目录执行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build-apk-clean.ps1
-```
-
-脚本会删除旧暂存与旧 APK、复制最新源码、构建并校验版本和 Build ID。产物位于：
-
-```text
-build\apk\
-```
-
-若 NDK 下载损坏，脚本会清理不完整的 NDK 并自动重试，文件传输分块配置不会因此改变。
-
-### Windows PC 端
-
-Windows 包必须在 Windows 电脑上构建。安装 Python 3.10+ 和项目依赖后执行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build-windows-clean.ps1
-```
-
-脚本使用独立暂存目录打包最新源码，产物包括：
-
-```text
-build\windows\                              可运行程序及其依赖
-build\release\meeting-in-beiyang-windows-1.8.95.zip
-```
-
-Windows 版不是单文件程序，不能只发送 `.exe`。发布时应发送 `build\release\` 中生成的 ZIP，使用者解压后再运行其中的 EXE。
-
 ## 界面与数据路径
 
 应用使用 [Flet](https://flet.io) 构建界面，采用 Material 3 风格并跟随系统明暗主题。
@@ -208,7 +161,6 @@ core/                       应用代码
     services/               UDP、TCP、好友、消息、文件和运行时服务
     shared/                 协议、网络工具和共享消息格式
   ops/                      启动准备与日志配置
-  tests/                    单元测试和社交流程测试
 assets/                     图标、字体和默认头像等资源
 operations/                 本地运行与双实例测试脚本
 core/main.py                应用入口

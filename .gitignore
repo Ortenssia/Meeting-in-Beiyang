@@ -32,3 +32,8 @@ build/
 .apk-build-clean/
 .apk-output-clean/
 .windows-build-clean/
+core/tests/
+run_tests.bat
+build-apk-clean.ps1
+build-windows-clean.ps1
+docker-build-apk.sh
