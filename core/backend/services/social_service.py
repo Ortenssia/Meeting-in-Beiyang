@@ -62,6 +62,7 @@ class SocialService:
                 "name": dev.device_name,
                 "ip": dev.ip,
                 "tcp_port": dev.tcp_port,
+                "candidate_ips": getattr(dev, "candidate_ips", []),
                 "status": status,
                 "status_label": self._relationship_label(status),
                 "can_request": status in ("none", "rejected"),
@@ -117,12 +118,18 @@ class SocialService:
             if not name or name in seen_names:
                 continue
             seen_names.add(name)
-            online = self.connection_manager.is_friend_online(name) if self.connection_manager else False
+            port = int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT)
+            endpoint = f"{friend.get('ip', '')}:{port}" if friend.get("ip") else ""
+            online = False
+            if self.connection_manager:
+                online = self.connection_manager.is_friend_online(name)
+                if not online and endpoint:
+                    online = self.connection_manager.is_connected(friend.get("ip", ""), port)
             cards.append({
                 "user_id": friend.get("user_id", ""),
                 "name": name,
                 "ip": friend.get("ip", ""),
-                "port": int(friend.get("port", Protocol.DEFAULT_TCP_PORT) or Protocol.DEFAULT_TCP_PORT),
+                "port": port,
                 "tags": friend.get("tags", []),
                 "bio": friend.get("bio", ""),
                 "avatar": friend.get("avatar", ""),

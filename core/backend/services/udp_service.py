@@ -31,6 +31,7 @@ class DeviceInfo:
         last_seen: float,
         user_id: str = "",
         device_id: str = "",
+        candidate_ips: Optional[List[str]] = None,
     ):
         """
         Args:
@@ -45,6 +46,7 @@ class DeviceInfo:
         self.last_seen = last_seen
         self.user_id = user_id
         self.device_id = device_id
+        self.candidate_ips = candidate_ips or []
 
     def is_online(self, timeout: int = 15) -> bool:
         """
@@ -204,6 +206,27 @@ class UDPService:
             self._targets_cache_at = now
         return result
 
+    def _get_candidate_ips(self) -> List[str]:
+        """Return local addresses worth advertising for TCP fallback."""
+        candidates = []
+        try:
+            for iface in Helpers._detect_interfaces():
+                ip = iface.get("ip", "")
+                if not ip or ip.startswith("127."):
+                    continue
+                if self._is_virtual_iface(iface.get("name", "")):
+                    continue
+                if ip.startswith("198.18.") or ip.startswith("198.19.") or ip.startswith("172.19."):
+                    continue
+                candidates.append(ip)
+        except Exception:
+            pass
+        default_ip = Helpers.get_default_ip()
+        if default_ip and not default_ip.startswith("127.") and default_ip in candidates:
+            candidates.insert(0, default_ip)
+        seen = set()
+        return [ip for ip in candidates if not (ip in seen or seen.add(ip))]
+
     # ================================================================== #
     #  生命周期
     # ================================================================== #
@@ -301,7 +324,11 @@ class UDPService:
         while self.running:
             try:
                 ping_data = Protocol.create_ping_packet(
-                    self.device_name, self.tcp_port, self.user_id, self.device_id
+                    self.device_name,
+                    self.tcp_port,
+                    self.user_id,
+                    self.device_id,
+                    self._get_candidate_ips(),
                 )
                 self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 now = time.monotonic()
@@ -373,6 +400,7 @@ class UDPService:
                     tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
                     user_id = packet.get("user_id", "")
                     device_id = packet.get("device_id", "")
+                    candidate_ips = packet.get("candidate_ips", []) or []
 
                     # 若对方也是本机实例，宣告 127.0.0.1 让对方用回环地址记录我们
                     advertised_ip = "127.0.0.1" if sender_ip in local_ips else Helpers.get_default_ip()
@@ -382,11 +410,12 @@ class UDPService:
                         self.tcp_port,
                         self.user_id,
                         self.device_id,
+                        self._get_candidate_ips(),
                     )
                     # 回复 PONG 到发送端包的真实源地址(IP 和 Port)，确保支持多实例测试
                     self.sock.sendto(pong_data, addr)
 
-                    self._add_device(record_ip, device_name, tcp_port, user_id, device_id)
+                    self._add_device(record_ip, device_name, tcp_port, user_id, device_id, candidate_ips)
 
                 elif packet_type == Protocol.UDP_PONG:
                     self._bump_diagnostic("receive_pong")
@@ -395,10 +424,14 @@ class UDPService:
                     tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
                     user_id = packet.get("user_id", "")
                     device_id = packet.get("device_id", "")
+                    candidate_ips = packet.get("candidate_ips", []) or []
 
                     # 总是使用 sender_ip（UDP 报文的源 IP），因为这一定是局域网内可达的物理 IP。
                     # 避免使用对端包内宣告的 ip（对端可能因为 VPN/代理等配置导致判定错误）
-                    self._add_device(record_ip, device_name, tcp_port, user_id, device_id)
+                    packet_ip = packet.get("ip", "")
+                    if packet_ip:
+                        candidate_ips = [packet_ip, *candidate_ips]
+                    self._add_device(record_ip, device_name, tcp_port, user_id, device_id, candidate_ips)
 
             except BlockingIOError:
                 # 非阻塞 socket 暂无数据
@@ -463,6 +496,7 @@ class UDPService:
         tcp_port: int,
         user_id: str = "",
         device_id: str = "",
+        candidate_ips: Optional[List[str]] = None,
     ):
         """
         添加或更新已发现的设备。
@@ -477,6 +511,7 @@ class UDPService:
         current_time = time.time()
         is_new = False
         is_update_notify = False
+        candidate_ips = self._clean_candidate_ips(ip, candidate_ips or [])
         canonical = device_id or user_id
         key = canonical or f"{device_name}@{ip}:{int(tcp_port or 0)}"
 
@@ -511,6 +546,7 @@ class UDPService:
                     old_device.ip != ip
                     or old_device.tcp_port != tcp_port
                     or old_device.device_name != device_name
+                    or old_device.candidate_ips != candidate_ips
                 ):
                     is_update_notify = True
                 self.devices[key].last_seen = current_time
@@ -519,10 +555,11 @@ class UDPService:
                 self.devices[key].tcp_port = tcp_port
                 self.devices[key].user_id = user_id
                 self.devices[key].device_id = device_id
+                self.devices[key].candidate_ips = candidate_ips
             else:
                 # 新设备
                 self.devices[key] = DeviceInfo(
-                    ip, device_name, tcp_port, current_time, user_id, device_id
+                    ip, device_name, tcp_port, current_time, user_id, device_id, candidate_ips
                 )
                 is_new = True
         self._mark_diagnostic(last_device_at=current_time)
@@ -545,6 +582,22 @@ class UDPService:
         with self._devices_lock:
             return [device for device in self.devices.values() if device.is_online()]
 
+    @staticmethod
+    def _clean_candidate_ips(primary_ip: str, values: List[str]) -> List[str]:
+        seen = set()
+        cleaned = []
+        for value in [primary_ip, *values]:
+            if not value or value.startswith("127."):
+                continue
+            parts = value.split(".")
+            if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            cleaned.append(value)
+        return cleaned
+
     def manual_scan(self):
         """
         手动触发一次广播和子网单播扫描。
@@ -558,7 +611,11 @@ class UDPService:
 
         try:
             ping_data = Protocol.create_ping_packet(
-                self.device_name, self.tcp_port, self.user_id, self.device_id
+                self.device_name,
+                self.tcp_port,
+                self.user_id,
+                self.device_id,
+                self._get_candidate_ips(),
             )
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             
@@ -584,12 +641,19 @@ class UDPService:
                     for p_port in probe_ports:
                         self._send_probe(ping_data, host, p_port)
                 for iface in ifaces:
+                    if self._is_virtual_iface(iface.get("name", "")):
+                        continue
                     ip = iface.get("ip")
                     mask = iface.get("mask")
                     if ip:
                         for p_port in probe_ports:
                             self._send_probe(ping_data, ip, p_port)
-                    if ip and mask and not ip.startswith("127."):
+                    if (
+                        ip
+                        and mask
+                        and not ip.startswith("127.")
+                        and not self._is_virtual_iface(iface.get("name", ""))
+                    ):
                         hosts = Helpers.get_subnet_hosts(ip, mask)
                         for host in hosts:
                             for p_port in probe_ports:
@@ -616,7 +680,11 @@ class UDPService:
 
         try:
             ping_data = Protocol.create_ping_packet(
-                self.device_name, self.tcp_port, self.user_id, self.device_id
+                self.device_name,
+                self.tcp_port,
+                self.user_id,
+                self.device_id,
+                self._get_candidate_ips(),
             )
             self._mark_diagnostic(
                 last_scan_at=time.time(),

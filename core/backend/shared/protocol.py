@@ -80,6 +80,7 @@ class Protocol:
         tcp_port: int = DEFAULT_TCP_PORT,
         user_id: str = "",
         device_id: str = "",
+        candidate_ips: Optional[List[str]] = None,
     ) -> bytes:
         """
         创建 UDP PING 广播包。
@@ -97,6 +98,7 @@ class Protocol:
             "tcp_port": tcp_port,
             "user_id": user_id,
             "device_id": device_id,
+            "candidate_ips": candidate_ips or [],
         }
         return json.dumps(packet, ensure_ascii=False).encode("utf-8")
 
@@ -107,6 +109,7 @@ class Protocol:
         tcp_port: int = DEFAULT_TCP_PORT,
         user_id: str = "",
         device_id: str = "",
+        candidate_ips: Optional[List[str]] = None,
     ) -> bytes:
         """
         创建 UDP PONG 应答包。
@@ -126,6 +129,7 @@ class Protocol:
             "tcp_port": tcp_port,
             "user_id": user_id,
             "device_id": device_id,
+            "candidate_ips": candidate_ips or [],
         }
         return json.dumps(packet, ensure_ascii=False).encode("utf-8")
 

@@ -715,11 +715,11 @@ class BeiyangApp:
     def get_network_diagnostics(self):
         return self.runtime.get_network_diagnostics() if self.runtime else {}
 
-    def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT, user_id=""):
+    def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT, user_id="", candidate_ips=None):
         if self.is_existing_friend(name, ip, port, user_id):
             return False
         if self.message_service:
-            return self.message_service.send_friend_request(name, ip, port, user_id)
+            return self.message_service.send_friend_request(name, ip, port, user_id, candidate_ips)
         return False
 
     def is_existing_friend(self, name="", ip="", port=0, user_id=""):

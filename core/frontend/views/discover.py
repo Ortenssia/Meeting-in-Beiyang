@@ -255,6 +255,7 @@ class DiscoverView:
         port = int(p.get("tcp_port", 7779) or 7779)
         ip = p.get("ip", "0.0.0.0")
         user_id = p.get("user_id", "")
+        candidate_ips = p.get("candidate_ips", []) or []
         status = p.get("status", "")
         status_label = p.get("status_label", "添加好友")
         if not status:
@@ -303,6 +304,13 @@ class DiscoverView:
                                 ],
                                 spacing=4,
                             ),
+                            ft.Text(
+                                f"候选: {', '.join(candidate_ips[:2])}" if candidate_ips else "",
+                                size=10,
+                                color=ft.Colors.ON_SURFACE_VARIANT,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ) if candidate_ips else ft.Container(height=0),
                         ],
                         spacing=2, expand=True,
                     ),
@@ -361,7 +369,13 @@ class DiscoverView:
         user_id = data.get("user_id", "")
 
         def task():
-            ok = self.app.send_friend_request(name, ip, port, user_id)
+            ok = self.app.send_friend_request(
+                name,
+                ip,
+                port,
+                user_id,
+                data.get("candidate_ips", []),
+            )
             if ok:
                 btn.text = "已发送"
                 btn.icon = None

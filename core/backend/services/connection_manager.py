@@ -646,14 +646,28 @@ class ConnectionManager:
         for key, info in self.connections.items():
             if info.get("name") == ip_or_name:
                 return key
-        # 3) match by IP only (handles bare IP and "ip:port" strings)
-        candidate_ip = ip_or_name
+        # 3) A caller that supplied ip:port wants that exact endpoint. If it
+        # did not match above, do not collapse to bare IP; same-IP multi-instance
+        # setups would otherwise send to the wrong peer.
         if ":" in ip_or_name:
-            candidate_ip = ip_or_name.rsplit(":", 1)[0]
+            candidate_ip, candidate_port = ip_or_name.rsplit(":", 1)
+            try:
+                candidate_port = int(candidate_port)
+            except ValueError:
+                candidate_port = 0
+            for key, info in self.connections.items():
+                if (
+                    info.get("ip") == candidate_ip
+                    and int(info.get("port", 0) or 0) == candidate_port
+                ):
+                    return key
+            return None
+        # 4) match by IP only
+        candidate_ip = ip_or_name
         for key, info in self.connections.items():
             if info.get("ip") == candidate_ip:
                 return key
-        # 4) match by original string as IP
+        # 5) match by original string as IP
         for key, info in self.connections.items():
             if info.get("ip") == ip_or_name:
                 return key

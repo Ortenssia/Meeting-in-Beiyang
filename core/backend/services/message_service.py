@@ -302,6 +302,7 @@ class MessageService:
         target_ip: str,
         target_port: int = Protocol.DEFAULT_TCP_PORT,
         target_user_id: str = "",
+        target_candidate_ips=None,
     ) -> bool:
         """
         向发现的用户发送好友请求。
@@ -342,6 +343,7 @@ class MessageService:
             )
             return False
         conditions = self.friend_db.get_friend_conditions()
+        target_candidate_ips = target_candidate_ips or []
 
         request_msg = {
             "type": self.FRIEND_REQUEST,
@@ -386,7 +388,20 @@ class MessageService:
 
         # 如果尚未建立连接，尝试先连接再发送
         try:
-            if not self.connection_manager.connect_to_friend(target_ip, target_port, target_name):
+            connect_ips = []
+            seen_ips = set()
+            for ip in [target_ip, *target_candidate_ips]:
+                if ip and ip not in seen_ips:
+                    seen_ips.add(ip)
+                    connect_ips.append(ip)
+            connected = False
+            for connect_ip in connect_ips:
+                if self.connection_manager.connect_to_friend(connect_ip, target_port, target_name):
+                    connected = True
+                    if connect_ip != target_ip:
+                        target_ip = connect_ip
+                    break
+            if not connected:
                 return False
             deadline = time.time() + 2.0
             while time.time() < deadline:
