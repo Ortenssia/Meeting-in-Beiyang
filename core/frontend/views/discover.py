@@ -264,14 +264,13 @@ class DiscoverView:
                 "accepted": "已是好友", "rejected": "可重试",
             }.get(status, "添加好友")
 
-        # Use a standard button here. GestureDetector taps can be swallowed by
-        # the surrounding scrollable view on Android.
+        # Use a standard Button here. GestureDetector/abstract Button taps can be swallowed or fail on Android.
         is_disabled = status in ("pending_sent", "pending_received", "accepted")
         btn = ft.Button(
             status_label,
             icon=ft.Icons.PERSON_ADD_ROUNDED if not is_disabled else None,
             disabled=is_disabled,
-            on_click=lambda _e, d=p: self._send_request(d),
+            on_click=lambda e, d=p: self._send_request(e, d),
             bgcolor=ft.Colors.DEEP_PURPLE_500 if not is_disabled else ft.Colors.SURFACE_CONTAINER_HIGHEST,
             color=ft.Colors.WHITE if not is_disabled else ft.Colors.ON_SURFACE_VARIANT,
             style=ft.ButtonStyle(
@@ -348,7 +347,14 @@ class DiscoverView:
             self.refresh_diagnostics()
         self.app.run_async(_finish)
 
-    def _send_request(self, data):
+    def _send_request(self, e, data):
+        btn = e.control
+        btn.disabled = True
+        btn.text = "正在发送..."
+        btn.icon = ft.Icons.HOURGLASS_EMPTY_ROUNDED
+        if self.page:
+            self.page.update()
+
         name = data.get("name", "")
         ip = data.get("ip", "")
         port = int(data.get("tcp_port", 7779) or 7779)
@@ -356,9 +362,18 @@ class DiscoverView:
 
         def task():
             ok = self.app.send_friend_request(name, ip, port, user_id)
-            self.scan_status.value = (f"已向 {name} 发起好友请求" if ok
-                                       else "发送请求失败，请检查网络")
-            self.scan_status.color = ft.Colors.GREEN_400 if ok else ft.Colors.RED_400
+            if ok:
+                btn.text = "已发送"
+                btn.icon = None
+                btn.disabled = True
+                self.scan_status.value = f"已向 {name} 发起好友请求"
+                self.scan_status.color = ft.Colors.GREEN_400
+            else:
+                btn.text = "添加好友"
+                btn.icon = ft.Icons.PERSON_ADD_ROUNDED
+                btn.disabled = False
+                self.scan_status.value = "发送请求失败，请检查网络"
+                self.scan_status.color = ft.Colors.RED_400
             self.refresh_discovered()
         self.app.run_async(task)
 

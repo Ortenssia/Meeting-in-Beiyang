@@ -157,7 +157,8 @@ class BeiyangApp:
         self.runtime.on_friends_changed = lambda: self._safe(self._on_friends)
         self.runtime.on_message_received = lambda n, c, t, mid="": self._safe(
             lambda: self._on_message(n, c, t, mid))
-        self.runtime.on_friend_request = self._on_friend_request
+        self.runtime.on_friend_request = lambda p, m, ip=None: self._safe(
+            lambda: self._on_friend_request(p, m, ip))
         self.runtime.on_friend_accepted = lambda n, ip: self._safe(self._on_online)
         self.runtime.on_friend_deleted = lambda n: self._safe(lambda: self._on_friend_deleted(n))
         self.runtime.on_error = lambda msg: print(f"[BeiyangSocial] error: {msg}")

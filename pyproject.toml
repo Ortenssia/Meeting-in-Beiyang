@@ -27,3 +27,5 @@ adaptive_icon_background = "#FFFFFF"
 "android.permission.ACCESS_NETWORK_STATE" = true
 "android.permission.ACCESS_WIFI_STATE" = true
 "android.permission.CHANGE_WIFI_MULTICAST_STATE" = true
+"android.permission.READ_EXTERNAL_STORAGE" = true
+"android.permission.WRITE_EXTERNAL_STORAGE" = true

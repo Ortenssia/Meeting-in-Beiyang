@@ -351,39 +351,49 @@ class MessageService:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         }
 
-        # 尝试通过连接管理器直接发送
-        if self.connection_manager.is_friend_online(target_name):
-            sent = self._send_data_to_friend(target_name, request_msg)
-            if sent:
-                self.friend_db.upsert_friend_request(
-                    name=target_name,
-                    ip=target_ip,
-                    port=target_port,
-                    direction="outgoing",
-                    status="pending",
-                    user_id=target_user_id,
-                    msg_id=request_msg["msg_id"],
-                )
-                self._send_avatar_to_friend(target_name)
-            return sent
+        def _candidate_targets():
+            seen = set()
+            endpoint = f"{target_ip}:{target_port}" if target_ip and target_port else target_ip
+            for candidate in (target_name, endpoint, target_ip):
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    yield candidate
+
+        def _mark_sent(send_target: str):
+            self.friend_db.upsert_friend_request(
+                name=target_name,
+                ip=target_ip,
+                port=target_port,
+                direction="outgoing",
+                status="pending",
+                user_id=target_user_id,
+                msg_id=request_msg["msg_id"],
+            )
+            self._send_avatar_to_friend(send_target)
+
+        def _deliver_once() -> bool:
+            for send_target in _candidate_targets():
+                if self._send_data_to_friend(send_target, request_msg):
+                    _mark_sent(send_target)
+                    return True
+            return False
+
+        # Prefer an existing name-bound connection first. Otherwise establish
+        # the target port connection before trying endpoint fallbacks; this
+        # avoids treating a non-existent Android connection as a sent request.
+        if self.connection_manager.is_friend_online(target_name) and _deliver_once():
+            return True
 
         # 如果尚未建立连接，尝试先连接再发送
         try:
-            self.connection_manager.connect_to_friend(target_ip, target_port, target_name)
-            time.sleep(0.3)  # allow the handshake to settle
-            sent = self._send_data_to_friend(target_name, request_msg)
-            if sent:
-                self.friend_db.upsert_friend_request(
-                    name=target_name,
-                    ip=target_ip,
-                    port=target_port,
-                    direction="outgoing",
-                    status="pending",
-                    user_id=target_user_id,
-                    msg_id=request_msg["msg_id"],
-                )
-                self._send_avatar_to_friend(target_name)
-            return sent
+            if not self.connection_manager.connect_to_friend(target_ip, target_port, target_name):
+                return False
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                if _deliver_once():
+                    return True
+                time.sleep(0.1)
+            return _deliver_once()
         except Exception as e:
             logger.error(f"[MessageService] 发送好友请求失败: {e}")
             return False
@@ -695,6 +705,11 @@ class MessageService:
                         timestamp=timestamp,
                         msg_id=file_id,
                     )
+                if self.on_file_status_changed:
+                    try:
+                        self.on_file_status_changed(file_id, status)
+                    except Exception:
+                        pass
                 return True
 
             logger.error(
@@ -2113,6 +2128,11 @@ class MessageService:
             timestamp=timestamp,
             msg_id=file_id,
         )
+        if self.on_file_status_changed:
+            try:
+                self.on_file_status_changed(file_id, "文件")
+            except Exception:
+                pass
         logger.info("[MessageService] 文件接收完成: %s", final_path)
         self.add_system_notification(
             title="文件接收通知 📁",

@@ -1634,8 +1634,13 @@ class FriendDB:
                           content: str, timestamp: str, msg_id: str) -> bool:
         """
         保存聊天消息。自动判断收发方向并解析对端 IP。
+        如果已存在相同 msg_id 的消息，则直接更新其内容，避免重复插入。
         """
         try:
+            existing_content = self.get_chat_message_content(msg_id)
+            if existing_content is not None:
+                return self.update_chat_message_content(msg_id, content)
+
             my_profile = self.get_my_profile()
             my_name = my_profile.get("name", "")
 

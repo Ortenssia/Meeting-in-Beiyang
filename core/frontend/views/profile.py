@@ -437,7 +437,25 @@ class ProfileView:
         self.settings_pending_count = ft.Text("0 条消息", size=T.FS_BODY, weight=ft.FontWeight.BOLD, color=ft.Colors.DEEP_PURPLE_400)
         self.settings_receive_dir = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True, overflow=ft.TextOverflow.ELLIPSIS)
         self.settings_receive_note = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.receive_dir_button = ft.ElevatedButton(
+        self.receive_dir_input = ft.TextField(
+            label=None,
+            hint_text="输入保存目录，例如 /storage/emulated/0/Download/Beiyang",
+            on_submit=self._apply_receive_dir_from_input,
+            border_radius=12,
+            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            content_padding=10,
+            expand=True,
+        )
+        self.apply_receive_dir_button = ft.Button(
+            "应用路径",
+            icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
+            on_click=self._apply_receive_dir_from_input,
+            bgcolor=ft.Colors.DEEP_PURPLE_500,
+            color=ft.Colors.WHITE,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+        )
+        self.receive_dir_button = ft.Button(
             "选择保存目录",
             icon=ft.Icons.FOLDER_OPEN_ROUNDED,
             on_click=self._choose_receive_dir,
@@ -445,6 +463,9 @@ class ProfileView:
             color=ft.Colors.WHITE,
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
         )
+        self.receive_dir_input.col = {"sm": 12, "md": 8}
+        self.apply_receive_dir_button.col = {"sm": 12, "md": 2}
+        self.receive_dir_button.col = {"sm": 12, "md": 2}
         self.current_version = current_app_version(self.app.paths.project_root)
         self.update_manifest_url = ft.TextField(
             label=None,
@@ -658,12 +679,17 @@ class ProfileView:
                 # Section 6: 文件接收与背景
                 make_section(ft.Column([
                     ft.Text("文件接收与背景", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                    self._setting_row("保存位置", self.settings_receive_dir),
+                    self._setting_row("当前保存位置", self.settings_receive_dir),
                     self.settings_receive_note,
-                    ft.Row(
+                    ft.ResponsiveRow(
                         [
+                            self.receive_dir_input,
+                            self.apply_receive_dir_button,
                             self.receive_dir_button,
-                        ]
+                        ],
+                        columns=12,
+                        spacing=T.SP_SM,
+                        run_spacing=T.SP_SM,
                     ),
                     ft.Divider(height=24, thickness=1, color=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE)),
                     self._path_row("名片背景", self.card_bg_in, "选择并裁剪"),
@@ -1058,6 +1084,7 @@ class ProfileView:
             if hasattr(self.app, "tcp_port"):
                 self.settings_tcp_port.value = str(self.app.tcp_port)
             self.settings_receive_dir.value = self.app.get_receive_dir()
+            self.receive_dir_input.value = self.app.get_receive_dir()
             self.update_manifest_url.value = (
                 self.app.friend_db.get_app_setting("update_manifest_url", "")
                 or default_manifest_url()
@@ -1460,9 +1487,9 @@ class ProfileView:
             bottom=8 if is_mobile else 20,
         )
         if is_android:
-            self.receive_dir_button.disabled = True
-            self.receive_dir_button.text = "Android 由系统管理"
-            self.settings_receive_note.value = "接收文件保存在应用私有目录；成功后会在聊天和系统通知中显示完整路径。"
+            self.receive_dir_button.disabled = False
+            self.receive_dir_button.text = "选择保存目录"
+            self.settings_receive_note.value = "提示：Android 系统可能限制部分目录的写入权限，建议选择Download等公共目录。"
         else:
             self.receive_dir_button.disabled = False
             self.receive_dir_button.text = "选择保存目录"
@@ -1906,8 +1933,10 @@ class ProfileView:
 
     async def _choose_receive_dir(self, _e):
         platform_name = str(getattr(self.page, "platform", "")).lower() if self.page else ""
-        if platform_name in ("android", "pageplatform.android"):
-            self.app.show_toast(f"Android 接收目录由系统管理：{self.app.get_receive_dir()}")
+        is_android = platform_name in ("android", "pageplatform.android")
+        if is_android:
+            # Android: use Flet FilePicker (no tkinter available)
+            await self._choose_receive_dir_flet()
             return
         try:
             import tkinter as tk
@@ -1945,24 +1974,56 @@ class ProfileView:
                 page.update()
             except Exception:
                 pass
-        await picker.get_directory_path(
-            dialog_title="选择接收文件保存目录",
-            initial_directory=self.app.get_receive_dir(),
-        )
+        try:
+            await picker.get_directory_path(
+                dialog_title="选择接收文件保存目录",
+                initial_directory=self.app.get_receive_dir(),
+            )
+        except Exception as exc:
+            self.settings_tcp_hint.value = f"目录选择器不可用，可手动输入路径: {exc}"
+            self.settings_tcp_hint.color = ft.Colors.ORANGE_400
+            if self.page:
+                self.page.update()
 
     def _on_receive_dir_selected(self, e):
         if e.path:
             self._apply_receive_dir(e.path)
+        else:
+            self.settings_tcp_hint.value = "未选择目录；Android 可直接手动输入保存路径后点“应用路径”"
+            self.settings_tcp_hint.color = ft.Colors.ON_SURFACE_VARIANT
+            if self.page:
+                self.page.update()
 
     def _reset_receive_dir(self, _e):
         self._apply_receive_dir(str(self.app.paths.received_files_dir))
 
+    def _apply_receive_dir_from_input(self, _e):
+        self._apply_receive_dir(self.receive_dir_input.value)
+
+    def _normalize_receive_dir(self, directory):
+        value = (directory or "").strip().strip('"').strip("'")
+        if not value:
+            raise ValueError("保存路径不能为空")
+        if value.startswith("content://"):
+            raise ValueError("当前运行时不能直接写入 content:// 目录，请输入文件系统路径")
+        if self.page:
+            platform_name = str(getattr(self.page, "platform", "")).lower()
+        else:
+            platform_name = ""
+        is_android = platform_name in ("android", "pageplatform.android")
+        path = Path(value).expanduser()
+        if is_android and not path.is_absolute():
+            path = Path(self.app.paths.received_files_dir).parent / path
+        return str(path)
+
     def _apply_receive_dir(self, directory):
         try:
             import os
+            directory = self._normalize_receive_dir(directory)
             os.makedirs(directory, exist_ok=True)
             resolved = self.app.set_receive_dir(directory)
             self.settings_receive_dir.value = resolved
+            self.receive_dir_input.value = resolved
             self.settings_tcp_hint.value = "✨ 文件保存位置已更新"
             self.settings_tcp_hint.color = ft.Colors.GREEN_400
         except Exception as exc:
