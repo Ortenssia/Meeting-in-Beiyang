@@ -749,6 +749,12 @@ class ChatView:
             and not self.is_group
             and self._msg_list is not None
         ):
+            # Guard: if an inline file-offer widget is visible in the chat,
+            # don't create a second bubble here. The offer accept/decline
+            # handler replaces the offer with a proper transfer bubble that
+            # gets registered in _transfer_widgets.
+            if file_id in self._pending_file_offers:
+                return
             file_path = ""
             service = self.app.message_service
             if service:

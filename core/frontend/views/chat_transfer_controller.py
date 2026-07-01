@@ -26,6 +26,11 @@ class ChatTransferController:
         for file_id, state in list(self.owner._transfer_states.items()):
             if state.get("peer_name") != friend_name or state.get("final"):
                 continue
+            # Dedup: skip transfers that already have a visible widget
+            # (created by append_bubble during normal send/receive flow).
+            # Without this guard, every tab-switch creates a duplicate bubble.
+            if file_id in self.owner._transfer_widgets:
+                continue
             content = self.owner._file_message_content(
                 state.get(
                     "status",

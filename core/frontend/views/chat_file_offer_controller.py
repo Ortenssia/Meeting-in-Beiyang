@@ -56,32 +56,36 @@ class ChatFileOfferController:
         row = None
 
         def accept(_e):
-            content = owner._file_message_content("正在接收文件", filename, "", file_id)
+            # Remove inline offer widget, replace with a proper transfer
+            # bubble that gets registered in _transfer_widgets — this way
+            # on_file_progress updates it in-place instead of creating a
+            # duplicate "receiving" bubble.
             if row and row in owner._msg_list.controls:
-                owner._replace_bubble(
-                    row,
-                    from_name,
-                    content,
-                    time.strftime("%H:%M:%S", time.localtime()),
-                    is_self=False,
-                )
+                owner._msg_list.controls.remove(row)
             owner._pending_file_offers.pop(file_id, None)
+            content = owner._file_message_content("正在接收文件", filename, "", file_id)
+            owner._append_bubble(
+                from_name,
+                content,
+                time.strftime("%H:%M:%S", time.localtime()),
+                is_self=False,
+            )
             self.app.message_service.accept_file_offer(file_id)
             if owner.page:
                 owner.page.update()
 
         def decline(_e):
-            content = owner._file_message_content("已拒绝接收", filename, "", file_id)
             if row and row in owner._msg_list.controls:
-                owner._replace_bubble(
-                    row,
-                    from_name,
-                    content,
-                    time.strftime("%H:%M:%S", time.localtime()),
-                    is_self=False,
-                )
+                owner._msg_list.controls.remove(row)
             owner._pending_file_offers.pop(file_id, None)
             owner._mark_file_transfer_closed(file_id)
+            content = owner._file_message_content("已拒绝接收", filename, "", file_id)
+            owner._append_bubble(
+                from_name,
+                content,
+                time.strftime("%H:%M:%S", time.localtime()),
+                is_self=False,
+            )
             self.app.message_service.decline_file_offer(file_id)
             if owner.page:
                 owner.page.update()
