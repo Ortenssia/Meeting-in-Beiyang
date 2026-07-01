@@ -41,6 +41,7 @@ class Protocol:
     PROFILE_EXCHANGE = "PROFILE_EXCHANGE"   # 交换自我介绍
     FRIEND_REQUEST = "FRIEND_REQUEST"       # 发送好友请求
     FRIEND_ACCEPT = "FRIEND_ACCEPT"         # 接受好友请求
+    FRIEND_REQUEST_ACK = "FRIEND_REQUEST_ACK"  # 好友请求已到达回执
     FRIEND_REJECT = "FRIEND_REJECT"         # 拒绝好友请求
     FRIEND_DELETE = "FRIEND_DELETE"         # 删除好友关系通知
     CHAT_MESSAGE = "CHAT_MESSAGE"           # 文本聊天消息
@@ -69,6 +70,7 @@ class Protocol:
     # 包头固定长度：4 字节无符号大端整数
     HEADER_LENGTH = 4
     BINARY_CHUNK_MAGIC = b"BFCH1"
+    MAX_FRAME_SIZE = 8 * 1024 * 1024
 
     # ================================================================== #
     #  UDP 数据包构造与解析
@@ -164,6 +166,8 @@ class Protocol:
         Returns:
             包头 + 载荷。
         """
+        if len(data) > Protocol.MAX_FRAME_SIZE:
+            raise ValueError("protocol frame exceeds maximum size")
         header = struct.pack("!I", len(data))
         return header + data
 
@@ -187,6 +191,8 @@ class Protocol:
             header += chunk
 
         body_len = struct.unpack("!I", header)[0]
+        if body_len > Protocol.MAX_FRAME_SIZE:
+            return False, b""
 
         # 循环读取直到收齐整个包体
         body_buf = b""

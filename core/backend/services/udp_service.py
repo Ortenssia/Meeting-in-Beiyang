@@ -11,60 +11,21 @@ UDP 广播服务模块 (Challenge 3 - 相识北洋)
 """
 
 import socket
+import json
 import threading
 import time
 from typing import Callable, Dict, List, Optional
 
 from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY, NetworkPolicy
+from core.backend.services.udp_discovery_state import (
+    DeviceInfo,
+    DeviceRegistry,
+    UDPDiagnostics,
+    clean_candidate_ips,
+)
+from core.backend.services.udp_packet_router import UDPPacketRouter
 from core.backend.shared.helpers import Helpers
 from core.backend.shared.protocol import Protocol
-
-
-class DeviceInfo:
-    """表示一个已发现的局域网设备。"""
-
-    def __init__(
-        self,
-        ip: str,
-        device_name: str,
-        tcp_port: int,
-        last_seen: float,
-        user_id: str = "",
-        device_id: str = "",
-        candidate_ips: Optional[List[str]] = None,
-    ):
-        """
-        Args:
-            ip:          设备 IP 地址。
-            device_name: 设备名称 / 用户名。
-            tcp_port:    设备监听的 TCP 端口。
-            last_seen:   最后一次收到该设备消息的时间戳。
-        """
-        self.ip = ip
-        self.device_name = device_name
-        self.tcp_port = tcp_port
-        self.last_seen = last_seen
-        self.user_id = user_id
-        self.device_id = device_id
-        self.candidate_ips = candidate_ips or []
-
-    def is_online(self, timeout: int = 15) -> bool:
-        """
-        判断设备是否在线。
-
-        Args:
-            timeout: 超时秒数，默认 15 秒。
-
-        Returns:
-            True 表示设备在线。
-        """
-        return (time.time() - self.last_seen) < timeout
-
-    def __repr__(self) -> str:
-        return (
-            f"DeviceInfo(ip={self.ip!r}, name={self.device_name!r}, "
-            f"tcp_port={self.tcp_port}, online={self.is_online()})"
-        )
 
 
 class UDPService:
@@ -101,37 +62,23 @@ class UDPService:
         self.device_id = device_id
         self.network_policy = network_policy or DEFAULT_NETWORK_POLICY
         self.sock: Optional[socket.socket] = None
-        self.devices: Dict[str, DeviceInfo] = {}  # identity key -> DeviceInfo
+        self._device_registry = DeviceRegistry()
+        self.devices = self._device_registry.devices
         self.running = False
         self.multicast_lock = None
         self._targets_cache: List[str] = []
         self._targets_cache_at = 0.0
         self._last_active_scan_at = 0.0
 
-        # 设备列表锁，保护多线程读写 devices 字典
-        self._devices_lock = threading.Lock()
-        self._diagnostics_lock = threading.Lock()
-        self._diagnostics = {
-            "started_at": None,
-            "last_scan_at": None,
-            "last_receive_at": None,
-            "last_device_at": None,
-            "last_error": "",
-            "last_targets": 0,
-            "last_probe_ports": [],
-            "send_attempts": 0,
-            "send_success": 0,
-            "send_errors": 0,
-            "receive_packets": 0,
-            "receive_ping": 0,
-            "receive_pong": 0,
-            "receive_resets_ignored": 0,
-        }
+        self._devices_lock = self._device_registry.lock
+        self._diagnostics = UDPDiagnostics()
+        self._packet_router = UDPPacketRouter(self)
 
         # 回调函数（由上层设置）
         self.on_device_found: Optional[Callable[[DeviceInfo], None]] = None
         self.on_device_seen: Optional[Callable[[DeviceInfo], None]] = None
         self.on_device_offline: Optional[Callable[[str], None]] = None
+        self.on_friend_request_packet: Optional[Callable[[str, dict], None]] = None
 
         # 后台线程引用
         self._broadcast_thread: Optional[threading.Thread] = None
@@ -146,6 +93,7 @@ class UDPService:
         "radmin", "zerotier", "tailscale", "wireguard",
         "utun", "utap", "ppp", "pptp", "l2tp", "sstp",
     )
+    UDP_MAX_PACKET_SIZE = 8 * 1024
 
     @classmethod
     def _is_virtual_iface(cls, name: str) -> bool:
@@ -359,79 +307,8 @@ class UDPService:
         """接收线程：处理收到的 PING 和 PONG 包。"""
         while self.running:
             try:
-                data, addr = self.sock.recvfrom(1024)
-                packet = Protocol.parse_udp_packet(data)
-
-                if not packet:
-                    continue
-
-                packet_type = packet.get("type")
-                sender_ip = addr[0]
-                self._bump_diagnostic("receive_packets")
-                self._mark_diagnostic(last_receive_at=time.time(), last_error="")
-
-                # 忽略自己发出的包，优先用 device_id；旧包回退到端口/昵称。
-                local_ips = Helpers.get_local_ips()
-                if sender_ip in local_ips:
-                    packet_device_id = packet.get("device_id", "")
-                    if (
-                        packet_device_id
-                        and self.device_id
-                        and packet_device_id == self.device_id
-                    ):
-                        continue
-                    if not packet_device_id and (
-                        addr[1] == self.port
-                        or packet.get("device_name") == self.device_name
-                    ):
-                        continue
-
-                # 本机多实例场景归一化：当报文源 IP 命中本机任一网卡（含
-                # Docker/Hamachi/WSL 等虚拟网卡）时，OS 会因虚拟网卡在多个源
-                # IP 间轮询，导致每次 PING/PONG 记录的对方 IP 都在抖动，TCP
-                # 随后连到错误网卡而失败。归一化为 127.0.0.1 可保证本机两实例
-                # 之间 TCP 必然可达；真实局域网场景（源 IP 不在本机列表）不受影响。
-                record_ip = "127.0.0.1" if sender_ip in local_ips else sender_ip
-
-                if packet_type == Protocol.UDP_PING:
-                    self._bump_diagnostic("receive_ping")
-                    # 收到 PING -- 回复 PONG 并记录设备
-                    device_name = packet.get("device_name", "Unknown")
-                    tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
-                    user_id = packet.get("user_id", "")
-                    device_id = packet.get("device_id", "")
-                    candidate_ips = packet.get("candidate_ips", []) or []
-
-                    # 若对方也是本机实例，宣告 127.0.0.1 让对方用回环地址记录我们
-                    advertised_ip = "127.0.0.1" if sender_ip in local_ips else Helpers.get_default_ip()
-                    pong_data = Protocol.create_pong_packet(
-                        self.device_name,
-                        advertised_ip,
-                        self.tcp_port,
-                        self.user_id,
-                        self.device_id,
-                        self._get_candidate_ips(),
-                    )
-                    # 回复 PONG 到发送端包的真实源地址(IP 和 Port)，确保支持多实例测试
-                    self.sock.sendto(pong_data, addr)
-
-                    self._add_device(record_ip, device_name, tcp_port, user_id, device_id, candidate_ips)
-
-                elif packet_type == Protocol.UDP_PONG:
-                    self._bump_diagnostic("receive_pong")
-                    # 收到 PONG -- 记录设备
-                    device_name = packet.get("device_name", "Unknown")
-                    tcp_port = packet.get("tcp_port", Protocol.DEFAULT_TCP_PORT)
-                    user_id = packet.get("user_id", "")
-                    device_id = packet.get("device_id", "")
-                    candidate_ips = packet.get("candidate_ips", []) or []
-
-                    # 总是使用 sender_ip（UDP 报文的源 IP），因为这一定是局域网内可达的物理 IP。
-                    # 避免使用对端包内宣告的 ip（对端可能因为 VPN/代理等配置导致判定错误）
-                    packet_ip = packet.get("ip", "")
-                    if packet_ip:
-                        candidate_ips = [packet_ip, *candidate_ips]
-                    self._add_device(record_ip, device_name, tcp_port, user_id, device_id, candidate_ips)
+                data, addr = self.sock.recvfrom(self.UDP_MAX_PACKET_SIZE)
+                self._packet_router.handle_datagram(data, addr)
 
             except BlockingIOError:
                 # 非阻塞 socket 暂无数据
@@ -464,23 +341,9 @@ class UDPService:
         """清理线程：每 5 秒检查一次，移除超时离线设备。"""
         while self.running:
             try:
-                offline_names: List[str] = []
-                offline_ips: List[str] = []
-
-                with self._devices_lock:
-                    for name, device in self.devices.items():
-                        if not device.is_online():
-                            offline_names.append(name)
-                            offline_ips.append(device.ip)
-
-                    for name in offline_names:
-                        del self.devices[name]
-
-                # 在锁外触发回调，避免死锁
-                for ip in offline_ips:
+                for ip in self._device_registry.remove_offline():
                     if self.on_device_offline:
                         self.on_device_offline(ip)
-
             except Exception:
                 pass
             time.sleep(self.network_policy.udp_broadcast_interval)
@@ -508,66 +371,11 @@ class UDPService:
             device_name: 设备名称。
             tcp_port:    设备 TCP 端口。
         """
-        current_time = time.time()
-        is_new = False
-        is_update_notify = False
-        candidate_ips = self._clean_candidate_ips(ip, candidate_ips or [])
-        canonical = device_id or user_id
-        key = canonical or f"{device_name}@{ip}:{int(tcp_port or 0)}"
-
-        with self._devices_lock:
-            # ── merge / deduplicate ──────────────────────────────
-            # When a PING arrives with a stable identity (device_id
-            # or user_id), look for any previous fallback-key entry
-            # for the same device_name and fold it into the new key.
-            # This prevents the same person appearing twice in the
-            # discover list (once under their stable id and once
-            # under "name@old-ip:port").
-            if canonical:
-                for existing_key, existing in list(self.devices.items()):
-                    if existing_key == key:
-                        continue
-                    if (
-                        existing.device_name == device_name
-                        and int(existing.tcp_port or 0) == int(tcp_port or 0)
-                        and not (existing.device_id or existing.user_id)
-                    ):
-                        # Stale fallback entry — merge into canonical key.
-                        self.devices[key] = existing
-                        self.devices[key].user_id = user_id
-                        self.devices[key].device_id = device_id
-                        del self.devices[existing_key]
-                        break
-
-            if key in self.devices:
-                # 更新已有设备
-                old_device = self.devices[key]
-                if (
-                    old_device.ip != ip
-                    or old_device.tcp_port != tcp_port
-                    or old_device.device_name != device_name
-                    or old_device.candidate_ips != candidate_ips
-                ):
-                    is_update_notify = True
-                self.devices[key].last_seen = current_time
-                self.devices[key].ip = ip
-                self.devices[key].device_name = device_name
-                self.devices[key].tcp_port = tcp_port
-                self.devices[key].user_id = user_id
-                self.devices[key].device_id = device_id
-                self.devices[key].candidate_ips = candidate_ips
-            else:
-                # 新设备
-                self.devices[key] = DeviceInfo(
-                    ip, device_name, tcp_port, current_time, user_id, device_id, candidate_ips
-                )
-                is_new = True
-        self._mark_diagnostic(last_device_at=current_time)
-
-        device = self.devices[key]
-
-        # 在锁外触发回调，避免死锁
-        if (is_new or is_update_notify) and self.on_device_found:
+        device, changed = self._device_registry.upsert(
+            ip, device_name, tcp_port, user_id, device_id, candidate_ips
+        )
+        self._mark_diagnostic(last_device_at=device.last_seen)
+        if changed and self.on_device_found:
             self.on_device_found(device)
         if self.on_device_seen:
             self.on_device_seen(device)
@@ -579,24 +387,11 @@ class UDPService:
         Returns:
             在线的 DeviceInfo 列表。
         """
-        with self._devices_lock:
-            return [device for device in self.devices.values() if device.is_online()]
+        return self._device_registry.online()
 
     @staticmethod
     def _clean_candidate_ips(primary_ip: str, values: List[str]) -> List[str]:
-        seen = set()
-        cleaned = []
-        for value in [primary_ip, *values]:
-            if not value or value.startswith("127."):
-                continue
-            parts = value.split(".")
-            if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-                continue
-            if value in seen:
-                continue
-            seen.add(value)
-            cleaned.append(value)
-        return cleaned
+        return clean_candidate_ips(primary_ip, values)
 
     def manual_scan(self):
         """
@@ -702,6 +497,27 @@ class UDPService:
             result["error"] = message
         return result
 
+    def send_friend_request_packet(self, hosts: List[str], payload: dict) -> bool:
+        """Send a small FRIEND_REQUEST payload over UDP as a TCP fallback."""
+        if not self.sock:
+            self._mark_diagnostic(last_error="UDP socket is not initialized.")
+            return False
+        try:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        except Exception as exc:
+            self._mark_diagnostic(last_error=f"UDP friend request encode failed: {exc}")
+            return False
+        if len(data) > self.UDP_MAX_PACKET_SIZE:
+            self._mark_diagnostic(last_error="UDP friend request packet is too large.")
+            return False
+        sent = 0
+        ports = self._get_probe_ports()
+        for host in hosts:
+            for port in ports:
+                if self._send_probe(data, host, int(port)):
+                    sent += 1
+        return sent > 0
+
     def _get_probe_ports(self) -> List[int]:
         """Return discovery ports used by both normal and manual scans."""
         return sorted(set([8890, 8891, 8892, 8893, self.port]))
@@ -718,12 +534,10 @@ class UDPService:
             return False
 
     def _mark_diagnostic(self, **values):
-        with self._diagnostics_lock:
-            self._diagnostics.update(values)
+        self._diagnostics.update(**values)
 
     def _bump_diagnostic(self, key: str, amount: int = 1):
-        with self._diagnostics_lock:
-            self._diagnostics[key] = int(self._diagnostics.get(key, 0) or 0) + amount
+        self._diagnostics.bump(key, amount)
 
     def get_diagnostics(self) -> dict:
         """Return a snapshot useful for explaining why discovery is empty."""
@@ -733,10 +547,8 @@ class UDPService:
             interfaces = []
             self._mark_diagnostic(last_error=f"Interface detection failed: {e}")
 
-        with self._devices_lock:
-            device_count = len([d for d in self.devices.values() if d.is_online()])
-        with self._diagnostics_lock:
-            diagnostics = dict(self._diagnostics)
+        device_count = len(self._device_registry.online())
+        diagnostics = self._diagnostics.snapshot()
 
         local_ips = []
         for iface in interfaces:

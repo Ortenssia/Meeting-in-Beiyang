@@ -7,176 +7,17 @@ container.
 import os
 import threading
 import time
-from pathlib import Path
 
 import flet as ft
 
-from core.backend.services.update_service import (
-    UpdateCheckError,
-    check_for_updates,
-    current_app_version,
-    default_manifest_url,
-)
+from core.backend.services.update_service import default_manifest_url
 
 from .. import theme as T
-from ..image_crop import CropState, image_size, render_crop
-
-
-class TagInput(ft.Column):
-    """QQ-style personality tag bubbles with an inline add composer.
-
-    Calls *on_changed* (if set) whenever the tag list is modified so the
-    profile view can persist the update automatically.
-    """
-
-    TAG_COLORS = [
-        (ft.Colors.DEEP_PURPLE_400, ft.Colors.PURPLE_300),
-        (ft.Colors.PINK_500, ft.Colors.PINK_300),
-        (ft.Colors.BLUE_500, ft.Colors.CYAN_300),
-        (ft.Colors.ORANGE_500, ft.Colors.AMBER_300),
-        (ft.Colors.GREEN_500, ft.Colors.TEAL_300),
-    ]
-
-    def __init__(self, hint="输入后回车，例如：编程、篮球"):
-        super().__init__(spacing=T.SP_SM)
-        self._tags = []
-        self._draft_text = ""
-        self.hint = hint
-        self.on_changed = None  # callable() fired after add / remove
-
-        self.input = ft.TextField(
-            hint_text=hint,
-            expand=True,
-            on_change=self._on_input_change,
-            on_submit=self._add,
-            border=ft.InputBorder.NONE,
-            content_padding=T.pad_symmetric(horizontal=12, vertical=8),
-            prefix_icon=ft.Icons.TAG_ROUNDED,
-            bgcolor=ft.Colors.TRANSPARENT,
-        )
-        self.add_btn = ft.IconButton(
-            icon=ft.Icons.ADD_CIRCLE_ROUNDED,
-            icon_color=ft.Colors.WHITE,
-            icon_size=28,
-            bgcolor=ft.Colors.DEEP_PURPLE_500,
-            on_click=self._add,
-            tooltip="添加标签",
-            style=ft.ButtonStyle(shape=ft.CircleBorder()),
-        )
-        self.chips = ft.Row(spacing=8, run_spacing=8, wrap=True)
-        self.controls = [
-            ft.Container(
-                content=ft.Row(
-                    [self.input, self.add_btn],
-                    spacing=6,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                border_radius=999,
-                bgcolor=ft.Colors.with_opacity(0.55, ft.Colors.SURFACE_CONTAINER_LOW),
-                border=T.border_all(1, ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE)),
-                padding=T.pad_symmetric(horizontal=8, vertical=4),
-            ),
-            self.chips,
-        ]
-
-    def _on_input_change(self, e):
-        self._draft_text = e.control.value or ""
-
-    def _add(self, _e=None):
-        raw = (self.input.value or self._draft_text or "").strip()
-        if not raw:
-            return
-        normalized = raw.replace("，", ",").replace("、", ",").replace(" ", ",")
-        parts = [p.strip() for p in normalized.split(",") if p.strip()]
-        changed = False
-        for tag in parts:
-            if tag and tag not in self._tags:
-                self._tags.append(tag)
-                self.chips.controls.append(self._tag_bubble(tag))
-                changed = True
-        self.input.value = ""
-        self._draft_text = ""
-        try:
-            self.update()
-        except Exception:
-            pass
-        if changed and self.on_changed:
-            self.on_changed()
-
-    def _make_remove(self, tag):
-        def _remove(e):
-            if tag in self._tags:
-                self._tags.remove(tag)
-            for c in list(self.chips.controls):
-                if getattr(c, "data", None) == tag:
-                    self.chips.controls.remove(c)
-            try:
-                self.update()
-            except Exception:
-                pass
-            if self.on_changed:
-                self.on_changed()
-        return _remove
-
-    def _tag_bubble(self, tag):
-        idx = len(self._tags) % len(self.TAG_COLORS)
-        left, right = self.TAG_COLORS[idx]
-        return ft.Container(
-            data=tag,
-            content=ft.Row(
-                [
-                    ft.Text(
-                        f"#{tag}",
-                        size=13,
-                        color=ft.Colors.WHITE,
-                        weight=ft.FontWeight.W_700,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.CLOSE_ROUNDED,
-                        icon_size=14,
-                        icon_color=ft.Colors.WHITE,
-                        width=24,
-                        height=24,
-                        padding=0,
-                        on_click=self._make_remove(tag),
-                    ),
-                ],
-                spacing=2,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            gradient=ft.LinearGradient(
-                begin=ft.alignment.Alignment.CENTER_LEFT,
-                end=ft.alignment.Alignment.CENTER_RIGHT,
-                colors=[left, right],
-            ),
-            border_radius=999,
-            padding=T.pad_only(left=14, right=4, top=6, bottom=6),
-            shadow=ft.BoxShadow(
-                blur_radius=10,
-                color=ft.Colors.with_opacity(0.18, left),
-                offset=ft.Offset(0, 3),
-            ),
-        )
-
-    def get_tags(self):
-        self._add()
-        return list(self._tags)
-
-    def set_tags(self, tags):
-        self._tags = []
-        self._draft_text = ""
-        self.input.value = ""
-        self.chips.controls.clear()
-        for tag in (tags or []):
-            tag = tag.strip()
-            if tag and tag not in self._tags:
-                self._tags.append(tag)
-                self.chips.controls.append(self._tag_bubble(tag))
-        try:
-            self.update()
-        except Exception:
-            pass
+from .profile_media_controller import ProfileMediaController
+from .profile_settings import ProfileSettingsControls, ProfileSettingsPanel
+from .profile_settings_controller import ProfileSettingsController
+from .profile_tags import TagInput
+from .profile_update_controller import ProfileUpdateController
 
 
 class ProfileView:
@@ -423,69 +264,12 @@ class ProfileView:
             spacing=T.SP_MD, alignment=ft.MainAxisAlignment.START, height=48
         )
 
-        # System settings tab controls
-        self.settings_device_name = ft.Text("--", size=T.FS_BODY, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE)
-        self.settings_tcp_port = ft.TextField(
-            value="7779",
-            keyboard_type=ft.KeyboardType.NUMBER, width=120,
-            border_radius=10, border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            content_padding=10,
-        )
-        self.settings_udp_port = ft.Text("8890", size=T.FS_BODY, weight=ft.FontWeight.W_500, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.settings_tcp_hint = ft.Text("", size=T.FS_CAPTION)
-        self.settings_pending_count = ft.Text("0 条消息", size=T.FS_BODY, weight=ft.FontWeight.BOLD, color=ft.Colors.DEEP_PURPLE_400)
-        self.settings_receive_dir = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True, overflow=ft.TextOverflow.ELLIPSIS)
-        self.settings_receive_note = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.receive_dir_input = ft.TextField(
-            label=None,
-            hint_text="输入保存目录，例如 /storage/emulated/0/Download/Beiyang",
-            on_submit=self._apply_receive_dir_from_input,
-            border_radius=12,
-            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            content_padding=10,
-            expand=True,
-        )
-        self.apply_receive_dir_button = ft.Button(
-            "应用路径",
-            icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
-            on_click=self._apply_receive_dir_from_input,
-            bgcolor=ft.Colors.DEEP_PURPLE_500,
-            color=ft.Colors.WHITE,
-            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
-        )
-        self.receive_dir_button = ft.Button(
-            "选择保存目录",
-            icon=ft.Icons.FOLDER_OPEN_ROUNDED,
-            on_click=self._choose_receive_dir,
-            bgcolor=ft.Colors.DEEP_PURPLE_500,
-            color=ft.Colors.WHITE,
-            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
-        )
-        self.receive_dir_input.col = {"sm": 12, "md": 8}
-        self.apply_receive_dir_button.col = {"sm": 12, "md": 2}
-        self.receive_dir_button.col = {"sm": 12, "md": 2}
-        self.current_version = current_app_version(self.app.paths.project_root)
-        self.update_manifest_url = ft.TextField(
-            label=None,
-            hint_text="latest.json 地址，例如 GitHub Release/Pages 的直链",
-            border_radius=12,
-            border_color=ft.Colors.with_opacity(0.12, ft.Colors.ON_SURFACE),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            content_padding=10,
-            expand=True,
-        )
-        self.update_status = ft.Text("", size=T.FS_CAPTION)
-        self.update_check_btn = ft.ElevatedButton(
-            "检查更新",
-            icon=ft.Icons.SYSTEM_UPDATE_ROUNDED,
-            on_click=self._check_updates,
-            bgcolor=ft.Colors.DEEP_PURPLE_500,
-            color=ft.Colors.WHITE,
-            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
-        )
-        self._theme_selector_row = ft.Container()
+        self.settings_controls = ProfileSettingsControls(self)
+        self.settings_panel = ProfileSettingsPanel(self)
+        self.media_controller = ProfileMediaController(self)
+        self.settings_controller = ProfileSettingsController(self)
+        self.update_controller = ProfileUpdateController(self)
+        self.settings_controls.attach()
 
         self._built = None
         self._loading = False  # guard against save-during-load cycles
@@ -737,304 +521,25 @@ class ProfileView:
         )
 
     async def _browse(self, target):
-        try:
-            import tkinter as tk
-        except ImportError:
-            await self._browse_flet(target)
-            return
-
-        def _do_pick():
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            file_path = filedialog.askopenfilename(
-                title="选择图片",
-                parent=root,
-                filetypes=[("图片文件", "*.png;*.jpg;*.jpeg;*.bmp")],
-            )
-            root.destroy()
-            if file_path:
-                self._open_crop_editor(file_path, target)
-
-        threading.Thread(target=_do_pick, daemon=True).start()
+        await self.media_controller.browse(target)
 
     async def _browse_flet(self, target):
-        """Use Flet FilePicker for platforms without tkinter (Android)."""
-        picker = getattr(self.app, "profile_file_picker", None)
-        if not picker:
-            picker = ft.FilePicker()
-            self.app.profile_file_picker = picker
-        page = self.page
-        if page and picker not in page.services:
-            page.services.append(picker)
-
-        files = await picker.pick_files(
-            dialog_title="选择图片",
-            file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["png", "jpg", "jpeg", "bmp"],
-        )
-        if files and files[0].path:
-            file_path = files[0].path
-            self._open_crop_editor(file_path, target)
+        await self.media_controller.browse_flet(target)
 
     def _open_crop_editor(self, source_path, target):
-        """Open a draggable, zoomable crop viewport for avatar or cover media."""
-        is_avatar = target == self.avatar_in
-        is_card_bg = target == self.card_bg_in
-        if is_avatar:
-            viewport_width, viewport_height = (300, 300)
-            output_size = (512, 512)
-        elif is_card_bg:
-            viewport_width, viewport_height = (336, 112)
-            output_size = (1500, 500)
-        else:
-            viewport_width, viewport_height = (210, 370)
-            output_size = (1080, 1920)
-        try:
-            source_width, source_height = image_size(source_path)
-            state = CropState(
-                source_width,
-                source_height,
-                viewport_width,
-                viewport_height,
-            )
-        except Exception as exc:
-            self._save_status.value = f"✗ 无法读取图片：{exc}"
-            self._save_status.color = ft.Colors.RED_400
-            if self.page:
-                self.page.update()
-            return
-
-        # Generate a smaller preview version of the image to send to Flet UI
-        preview_path = source_path
-        try:
-            from PIL import Image, ImageOps
-            temp_dir = Path(self.app.paths.data_dir) / "temp_previews"
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            temp_file = temp_dir / f"preview_{time.time_ns()}.jpg"
-
-            with Image.open(source_path) as img:
-                img = ImageOps.exif_transpose(img)
-                # Downscale to max 1024px while keeping aspect ratio
-                img.thumbnail((1024, 1024))
-                img.save(temp_file, "JPEG", quality=80)
-                preview_path = str(temp_file)
-        except Exception:
-            pass
-
-        preview = ft.Image(
-            src=preview_path,
-            fit=ft.BoxFit.FILL,
-            width=state.display_width,
-            height=state.display_height,
-            left=state.x,
-            top=state.y,
-            filter_quality=ft.FilterQuality.HIGH,
-        )
-        hint = ft.Text(
-            "拖动图片选择显示区域，滑动缩放",
-            size=T.FS_CAPTION,
-            color=ft.Colors.ON_SURFACE_VARIANT,
-            text_align=ft.TextAlign.CENTER,
-        )
-        error_text = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.RED_400)
-
-        def refresh_preview():
-            preview.width = state.display_width
-            preview.height = state.display_height
-            preview.left = state.x
-            preview.top = state.y
-            try:
-                preview.update()
-            except Exception:
-                if self.page:
-                    self.page.update()
-
-        def on_pan(e):
-            delta = getattr(e, "local_delta", None)
-            if delta is None:
-                return
-            state.pan(delta.x, delta.y)
-            refresh_preview()
-
-        def on_zoom(e):
-            state.set_zoom(float(e.control.value or 1.0))
-            refresh_preview()
-
-        viewport = ft.GestureDetector(
-            mouse_cursor=ft.MouseCursor.MOVE,
-            drag_interval=12,
-            on_pan_update=on_pan,
-            content=ft.Container(
-                content=ft.Stack([preview], clip_behavior=ft.ClipBehavior.HARD_EDGE),
-                width=viewport_width,
-                height=viewport_height,
-                bgcolor=ft.Colors.BLACK,
-                border_radius=(viewport_width / 2 if is_avatar else 14),
-                clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                border=T.border_all(2, ft.Colors.with_opacity(0.75, ft.Colors.WHITE)),
-            ),
-        )
-        zoom_slider = ft.Slider(
-            min=1.0,
-            max=4.0,
-            value=1.0,
-            divisions=60,
-            on_change=on_zoom,
-            active_color=ft.Colors.DEEP_PURPLE_400,
-        )
-
-        if target == self.avatar_in:
-            title_str = "裁剪头像"
-        elif target == self.card_bg_in:
-            title_str = "裁剪名片背景"
-        else:
-            title_str = "裁剪全局背景"
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(title_str),
-            content=ft.Column(
-                [
-                    ft.Container(viewport, alignment=ft.alignment.Alignment.CENTER),
-                    hint,
-                    ft.Row(
-                        [ft.Icon(ft.Icons.ZOOM_OUT_ROUNDED, size=18), zoom_slider,
-                         ft.Icon(ft.Icons.ZOOM_IN_ROUNDED, size=18)],
-                        spacing=4,
-                    ),
-                    error_text,
-                ],
-                width=360,
-                spacing=10,
-                tight=True,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-
-        def cleanup():
-            if preview_path != source_path:
-                try:
-                    if os.path.exists(preview_path):
-                        os.remove(preview_path)
-                except Exception:
-                    pass
-
-        def cancel(_e):
-            if self.page:
-                self.page.pop_dialog()
-            cleanup()
-
-        def confirm(_e):
-            try:
-                media_dir = Path(self.app.paths.data_dir) / "profile_media"
-                stamp = time.time_ns()
-                prefix = "avatar" if target == self.avatar_in else ("card_bg" if target == self.card_bg_in else "background")
-                filename = f"{prefix}_crop_{stamp}{'.png' if target == self.avatar_in else '.jpg'}"
-                output_path = render_crop(
-                    source_path,
-                    str(media_dir / filename),
-                    state,
-                    output_size,
-                )
-                if self.page:
-                    self.page.pop_dialog()
-                self._apply_cropped_media(output_path, target)
-                cleanup()
-            except Exception as exc:
-                error_text.value = f"裁剪失败：{exc}"
-                try:
-                    error_text.update()
-                except Exception:
-                    if self.page:
-                        self.page.update()
-
-        dialog.actions = [
-            ft.TextButton("取消", on_click=cancel),
-            ft.FilledButton("使用此区域", icon=ft.Icons.CROP_ROUNDED, on_click=confirm),
-        ]
-        if self.page:
-            self.page.show_dialog(dialog)
+        self.media_controller.open_crop_editor(source_path, target)
 
     def _apply_cropped_media(self, output_path, target):
-        target.value = output_path
-        if target == self.avatar_in:
-            self._draft_avatar = output_path
-            self._avatar_name = output_path
-            self.avatar_holder.content = T.avatar_circle(
-                self.app.paths.asset_src(output_path), T.AVATAR_LG
-            )
-            self._build_default_avatars()
-            source = "avatar"
-        elif target == self.card_bg_in:
-            self._draft_card_bg = output_path
-            self.cover_container.gradient = None
-            self.cover_container.image = ft.DecorationImage(src=output_path, fit=ft.BoxFit.COVER)
-            source = "card_bg"
-        else:
-            self._draft_bg = output_path
-            self.bg_fit_dd.value = "cover"
-            self.bg_align_dd.value = "center"
-            self.app.friend_db.set_app_setting("bg_fit", "cover")
-            self.app.friend_db.set_app_setting("bg_align", "center")
-            self._apply_background_preview(output_path)
-            source = "background"
-        if self.page:
-            self.page.update()
-        self._auto_save(source)
+        self.media_controller.apply_cropped_media(output_path, target)
 
     def _apply_background_preview(self, bg_path):
-        if bg_path and os.path.exists(bg_path):
-            self.main_layout.image = ft.DecorationImage(
-                src=bg_path,
-                fit=ft.BoxFit.COVER,
-                alignment=ft.alignment.Alignment.CENTER,
-                opacity=float(self.bg_opacity_dd.value or "0.15"),
-            )
-            self.cover_container.gradient = None
-            self.cover_container.image = ft.DecorationImage(src=bg_path, fit=ft.BoxFit.COVER)
-        else:
-            self.main_layout.image = None
-            self.cover_container.image = None
-            self.cover_container.gradient = T.GRADIENT_PRIMARY
+        self.media_controller.apply_background_preview(bg_path)
 
     def _build_default_avatars(self):
-        self.default_avatars_row.controls.clear()
-        selected_path = (self.avatar_in.value or "").strip()
-        for name, path in self.DEFAULT_AVATARS:
-            selected_asset = self.app.paths.asset_src(selected_path)
-            is_selected = selected_asset == path or selected_path.endswith(name)
-            avatar_btn = ft.GestureDetector(
-                mouse_cursor=ft.MouseCursor.CLICK,
-                on_tap=lambda _e, p=path: self._select_default_avatar(p),
-                content=ft.Container(
-                    content=T.avatar_circle(self.app.paths.asset_src(path), 40),
-                    padding=2,
-                    border_radius=24,
-                    border=(
-                        T.border_all(2, ft.Colors.DEEP_PURPLE_400)
-                        if is_selected
-                        else T.border_all(2, ft.Colors.TRANSPARENT)
-                    ),
-                    animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
-                ),
-            )
-            self.default_avatars_row.controls.append(avatar_btn)
+        self.media_controller.build_default_avatars()
 
     def _select_default_avatar(self, path):
-        self.avatar_in.value = path
-        self._draft_avatar = path
-        self._avatar_name = path
-        self.avatar_holder.content = T.avatar_circle(
-            self.app.paths.asset_src(path), T.AVATAR_LG
-        )
-        self._build_default_avatars()
-        if self.page:
-            self.page.update()
-        self._auto_save("avatar")
+        self.media_controller.select_default_avatar(path)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1634,430 +1139,55 @@ class ProfileView:
         self._load()
 
     def _build_settings_tab(self):
-        # Premium Brand Badge/Card (About Card)
-        about_card = ft.Container(
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=ft.Colors.WHITE, size=24),
-                            ft.Text("相识北洋", size=T.FS_HEADER, weight=ft.FontWeight.W_900,
-                                    color=ft.Colors.WHITE),
-                        ],
-                        spacing=T.SP_SM,
-                    ),
-                    ft.Text(f"版本 {self.current_version}", size=T.FS_BODY, weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.with_opacity(0.8, ft.Colors.WHITE)),
-                    ft.Text("P2P 校园网无网社交 · 洪泛中继路由 · 离线消息漫游",
-                            size=T.FS_CAPTION, color=ft.Colors.with_opacity(0.7, ft.Colors.WHITE)),
-                ],
-                spacing=6,
-            ),
-            padding=T.SP_LG,
-            border_radius=T.R_LG,
-            gradient=T.GRADIENT_PRIMARY,
-            shadow=T.SHADOW_GLOW,
-            border=T.border_all(1, ft.Colors.with_opacity(0.15, ft.Colors.WHITE)),
-        )
-
-        return ft.Column(
-            [
-                about_card,
-                T.surface_card(
-                    T.section_title("个性化主题"),
-                    ft.Text("点击选择系统主题色：", size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT),
-                    self._theme_selector_row,
-                ),
-                T.surface_card(
-                    T.section_title("自定义背景"),
-                    self._path_row("背景图片", self.bg_in, "选择并裁剪"),
-                ),
-                T.surface_card(
-                    T.section_title("应用更新"),
-                    self._setting_row("当前版本", ft.Text(self.current_version, size=T.FS_BODY, weight=ft.FontWeight.BOLD)),
-                    ft.Text("更新地址", size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Row(
-                        [
-                            self.update_manifest_url,
-                            self.update_check_btn,
-                        ],
-                        spacing=T.SP_SM,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    self.update_status,
-                ),
-                T.surface_card(
-                    T.section_title("网络与设备"),
-                    self._setting_row("本机主机名", self.settings_device_name),
-                    ft.Row(
-                        [
-                            ft.Text("TCP 端口号", size=T.FS_BODY,
-                                    color=ft.Colors.ON_SURFACE_VARIANT, width=100),
-                            self.settings_tcp_port,
-                            ft.IconButton(
-                                icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
-                                icon_color=ft.Colors.DEEP_PURPLE_400,
-                                on_click=self._save_tcp,
-                                tooltip="保存端口"
-                            ),
-                        ],
-                        spacing=T.SP_SM,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    self.settings_tcp_hint,
-                    self._setting_row("UDP 广播端口", self.settings_udp_port),
-                ),
-                T.surface_card(
-                    T.section_title("文件接收"),
-                    self._setting_row("保存位置", self.settings_receive_dir),
-                    ft.Row(
-                        [
-                            ft.ElevatedButton(
-                                "选择保存目录",
-                                icon=ft.Icons.FOLDER_OPEN_ROUNDED,
-                                on_click=self._choose_receive_dir,
-                                bgcolor=ft.Colors.DEEP_PURPLE_500,
-                                color=ft.Colors.WHITE,
-                            ),
-                            ft.TextButton(
-                                "恢复默认",
-                                on_click=self._reset_receive_dir,
-                            ),
-                        ],
-                        spacing=T.SP_SM,
-                    ),
-                ),
-                T.surface_card(
-                    T.section_title("安全与隐私"),
-                    ft.ListTile(
-                        leading=ft.Icon(ft.Icons.CLEANING_SERVICES_ROUNDED, color=ft.Colors.ORANGE_400),
-                        title=ft.Text("清空聊天记录", weight=ft.FontWeight.BOLD),
-                        subtitle=ft.Text("清除本地数据库中所有朋友的历史消息", size=T.FS_CAPTION),
-                        trailing=ft.Icon(ft.Icons.NAVIGATE_NEXT_ROUNDED),
-                        on_click=lambda _e: self._clear_chat(),
-                    ),
-                    ft.ListTile(
-                        leading=ft.Icon(ft.Icons.MARK_AS_UNREAD_ROUNDED, color=ft.Colors.DEEP_PURPLE_400),
-                        title=ft.Text("清除离线待发送队列", weight=ft.FontWeight.BOLD),
-                        subtitle=ft.Text("清空缓存中准备转发给朋友的离线数据", size=T.FS_CAPTION),
-                        trailing=self.settings_pending_count,
-                        on_click=lambda _e: self._clear_pending(),
-                    ),
-                ),
-            ],
-            spacing=T.SP_MD,
-            scroll=ft.ScrollMode.AUTO,
-        )
+        return self.settings_panel.build()
 
     def _setting_row(self, label, value_control):
-        label_control = ft.Text(label, size=T.FS_BODY, color=ft.Colors.ON_SURFACE_VARIANT)
-        label_control.col = {"sm": 12, "md": 4}
-        value_container = ft.Container(content=value_control)
-        value_container.col = {"sm": 12, "md": 8}
-        return ft.ResponsiveRow(
-            [label_control, value_container],
-            columns=12,
-            spacing=T.SP_SM,
-            run_spacing=4,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+        return self.settings_panel.setting_row(label, value_control)
 
     def _check_updates(self, _e):
-        manifest_url = (self.update_manifest_url.value or "").strip()
-        if not manifest_url:
-            self.update_status.value = "请先填写 latest.json 更新地址"
-            self.update_status.color = ft.Colors.RED_400
-            if self.page:
-                self.page.update()
-            return
-
-        self.app.friend_db.set_app_setting("update_manifest_url", manifest_url)
-        self.update_check_btn.disabled = True
-        self.update_status.value = "正在检查更新..."
-        self.update_status.color = ft.Colors.ON_SURFACE_VARIANT
-        if self.page:
-            self.page.update()
-
-        def worker():
-            try:
-                info = check_for_updates(
-                    manifest_url,
-                    current_version=self.current_version,
-                    target_platform=self._current_update_platform(),
-                )
-            except UpdateCheckError as exc:
-                self._set_update_status(f"检查失败：{exc}", ft.Colors.RED_400)
-                self.update_check_btn.disabled = False
-                return
-            except Exception as exc:
-                self._set_update_status(f"检查失败：{exc}", ft.Colors.RED_400)
-                self.update_check_btn.disabled = False
-                return
-
-            self.update_check_btn.disabled = False
-            if not info.has_update:
-                self._set_update_status(
-                    f"已是最新版本：{info.current_version}",
-                    ft.Colors.GREEN_400,
-                )
-                return
-            self._show_update_dialog(info)
-
-        threading.Thread(target=worker, daemon=True).start()
+        self.update_controller.check_updates(_e)
 
     def _set_update_status(self, text, color):
-        self.update_status.value = text
-        self.update_status.color = color
-        try:
-            if self.page:
-                self.page.update()
-        except Exception:
-            pass
+        self.update_controller.set_status(text, color)
 
     def _show_update_dialog(self, info):
-        asset = info.asset
-        download_url = asset.url if asset else ""
-        notes = info.notes.strip() or "暂无更新说明"
-        sha256 = asset.sha256 if asset else ""
-        status = ft.Text("", size=T.FS_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
-
-        def copy_url(_e):
-            if download_url and self.page:
-                self.page.set_clipboard(download_url)
-                status.value = "下载链接已复制"
-                status.color = ft.Colors.GREEN_400
-                self.page.update()
-
-        def open_url(_e):
-            if not download_url:
-                return
-            if self._open_url(download_url):
-                self._close(dlg)
-            else:
-                copy_url(_e)
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("发现新版本", weight=ft.FontWeight.BOLD),
-            content=ft.Column(
-                [
-                    ft.Text(f"当前版本：{info.current_version}", size=T.FS_BODY),
-                    ft.Text(f"最新版本：{info.latest_version}", size=T.FS_BODY, weight=ft.FontWeight.BOLD),
-                    ft.Divider(height=16, color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)),
-                    ft.Text("更新说明", size=T.FS_BODY, weight=ft.FontWeight.BOLD),
-                    ft.Text(notes, size=T.FS_CAPTION, selectable=True),
-                    ft.Text(f"SHA256：{sha256}" if sha256 else "SHA256：清单未提供", size=11, selectable=True),
-                    status,
-                ],
-                width=320,
-                tight=True,
-                spacing=8,
-            ),
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-
-        actions = [ft.TextButton("关闭", on_click=lambda _e: self._close(dlg))]
-        if download_url:
-            actions.insert(0, ft.TextButton("复制链接", on_click=copy_url))
-            actions.insert(
-                1,
-                ft.ElevatedButton(
-                    "打开下载",
-                    icon=ft.Icons.OPEN_IN_BROWSER_ROUNDED,
-                    on_click=open_url,
-                    bgcolor=ft.Colors.DEEP_PURPLE_500,
-                    color=ft.Colors.WHITE,
-                ),
-            )
-            self._set_update_status(
-                f"发现新版本 {info.latest_version}",
-                ft.Colors.GREEN_400,
-            )
-        else:
-            self._set_update_status(
-                f"发现新版本 {info.latest_version}，但清单没有当前平台下载地址",
-                ft.Colors.ORANGE_400,
-            )
-        dlg.actions = actions
-
-        try:
-            self.page.overlay.append(dlg)
-            dlg.open = True
-            self.page.update()
-        except Exception:
-            pass
+        self.update_controller.show_dialog(info)
 
     def _open_url(self, url):
-        try:
-            launcher = getattr(self.page, "launch_url", None)
-            if callable(launcher):
-                launcher(url)
-                return True
-        except Exception:
-            pass
-        try:
-            import webbrowser
-            return bool(webbrowser.open(url))
-        except Exception:
-            return False
+        return self.update_controller.open_url(url)
 
     def _current_update_platform(self):
-        if self.page and str(self.page.platform).lower() in ("android", "pageplatform.android"):
-            return "android"
-        return None
+        return self.update_controller.current_platform()
 
     def _save_tcp(self, _e):
-        try:
-            port = int((self.settings_tcp_port.value or "").strip())
-            if port < 1024 or port > 65535:
-                self.settings_tcp_hint.value = "❌ 端口范围应在 1024-65535"
-                self.settings_tcp_hint.color = ft.Colors.RED_400
-                self.page.update()
-                return
-            self.app.set_tcp_port(port)
-            self.settings_tcp_hint.value = f"✨ 端口已改为 {port}（将在应用重启后生效）"
-            self.settings_tcp_hint.color = ft.Colors.GREEN_400
-        except ValueError:
-            self.settings_tcp_hint.value = "❌ 请输入有效的数字端口"
-            self.settings_tcp_hint.color = ft.Colors.RED_400
-        self.page.update()
-
-        def _clear():
-            time.sleep(3)
-            self.settings_tcp_hint.value = ""
-            try:
-                self.page.update()
-            except Exception:
-                pass
-        threading.Thread(target=_clear, daemon=True).start()
+        self.settings_controller.save_tcp(_e)
 
     async def _choose_receive_dir(self, _e):
-        platform_name = str(getattr(self.page, "platform", "")).lower() if self.page else ""
-        is_android = platform_name in ("android", "pageplatform.android")
-        if is_android:
-            # Android: use Flet FilePicker (no tkinter available)
-            await self._choose_receive_dir_flet()
-            return
-        try:
-            import tkinter as tk
-        except ImportError:
-            await self._choose_receive_dir_flet()
-            return
-
-        def _do_pick():
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            selected = filedialog.askdirectory(
-                title="选择接收文件保存目录",
-                initialdir=self.app.get_receive_dir(),
-                parent=root,
-            )
-            root.destroy()
-            if selected:
-                self._apply_receive_dir(selected)
-
-        threading.Thread(target=_do_pick, daemon=True).start()
+        await self.settings_controller.choose_receive_dir(_e)
 
     async def _choose_receive_dir_flet(self):
-        picker = getattr(self.app, "receive_dir_picker", None)
-        if not picker:
-            picker = ft.FilePicker()
-            self.app.receive_dir_picker = picker
-        picker.on_result = self._on_receive_dir_selected
-        page = self.page
-        if page and picker not in page.services:
-            page.services.append(picker)
-            try:
-                page.update()
-            except Exception:
-                pass
-        try:
-            await picker.get_directory_path(
-                dialog_title="选择接收文件保存目录",
-                initial_directory=self.app.get_receive_dir(),
-            )
-        except Exception as exc:
-            self.settings_tcp_hint.value = f"目录选择器不可用，可手动输入路径: {exc}"
-            self.settings_tcp_hint.color = ft.Colors.ORANGE_400
-            if self.page:
-                self.page.update()
+        await self.settings_controller.choose_receive_dir_flet()
 
     def _on_receive_dir_selected(self, e):
-        if e.path:
-            self._apply_receive_dir(e.path)
-        else:
-            self.settings_tcp_hint.value = "未选择目录；Android 可直接手动输入保存路径后点“应用路径”"
-            self.settings_tcp_hint.color = ft.Colors.ON_SURFACE_VARIANT
-            if self.page:
-                self.page.update()
+        self.settings_controller.on_receive_dir_selected(e)
 
     def _reset_receive_dir(self, _e):
-        self._apply_receive_dir(str(self.app.paths.received_files_dir))
+        self.settings_controller.reset_receive_dir(_e)
 
     def _apply_receive_dir_from_input(self, _e):
-        self._apply_receive_dir(self.receive_dir_input.value)
+        self.settings_controller.apply_receive_dir_from_input(_e)
 
     def _normalize_receive_dir(self, directory):
-        value = (directory or "").strip().strip('"').strip("'")
-        if not value:
-            raise ValueError("保存路径不能为空")
-        if value.startswith("content://"):
-            raise ValueError("当前运行时不能直接写入 content:// 目录，请输入文件系统路径")
-        if self.page:
-            platform_name = str(getattr(self.page, "platform", "")).lower()
-        else:
-            platform_name = ""
-        is_android = platform_name in ("android", "pageplatform.android")
-        path = Path(value).expanduser()
-        if is_android and not path.is_absolute():
-            path = Path(self.app.paths.received_files_dir).parent / path
-        return str(path)
+        return self.settings_controller.normalize_receive_dir(directory)
 
     def _apply_receive_dir(self, directory):
-        try:
-            import os
-            directory = self._normalize_receive_dir(directory)
-            os.makedirs(directory, exist_ok=True)
-            resolved = self.app.set_receive_dir(directory)
-            self.settings_receive_dir.value = resolved
-            self.receive_dir_input.value = resolved
-            self.settings_tcp_hint.value = "✨ 文件保存位置已更新"
-            self.settings_tcp_hint.color = ft.Colors.GREEN_400
-        except Exception as exc:
-            msg = str(exc)
-            is_android = str(self.page.platform).lower() in ("android", "pageplatform.android") if self.page else False
-            if is_android:
-                msg += "\n💡 提示: 安卓平台受限制，建议使用默认或私有目录"
-            self.settings_tcp_hint.value = f"❌ 保存位置更新失败: {msg}"
-            self.settings_tcp_hint.color = ft.Colors.RED_400
-        if self.page:
-            self.page.update()
+        self.settings_controller.apply_receive_dir(directory)
 
     def _clear_chat(self):
-        def do_clear(_e):
-            for f in self.app.get_all_friends():
-                self.app.clear_chat_history(f.get("name", ""))
-            self.settings_tcp_hint.value = "✨ 本地聊天记录清理成功"
-            self.settings_tcp_hint.color = ft.Colors.GREEN_400
-            self.page.update()
-
-        self._confirm("确定清除所有聊天记录吗？此操作将彻底擦除本地消息历史，且不可撤销。",
-                      on_ok=do_clear, ok_text="确认清空")
+        self.settings_controller.clear_chat()
 
     def _clear_pending(self):
-        def do_clear(_e):
-            for f in self.app.get_all_friends():
-                self.app.clear_pending_messages(f.get("name", ""))
-            self.settings_pending_count.value = "0 条消息"
-            self.settings_tcp_hint.value = "✨ 离线待发送消息队列已清空"
-            self.settings_tcp_hint.color = ft.Colors.GREEN_400
-            self.page.update()
-
-        self._confirm("确定清空待发送队列吗？清空后，离线的好友上线时将无法收到这些缓存的数据包。",
-                      on_ok=do_clear, ok_text="确认清空")
+        self.settings_controller.clear_pending()
 
     def _confirm(self, message, on_ok, ok_text="确认"):
         dlg = ft.AlertDialog(

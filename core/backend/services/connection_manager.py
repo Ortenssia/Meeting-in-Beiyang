@@ -19,6 +19,11 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional
 
+from core.backend.services.connection_maintenance import ConnectionMaintenance
+from core.backend.services.connection_registry import (
+    ConnectionRegistry,
+    peer_identity_from_message,
+)
 from core.backend.services.network_policy import DEFAULT_NETWORK_POLICY, NetworkPolicy
 from core.backend.shared.helpers import Helpers
 from core.backend.shared.protocol import Protocol
@@ -58,13 +63,21 @@ class ConnectionManager:
         self.my_user_id = my_user_id
         self.my_device_id = my_device_id
         self.network_policy = network_policy or DEFAULT_NETWORK_POLICY
+        self._maintenance = ConnectionMaintenance(self)
 
         # ------------------------------------------------------------------ #
         #  连接池：endpoint -> {"socket", "name", "ip", "port", "connected_at"}
         # endpoint is normally "ip:port" when the peer advertises a TCP port.
         # ------------------------------------------------------------------ #
-        self.connections: Dict[str, Dict] = {}
-        self._lock = threading.Lock()
+        self._registry = ConnectionRegistry(
+            on_connected=lambda name, ip: (
+                self.on_friend_connected(name, ip)
+                if self.on_friend_connected
+                else None
+            )
+        )
+        self.connections = self._registry.connections
+        self._lock = self._registry.lock
 
         # 服务端 socket
         self._server_socket: Optional[socket.socket] = None
@@ -122,13 +135,13 @@ class ConnectionManager:
 
             # 心跳线程：每 30 秒广播 HEARTBEAT
             self._heartbeat_thread = threading.Thread(
-                target=self._heartbeat_worker, daemon=True, name="TCP-Heartbeat"
+                target=self._maintenance.heartbeat_worker, daemon=True, name="TCP-Heartbeat"
             )
             self._heartbeat_thread.start()
 
             # IP 变更监控线程：每 15 秒检测本机 IP 是否变化
             self._ip_monitor_thread = threading.Thread(
-                target=self._ip_monitor_worker, daemon=True, name="TCP-IPMonitor"
+                target=self._maintenance.ip_monitor_worker, daemon=True, name="TCP-IPMonitor"
             )
             self._ip_monitor_thread.start()
 
@@ -232,37 +245,11 @@ class ConnectionManager:
                 if not message:
                     continue
 
-                msg_type = message.get("type", "")
-
-                # 特殊处理：入站连接时第一条消息可能是 PROFILE_EXCHANGE，
-                # 从中提取好友名字并注册到连接池
-                if msg_type == Protocol.PROFILE_EXCHANGE:
-                    friend_name = message.get("name", "Unknown")
-                    tcp_port = int(message.get("tcp_port", 0) or 0)
+                friend_name, tcp_port = peer_identity_from_message(message)
+                if friend_name:
                     connection_key = self._register_connection(
                         sock, friend_ip, friend_name, tcp_port
                     )
-
-                # 特殊处理：HEARTBEAT 消息可能带来名字更新
-                elif msg_type == Protocol.HEARTBEAT:
-                    friend_name = message.get("name", "")
-                    if friend_name:
-                        tcp_port = int(message.get("port", 0) or 0)
-                        connection_key = self._register_connection(
-                            sock, friend_ip, friend_name, tcp_port
-                        )
-
-                # FRIEND_REQUEST / FRIEND_ACCEPT both carry a profile. Register
-                # the inbound socket as soon as we learn the peer name so replies
-                # can be sent back over the same connection.
-                elif msg_type in (Protocol.FRIEND_REQUEST, Protocol.FRIEND_ACCEPT):
-                    profile = message.get("profile", {}) or {}
-                    friend_name = profile.get("name", "")
-                    if friend_name:
-                        tcp_port = int(profile.get("tcp_port", 0) or 0)
-                        connection_key = self._register_connection(
-                            sock, friend_ip, friend_name, tcp_port
-                        )
 
                 # 将消息传递给上层
                 if self.on_message_received:
@@ -508,24 +495,7 @@ class ConnectionManager:
         Returns:
             列表，每项为字典 {"ip": str, "name": str, "connected_at": str}。
         """
-        with self._lock:
-            self._prune_dead_connections_unlocked()
-            deduped = {}
-            for key, info in self.connections.items():
-                name = info.get("name", "")
-                ip = info.get("ip", key)
-                port = int(info.get("port", 0) or 0)
-                dedupe_key = name or self._endpoint_key(ip, port)
-                current = deduped.get(dedupe_key)
-                if current and int(current.get("port", 0) or 0) and not port:
-                    continue
-                deduped[dedupe_key] = {
-                    "ip": ip,
-                    "port": port,
-                    "name": name,
-                    "connected_at": info["connected_at"],
-                }
-            return list(deduped.values())
+        return self._registry.online()
 
     def is_friend_online(self, name: str) -> bool:
         """
@@ -632,72 +602,18 @@ class ConnectionManager:
 
     @staticmethod
     def _endpoint_key(ip: str, port: int = 0) -> str:
-        try:
-            port = int(port or 0)
-        except (TypeError, ValueError):
-            port = 0
-        return f"{ip}:{port}" if port > 0 else ip
+        return ConnectionRegistry.endpoint_key(ip, port)
 
     def _find_connection_key(self, ip_or_name: str) -> Optional[str]:
-        # 1) exact key match
-        if ip_or_name in self.connections:
-            return ip_or_name
-        # 2) match by registered name
-        for key, info in self.connections.items():
-            if info.get("name") == ip_or_name:
-                return key
-        # 3) A caller that supplied ip:port wants that exact endpoint. If it
-        # did not match above, do not collapse to bare IP; same-IP multi-instance
-        # setups would otherwise send to the wrong peer.
-        if ":" in ip_or_name:
-            candidate_ip, candidate_port = ip_or_name.rsplit(":", 1)
-            try:
-                candidate_port = int(candidate_port)
-            except ValueError:
-                candidate_port = 0
-            for key, info in self.connections.items():
-                if (
-                    info.get("ip") == candidate_ip
-                    and int(info.get("port", 0) or 0) == candidate_port
-                ):
-                    return key
-            return None
-        # 4) match by IP only
-        candidate_ip = ip_or_name
-        for key, info in self.connections.items():
-            if info.get("ip") == candidate_ip:
-                return key
-        # 5) match by original string as IP
-        for key, info in self.connections.items():
-            if info.get("ip") == ip_or_name:
-                return key
-        return None
+        return self._registry.find_key_unlocked(ip_or_name)
 
     @staticmethod
     def _socket_alive(sock: Optional[socket.socket]) -> bool:
-        """Return True if *sock* appears to still be a usable TCP connection."""
-        if sock is None:
-            return False
-        try:
-            # getpeername succeeds for connected sockets and raises for
-            # sockets that have been closed or lost the peer.
-            sock.getpeername()
-            return True
-        except OSError:
-            return False
+        return ConnectionRegistry.socket_alive(sock)
 
     def _prune_dead_connections_unlocked(self):
         """Drop locally closed sockets before reporting online state."""
-        for key, info in list(self.connections.items()):
-            if self._socket_alive(info.get("socket")):
-                continue
-            sock = info.get("socket")
-            try:
-                if sock:
-                    sock.close()
-            except Exception:
-                pass
-            del self.connections[key]
+        self._registry.prune_unlocked()
 
     @staticmethod
     def _looks_like_ip(value: str) -> bool:
@@ -723,120 +639,20 @@ class ConnectionManager:
         does occur (rare race), the *new* duplicate socket is closed and
         the existing entry is kept.
         """
-        key = self._endpoint_key(ip, port)
-        should_notify = False
-        with self._lock:
-            # Remove any port-less stub that references the same socket.
-            for existing_key, info in list(self.connections.items()):
-                if info.get("socket") is sock and existing_key != key:
-                    del self.connections[existing_key]
-                elif (
-                    port
-                    and existing_key != key
-                    and info.get("ip") == ip
-                    and info.get("name") == (name or ip)
-                    and not int(info.get("port", 0) or 0)
-                ):
-                    # Port-less entry for same IP+name — discard it.
-                    try:
-                        old = info.get("socket")
-                        if old and old is not sock:
-                            old.close()
-                    except Exception:
-                        pass
-                    del self.connections[existing_key]
-
-            old_name = ""
-            if key not in self.connections:
-                should_notify = True
-            else:
-                existing = self.connections[key]
-                old_name = existing.get("name", "")
-                old_sock = existing.get("socket")
-                if old_sock and old_sock is not sock:
-                    # Duplicate — close the old socket, keep the new one (self-healing).
-                    try:
-                        old_sock.close()
-                    except Exception:
-                        pass
-                    should_notify = True
-
-            existing_lock = self.connections.get(key, {}).get("send_lock")
-            self.connections[key] = {
-                "socket": sock,
-                "name": name or ip,
-                "ip": ip,
-                "port": int(port or 0),
-                "connected_at": self.connections.get(key, {}).get(
-                    "connected_at", Helpers.get_timestamp()
-                ),
-                "send_lock": existing_lock or threading.Lock(),
-            }
-
-        if should_notify and self.on_friend_connected:
-            self.on_friend_connected(name or ip, ip)
-        return key
+        return self._registry.register(sock, ip, name, port)
 
     # ================================================================== #
     #  心跳线程
     # ================================================================== #
 
     def _heartbeat_worker(self):
-        """
-        心跳线程：每 30 秒向所有好友广播 HEARTBEAT 消息。
-
-        用于维持连接活跃、宣告本机当前 IP，并让好友检测 IP 变更。
-        """
-        while self._running:
-            time.sleep(self.network_policy.tcp_heartbeat_interval)
-            if not self._running:
-                break
-
-            try:
-                current_ip = Helpers.get_default_ip()
-                heartbeat_data = Protocol.create_heartbeat(
-                    name=self.my_name,
-                    ip=current_ip,
-                    port=self.tcp_port,
-                )
-                self.broadcast_to_friends(heartbeat_data)
-            except Exception as e:
-                logger.debug("心跳广播异常: %s", e)
+        """Compatibility wrapper for tests that target the old private method."""
+        self._maintenance.heartbeat_worker()
 
     # ================================================================== #
     #  IP 变更检测线程
     # ================================================================== #
 
     def _ip_monitor_worker(self):
-        """
-        IP 变更监控线程：每 15 秒检测本机默认 IP 是否变化。
-
-        若检测到 IP 变更，立即向所有好友发送 HEARTBEAT 消息
-        携带新的 IP 地址，以便好友更新地址簿中的记录。
-        """
-        while self._running:
-            time.sleep(self.network_policy.ip_monitor_interval)
-            if not self._running:
-                break
-
-            try:
-                current_ip = Helpers.get_default_ip()
-
-                if current_ip != self._last_known_ip:
-                    old_ip = self._last_known_ip
-                    self._last_known_ip = current_ip
-
-                    logger.info(
-                        "检测到 IP 变更: %s -> %s，通知所有好友", old_ip, current_ip
-                    )
-
-                    # 立即广播 HEARTBEAT 告知好友
-                    heartbeat_data = Protocol.create_heartbeat(
-                        name=self.my_name,
-                        ip=current_ip,
-                        port=self.tcp_port,
-                    )
-                    self.broadcast_to_friends(heartbeat_data)
-
-            except Exception as e:
-                logger.debug("IP 监控异常: %s", e)
+        """Compatibility wrapper for tests that target the old private method."""
+        self._maintenance.ip_monitor_worker()

@@ -12,16 +12,14 @@ from typing import Optional, List, Dict, Any
 import flet as ft
 
 from core.config import AppPaths, get_app_paths
-from core.backend.services.social_runtime import RuntimeConfig, SocialRuntime
+from core.backend.services.social_runtime import SocialRuntime
 from core.backend.shared.helpers import Helpers
 from core.backend.shared.protocol import Protocol
 
 from . import theme as T
-from .views.discover import DiscoverView
-from .views.friends import FriendsView
-from .views.chat import ChatView
-from .views.moments import MomentsView
-from .views.profile import ProfileView
+from .app_runtime import AppRuntimeCoordinator
+from .app_service_facade import AppServiceFacade
+from .app_shell import AppShellBuilder
 
 
 class FloatingNavBar(ft.Container):
@@ -130,6 +128,9 @@ class BeiyangApp:
         self._unread_chats = set()
         self._open_profile_dlg: Optional[ft.AlertDialog] = None
         self._open_profile_dlg_name: str = ""
+        self.runtime_coordinator = AppRuntimeCoordinator(self)
+        self.service_facade = AppServiceFacade(self)
+        self.shell_builder = AppShellBuilder(self, FloatingNavBar)
 
         # Initialize a hidden Tkinter root once for fast file dialogs
         try:
@@ -150,50 +151,8 @@ class BeiyangApp:
         self._init_services()
         self._build_shell(page)
         self.runtime.start()
-
-        # bind runtime callbacks
-        self.runtime.on_discovery_changed = lambda: self._safe(self._on_discovery)
-        self.runtime.on_online_changed = lambda: self._safe(self._on_online)
-        self.runtime.on_friends_changed = lambda: self._safe(self._on_friends)
-        self.runtime.on_message_received = lambda n, c, t, mid="": self._safe(
-            lambda: self._on_message(n, c, t, mid))
-        self.runtime.on_friend_request = lambda p, m, ip=None: self._safe(
-            lambda: self._on_friend_request(p, m, ip))
-        self.runtime.on_friend_accepted = lambda n, ip: self._safe(self._on_online)
-        self.runtime.on_friend_deleted = lambda n: self._safe(lambda: self._on_friend_deleted(n))
-        self.runtime.on_error = lambda msg: print(f"[BeiyangSocial] error: {msg}")
-        self.runtime.on_group_message_received = lambda gid, s, c, ts: self._safe(
-            lambda: self._on_group_message(gid, s, c, ts))
-        self.runtime.on_moments_changed = lambda: self._safe(self._on_moments_changed)
-        self.runtime.on_notifications_changed = lambda: self._safe(self._on_notifications_changed)
-        self.message_service.on_friend_profile_update_available = (
-            lambda name: self._safe(lambda: self._on_profile_update_available(name))
-        )
-        self.message_service.on_friend_profile_updated = (
-            lambda name: self._safe(lambda: self._on_profile_updated(name))
-        )
-        self.message_service.on_file_received = (
-            lambda name, path, ts: self._safe(
-                lambda: self._on_file_received(name, path, ts)
-            )
-        )
-        self.message_service.on_file_progress = (
-            lambda fid, peer, name, done, total, sending, confirmed=0: self._safe(
-                lambda: self.views["chat"].on_file_progress(
-                    fid, peer, name, done, total, sending, confirmed=confirmed
-                )
-            )
-        )
-        self.message_service.on_file_offer_received = (
-            lambda name, filename, size, fid: self._safe(
-                lambda: self._on_file_offer_received(name, filename, size, fid)
-            )
-        )
-        self.message_service.on_file_status_changed = (
-            lambda fid, status: self._safe(
-                lambda: self.views["chat"].on_file_status_changed(fid, status)
-            )
-        )
+        # Binds UI-safe runtime callbacks via self._safe, including on_file_offer_received -> _on_file_offer_received.
+        self.runtime_coordinator.bind_callbacks()
 
         # initial status fetch
         self._update_status_indicators()
@@ -205,179 +164,10 @@ class BeiyangApp:
         self.show_view("chat")
 
     def _init_services(self):
-        self.runtime = SocialRuntime(
-            RuntimeConfig(
-                tcp_port=self.tcp_port,
-                udp_port=self.udp_port,
-                db_path=self.db_path,
-                name_override=self.name_override,
-                avatar_dir=str(self.paths.received_avatars_dir),
-                paths=self.paths,
-            )
-        ).initialize()
-        self.friend_db = self.runtime.friend_db
-        self.connection_manager = self.runtime.connection_manager
-        self.udp_service = self.runtime.udp_service
-        self.message_service = self.runtime.message_service
-        self.social_service = self.runtime.social_service
-        self.device_name = self.runtime.device_name
+        self.runtime_coordinator.init_services()
 
     def _build_shell(self, page: ft.Page):
-        page.title = "相识北洋"
-        page.theme_mode = ft.ThemeMode.SYSTEM
-
-        # FilePicker is a Service in Flet 0.85+, not a visual overlay control.
-        self.profile_file_picker = ft.FilePicker()
-        self.chat_file_picker = ft.FilePicker()
-        self.receive_dir_picker = ft.FilePicker()
-        self.moment_image_picker = ft.FilePicker()
-        page.services.append(self.profile_file_picker)
-        page.services.append(self.chat_file_picker)
-        page.services.append(self.receive_dir_picker)
-        page.services.append(self.moment_image_picker)
-
-        # Register local custom Noto Sans SC font from assets
-        page.fonts = {
-            "Noto Sans SC": self.paths.font_asset
-        }
-
-        # Premium Deep Purple seed theme with custom Noto Sans SC font
-        page.theme = ft.Theme(
-            color_scheme_seed=ft.Colors.DEEP_PURPLE,
-            visual_density=ft.VisualDensity.COMFORTABLE,
-            font_family="Noto Sans SC",
-        )
-
-        # Safe-area aware padding: on Android/iOS reserve space for the
-        # system status bar so it doesn't overlap app content.
-        is_mobile = str(page.platform).lower() in (
-            "android",
-            "ios",
-            "pageplatform.android",
-            "pageplatform.ios",
-        )
-        if is_mobile:
-            page.padding = ft.Padding.only(top=40, left=0, right=0, bottom=0)
-        else:
-            page.padding = 0
-            # Window size only meaningful on desktop; skip on mobile.
-            page.window_width = 460
-            page.window_height = 820
-            page.window_min_width = 380
-            page.window_min_height = 640
-
-        # Set window icon (desktop only — .ico is Windows-specific)
-        if not is_mobile:
-            icon_path = self.paths.assets_dir / "app_icon.ico"
-            if icon_path.exists():
-                page.window.icon = str(icon_path.resolve())
-
-        # Initialize network diagnostic status indicators
-        self.udp_status_dot = ft.Container(
-            width=8, height=8, border_radius=4,
-            bgcolor=ft.Colors.RED_400,
-            tooltip="UDP 广播: 关闭",
-            shadow=ft.BoxShadow(blur_radius=4, color=ft.Colors.with_opacity(0.3, ft.Colors.RED_500))
-        )
-        self.tcp_status_dot = ft.Container(
-            width=8, height=8, border_radius=4,
-            bgcolor=ft.Colors.RED_400,
-            tooltip="TCP 监听: 关闭",
-            shadow=ft.BoxShadow(blur_radius=4, color=ft.Colors.with_opacity(0.3, ft.Colors.RED_500))
-        )
-
-        # Sleek App Header Bar
-        self.top_header = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Row(
-                        [
-                            ft.Text("相识", size=18, weight=ft.FontWeight.W_900, color=ft.Colors.DEEP_PURPLE_400),
-                            ft.Text("北洋", size=18, weight=ft.FontWeight.W_900),
-                        ],
-                        spacing=0,
-                    ),
-                    ft.Row(
-                        [
-                            ft.Row(
-                                [
-                                    self.udp_status_dot,
-                                    ft.Text("UDP广播", size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT),
-                                ],
-                                spacing=4,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                            ft.Row(
-                                [
-                                    self.tcp_status_dot,
-                                    ft.Text("TCP连线", size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE_VARIANT),
-                                ],
-                                spacing=4,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                        ],
-                        spacing=10,
-                    )
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            padding=T.pad_symmetric(horizontal=T.SP_LG, vertical=T.SP_MD),
-            border=ft.Border(bottom=ft.BorderSide(1, ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE))),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-        )
-
-        self.views = {
-            "discover": DiscoverView(self),
-            "friends": FriendsView(self),
-            "chat": ChatView(self),
-            "moments": MomentsView(self),
-            "profile": ProfileView(self),
-        }
-
-        # Use our custom floating bottom dock
-        self.nav = FloatingNavBar(
-            tabs=T.TABS,
-            on_change=self._on_nav_change,
-        )
-
-        self._stack = ft.Stack(expand=True)
-        self.root_bg = ft.Image(
-            src="placeholder",
-            fit=ft.BoxFit.COVER,
-            opacity=0.08,
-            expand=True,
-            visible=False,
-        )
-        self.root_container = ft.Container(
-            content=ft.Column(
-                [
-                    self.top_header,
-                    ft.Container(
-                        content=self._stack,
-                        expand=True,
-                        padding=T.pad_only(
-                            left=8 if is_mobile else T.SP_LG,
-                            right=8 if is_mobile else T.SP_LG,
-                            top=8 if is_mobile else T.SP_LG,
-                        ),
-                    ),
-                    self.nav,
-                ],
-                spacing=0,
-                expand=True,
-            ),
-            expand=True,
-        )
-        page.add(
-            ft.Stack(
-                [
-                    self.root_bg,
-                    self.root_container,
-                ],
-                expand=True,
-            )
-        )
+        self.shell_builder.build_shell(page)
 
     # -- navigation --------------------------------------------------------
 
@@ -681,110 +471,58 @@ class BeiyangApp:
         self.page.update()
 
     def has_friend_profile_update(self, name):
-        return bool(
-            self.message_service
-            and self.message_service.has_pending_profile_update(name)
-        )
+        return self.service_facade.has_friend_profile_update(name)
 
     def get_profile_update_mode(self) -> str:
-        if self.friend_db:
-            mode = self.friend_db.get_app_setting("profile_update_mode", "auto")
-            return mode if mode in ("auto", "manual") else "auto"
-        return "auto"
+        return self.service_facade.get_profile_update_mode()
 
     def request_friend_profile_update(self, name, silent=False):
-        if self.message_service:
-            ok = self.message_service.request_friend_profile(name)
-            if not silent:
-                self.show_toast("已请求更新资料" if ok else "请求更新失败，对方可能不在线")
-            return ok
-        return False
+        return self.service_facade.request_friend_profile_update(name, silent=silent)
 
     def scan_for_people(self):
-        if self.runtime:
-            self.runtime.scan_for_people()
+        self.service_facade.scan_for_people()
 
     def probe_peer(self, ip, port=Protocol.DEFAULT_TCP_PORT, display_name=""):
-        if self.runtime:
-            return self.runtime.probe_peer(ip, port, display_name)
-        return {"ip": ip, "tcp_port": port, "tcp_connected": False}
+        return self.service_facade.probe_peer(ip, port, display_name)
 
     def get_discovered_people(self):
-        return self.runtime.get_discovered_people() if self.runtime else []
+        return self.service_facade.get_discovered_people()
 
     def get_network_diagnostics(self):
-        return self.runtime.get_network_diagnostics() if self.runtime else {}
+        return self.service_facade.get_network_diagnostics()
 
     def send_friend_request(self, name, ip, port=Protocol.DEFAULT_TCP_PORT, user_id="", candidate_ips=None):
-        if self.is_existing_friend(name, ip, port, user_id):
-            return False
-        if self.message_service:
-            return self.message_service.send_friend_request(name, ip, port, user_id, candidate_ips)
-        return False
+        return self.service_facade.send_friend_request(name, ip, port, user_id, candidate_ips)
 
     def is_existing_friend(self, name="", ip="", port=0, user_id=""):
-        if not self.friend_db:
-            return False
-        return self.friend_db.get_relationship_status(
-            user_id=user_id, name=name, ip=ip, port=port,
-        ) in ("pending_sent", "pending_received", "accepted")
+        return self.service_facade.is_existing_friend(name=name, ip=ip, port=port, user_id=user_id)
 
     def get_relationship_status(self, name="", ip="", port=0, user_id=""):
-        if not self.friend_db:
-            return "none"
-        return self.friend_db.get_relationship_status(
-            user_id=user_id, name=name, ip=ip, port=port,
-        )
+        return self.service_facade.get_relationship_status(name=name, ip=ip, port=port, user_id=user_id)
 
     def get_all_friends(self):
-        return self.runtime.get_all_friends() if self.runtime else []
+        return self.service_facade.get_all_friends()
 
     def get_online_friends(self):
-        return self.runtime.get_online_friends() if self.runtime else []
+        return self.service_facade.get_online_friends()
 
     def delete_friend(self, name):
-        friend = self.friend_db.get_friend(name)
-        if friend:
-            ip = friend.get("ip")
-            port = friend.get("port")
-
-            # 发送 FRIEND_DELETE 消息通知对方删除自己
-            if self.message_service:
-                try:
-                    self.message_service.send_friend_delete(name)
-                except Exception:
-                    pass
-                time.sleep(0.2)  # 给操作系统足够的时间发送 TCP 缓存，避免被接下来的主动断连中断
-
-            if ip and self.connection_manager:
-                endpoint = f"{ip}:{port}" if port else ip
-                self.connection_manager.disconnect_friend(endpoint)
-            self.friend_db.remove_friend(name)
-            self._on_friends()
-            self._on_online()
+        self.service_facade.delete_friend(name)
 
     def set_friend_category(self, name, category):
-        if self.friend_db:
-            self.friend_db.set_friend_category(name, category)
-            self._on_friends()
+        self.service_facade.set_friend_category(name, category)
 
     def get_system_notifications(self):
-        return self.friend_db.get_system_notifications() if self.friend_db else []
+        return self.service_facade.get_system_notifications()
 
     def clear_system_notifications(self):
-        if self.friend_db:
-            self.friend_db.clear_system_notifications()
-            self._on_notifications_changed()
+        self.service_facade.clear_system_notifications()
 
     def mark_all_notifications_read(self):
-        if self.friend_db:
-            self.friend_db.mark_all_notifications_read()
-            self._on_notifications_changed()
+        self.service_facade.mark_all_notifications_read()
 
     def mark_notification_read(self, notif_id):
-        if self.friend_db:
-            self.friend_db.mark_notification_read(notif_id)
-            self._on_notifications_changed()
+        self.service_facade.mark_notification_read(notif_id)
 
     def open_chat_with(self, name, is_group=False, group_id=""):
         if not is_group:
@@ -805,75 +543,40 @@ class BeiyangApp:
         return bool(name and name in self._unread_chats)
 
     def send_chat_message(self, friend_name, text, msg_id=""):
-        if self.message_service:
-            return self.message_service.send_message(friend_name, text, msg_id=msg_id)
-        return False
+        return self.service_facade.send_chat_message(friend_name, text, msg_id=msg_id)
 
     def send_file_to_friend(self, friend_name, file_path, file_id=""):
-        if self.message_service:
-            return self.message_service.send_file(
-                friend_name, file_path, file_id=file_id
-            )
-        return False
+        return self.service_facade.send_file_to_friend(friend_name, file_path, file_id=file_id)
 
     def pause_file_transfer(self, file_id):
-        return bool(
-            self.message_service
-            and self.message_service.pause_file_transfer(file_id)
-        )
+        return self.service_facade.pause_file_transfer(file_id)
 
     def resume_file_transfer(self, file_id):
-        return bool(
-            self.message_service
-            and self.message_service.resume_file_transfer(file_id)
-        )
+        return self.service_facade.resume_file_transfer(file_id)
 
     def cancel_file_transfer(self, file_id):
-        if self.message_service:
-            self.message_service.cancel_file_transfer(file_id)
+        self.service_facade.cancel_file_transfer(file_id)
 
     def get_chat_history(self, friend_name):
-        if self.friend_db:
-            return self.friend_db.get_chat_history(friend_name, limit=100)
-        return []
+        return self.service_facade.get_chat_history(friend_name)
 
     def clear_chat_history(self, friend_name):
-        if self.friend_db:
-            self.friend_db.clear_chat_history(friend_name)
-            self.views["chat"].reload_current()
+        self.service_facade.clear_chat_history(friend_name)
 
     def delete_chat_message(self, msg_id, *, is_group=False):
-        if not self.friend_db or not msg_id:
-            return False
-        if is_group:
-            return self.friend_db.delete_group_chat_message(msg_id)
-        return self.friend_db.delete_chat_message(msg_id)
+        return self.service_facade.delete_chat_message(msg_id, is_group=is_group)
 
     def get_chat_list(self):
-        try:
-            chat_list = self.runtime.get_chat_list() if self.runtime else []
-            for entry in chat_list:
-                name = entry.get("name", "")
-                if self.has_unread_chat(name):
-                    entry["unread"] = max(int(entry.get("unread", 0) or 0), 1)
-            return chat_list
-        except Exception as e:
-            print(f"获取聊天列表失败: {e}")
-            return []
+        return self.service_facade.get_chat_list()
 
     def get_runtime_health(self):
-        return self.runtime.get_health() if self.runtime else {}
+        return self.service_facade.get_runtime_health()
 
     def clear_pending_messages(self, friend_name):
-        if self.friend_db:
-            self.friend_db.clear_pending_messages(friend_name)
+        self.service_facade.clear_pending_messages(friend_name)
 
     def get_pending_message_count(self, for_friend=None):
-        if self.social_service:
-            return self.social_service.get_pending_message_count(for_friend or "")
-        return 0
-
-    # -- worker helper for views ------------------------------------------
+        return self.service_facade.get_pending_message_count(for_friend=for_friend)
 
     def run_async(self, fn):
         """Run a blocking call off the UI thread, then refresh page."""
@@ -1094,87 +797,42 @@ class BeiyangApp:
         self.page.update()
 
     def create_group(self, group_name: str, members: List[str]) -> str:
-        if self.message_service:
-            return self.message_service.create_group(group_name, members)
-        return ""
+        return self.service_facade.create_group(group_name, members)
 
     def update_group_info(self, group_id: str, group_name: str, members: List[str], owner: str = "", only_owner_manage: int = 0):
-        if self.message_service and self.friend_db:
-            self.friend_db.save_group(group_id, group_name, members, owner=owner, only_owner_manage=only_owner_manage)
-            payload = {
-                "type": self.message_service.GROUP_CREATE,
-                "group_id": group_id,
-                "group_name": group_name,
-                "members": members,
-                "owner": owner,
-                "only_owner_manage": only_owner_manage,
-            }
-            my_name = self.device_name
-            for m in members:
-                if m != my_name:
-                    self.message_service._send_data_to_friend(m, payload)
+        self.service_facade.update_group_info(
+            group_id, group_name, members, owner=owner, only_owner_manage=only_owner_manage
+        )
 
     def send_group_chat_message(self, group_id: str, content: str, msg_id: str = "") -> bool:
-        if self.message_service:
-            return self.message_service.send_group_chat_message(
-                group_id,
-                content,
-                msg_id=msg_id,
-            )
-        return False
+        return self.service_facade.send_group_chat_message(group_id, content, msg_id=msg_id)
 
     def get_group_chat_history(self, group_id: str) -> List[Dict[str, Any]]:
-        if self.friend_db:
-            return self.friend_db.get_group_chat_history(group_id, limit=100)
-        return []
+        return self.service_facade.get_group_chat_history(group_id)
 
     def get_all_groups(self) -> List[Dict[str, Any]]:
-        if self.friend_db:
-            return self.friend_db.get_all_groups()
-        return []
+        return self.service_facade.get_all_groups()
 
     def publish_moment(self, content: str, media_path: str = "") -> bool:
-        if self.message_service:
-            return self.message_service.publish_moment(content, media_path)
-        return False
+        return self.service_facade.publish_moment(content, media_path)
 
     def get_moments(self) -> List[Dict[str, Any]]:
-        if self.friend_db:
-            return self.friend_db.get_moments(limit=50)
-        return []
+        return self.service_facade.get_moments()
 
     def delete_moment(self, post_id: str) -> bool:
-        if self.message_service:
-            return self.message_service.publish_moment_delete(post_id)
-        elif self.friend_db:
-            ok = self.friend_db.delete_moment(post_id)
-            if ok:
-                self._on_moments_changed()
-            return ok
-        return False
+        return self.service_facade.delete_moment(post_id)
 
     def get_moment_comments(self, post_id: str) -> List[Dict[str, Any]]:
-        if self.friend_db:
-            return self.friend_db.get_moment_comments(post_id)
-        return []
+        return self.service_facade.get_moment_comments(post_id)
 
     def delete_moment_comment(self, comment_id: str) -> bool:
-        if self.friend_db:
-            ok = self.friend_db.delete_moment_comment(comment_id)
-            if ok:
-                self._on_moments_changed()
-            return ok
-        return False
+        return self.service_facade.delete_moment_comment(comment_id)
 
     def publish_moment_comment(self, post_id: str, content: str) -> bool:
-        if self.message_service:
-            return self.message_service.publish_moment_comment(post_id, content)
-        return False
+        return self.service_facade.publish_moment_comment(post_id, content)
 
     def sync_moments(self):
-        if self.message_service and self.connection_manager:
-            for f in self.connection_manager.get_online_friends():
-                self.message_service.sync_moments_with_friend(f["name"])
+        self.service_facade.sync_moments()
 
     def show_personal_moments(self, name: str):
         if not self.page:

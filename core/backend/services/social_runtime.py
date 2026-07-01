@@ -143,6 +143,9 @@ class SocialRuntime:
             network_policy=self.network_policy,
         )
         self.message_service.runtime = self
+        self.message_service.friend_requests.udp_friend_request_sender = (
+            self._send_udp_friend_request
+        )
         self.social_service = SocialService(
             friend_db=self.friend_db,
             connection_manager=self.connection_manager,
@@ -310,6 +313,7 @@ class SocialRuntime:
         self.udp_service.on_device_found = self._handle_device_found
         self.udp_service.on_device_seen = self._sync_known_friend_endpoint
         self.udp_service.on_device_offline = self._handle_device_offline
+        self.udp_service.on_friend_request_packet = self._handle_udp_friend_request
         self.connection_manager.on_friend_connected = self._handle_friend_connected
         self.connection_manager.on_friend_disconnected = self._handle_friend_disconnected
         self.connection_manager.on_message_received = self._handle_wire_message
@@ -376,6 +380,15 @@ class SocialRuntime:
     def _handle_wire_message(self, ip, data):
         if self.message_service:
             self.message_service.handle_message(ip, data)
+
+    def _handle_udp_friend_request(self, ip, data):
+        if self.message_service:
+            self.message_service.handle_message(ip, data)
+
+    def _send_udp_friend_request(self, hosts, payload):
+        if not self.udp_service:
+            return False
+        return self.udp_service.send_friend_request_packet(hosts, payload)
 
     def _handle_message_received(self, friend_name, content, timestamp, msg_id=""):
         if self.on_message_received:
