@@ -22,6 +22,11 @@ bin/
 *.apk
 challenge3_screenshot*.png
 
+# docs: large regenerable archives — not tracked (repo itself is the source)
+docs/*.zip
+docs/*.rar
+docs/*.apk
+
 .venv/
 venv/
 env/
