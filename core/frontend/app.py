@@ -15,6 +15,7 @@ from core.config import AppPaths, get_app_paths
 from core.backend.services.social_runtime import SocialRuntime
 from core.backend.shared.helpers import Helpers
 from core.backend.shared.protocol import Protocol
+from core.backend.services.update_service import current_app_version
 
 from . import theme as T
 from .app_runtime import AppRuntimeCoordinator
@@ -162,6 +163,9 @@ class BeiyangApp:
 
         # initial content
         self.show_view("chat")
+
+        # auto-check for updates after startup (silent; toast-only)
+        self._auto_check_updates()
 
     def _init_services(self):
         self.runtime_coordinator.init_services()
@@ -600,6 +604,40 @@ class BeiyangApp:
 
     def get_pending_message_count(self, for_friend=None):
         return self.service_facade.get_pending_message_count(for_friend=for_friend)
+
+    def _auto_check_updates(self):
+        """Silent startup update check — only shows a toast if update found."""
+        import threading
+        from core.backend.services.update_service import (
+            UpdateCheckError,
+            check_for_updates,
+            default_manifest_url,
+            platform_key,
+        )
+
+        def _check():
+            url = (self.friend_db.get_app_setting("update_manifest_url", "")
+                   or default_manifest_url()).strip()
+            if not url:
+                return
+            try:
+                info = check_for_updates(
+                    url,
+                    current_version=current_app_version(),
+                    target_platform=platform_key(),
+                    timeout=8.0,
+                )
+            except UpdateCheckError:
+                return
+            except Exception:
+                return
+            if info.has_update:
+                self.show_toast(
+                    f"📦 发现新版本 {info.latest_version}（当前 {info.current_version}），"
+                    f"请前往设置页检查更新"
+                )
+
+        threading.Thread(target=_check, daemon=True).start()
 
     def run_async(self, fn):
         """Run a blocking call off the UI thread, then refresh page."""

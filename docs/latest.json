@@ -1,0 +1,14 @@
+{
+  "version": "1.8.95",
+  "notes": "当前版本 1.8.95\n\n更新内容:\n- 修复文件传输影分身问题\n- 优化好友申请延迟 (TCP timeout 0.5s + UDP 并发)\n- Android: 文件保存至公开 Download 目录\n- Android: 头像/背景选取 content:// URI 修复\n- Android: 返回键不再直接退出\n- 启动时自动检查更新\n\n下载最新 APK 即可更新。",
+  "android": {
+    "url": "https://github.com/Ortenssia/Meeting-in-Beiyang/releases/latest/download/meeting-in-beiyang.apk",
+    "sha256": "",
+    "size": ""
+  },
+  "windows": {
+    "url": "https://github.com/Ortenssia/Meeting-in-Beiyang/releases/latest/download/meeting-in-beiyang-windows.zip",
+    "sha256": "",
+    "size": ""
+  }
+}

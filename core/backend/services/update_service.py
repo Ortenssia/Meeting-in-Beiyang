@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-DEFAULT_UPDATE_MANIFEST_URL = ""
+DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Ortenssia/Meeting-in-Beiyang/main/docs/latest.json"
 UPDATE_URL_ENV = "BEIYANG_UPDATE_URL"
 
 

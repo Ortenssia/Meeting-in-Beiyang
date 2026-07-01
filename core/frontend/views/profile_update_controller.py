@@ -159,7 +159,5 @@ class ProfileUpdateController:
             return False
 
     def current_platform(self):
-        owner = self.owner
-        if owner.page and str(owner.page.platform).lower() in ("android", "pageplatform.android"):
-            return "android"
-        return None
+        from core.backend.services.update_service import platform_key
+        return platform_key()
