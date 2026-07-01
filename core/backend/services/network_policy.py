@@ -9,7 +9,7 @@ class NetworkPolicy:
 
     profile_name: str = "campus_lan"
 
-    tcp_connect_timeout: float = 2.0
+    tcp_connect_timeout: float = 0.5
     tcp_heartbeat_interval: float = 30.0
     ip_monitor_interval: float = 15.0
 
