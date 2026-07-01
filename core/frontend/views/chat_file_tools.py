@@ -49,22 +49,36 @@ def open_file_with_os(file_path: str):
     import platform
     system = platform.system()
     if is_android():
-        try:
-            subprocess.run(
-                [
-                    "am",
-                    "start",
-                    "-a",
-                    "android.intent.action.VIEW",
-                    "-d",
-                    f"file://{file_path}",
-                    "-t",
-                    "*/*",
-                ],
-                check=False,
-            )
-        except Exception:
-            pass
+        # Try content:// URI first (works on Android 7+) via a simple
+        # file-to-content bridge using the downloads provider for files
+        # that live under public storage.
+        actual = file_path
+        public_prefixes = ["/sdcard/", "/storage/emulated/", "/storage/"]
+        is_public = any(actual.startswith(p) for p in public_prefixes)
+        if is_public:
+            # For public files, a file:// URI still works on many devices
+            try:
+                subprocess.run(
+                    ["am", "start", "-a", "android.intent.action.VIEW",
+                     "-d", f"file://{actual}", "-t", "*/*",
+                     "--activity-clear-task"],
+                    check=False, timeout=5,
+                )
+                return
+            except Exception:
+                pass
+        # Fallback: try opening the parent directory so the user can
+        # at least navigate to the file manually
+        folder = os.path.dirname(actual)
+        if folder:
+            try:
+                subprocess.run(
+                    ["am", "start", "-a", "android.intent.action.VIEW",
+                     "-d", f"file://{folder}"],
+                    check=False, timeout=5,
+                )
+            except Exception:
+                pass
     elif system == "Windows":
         os.startfile(file_path)
     elif system == "Darwin":

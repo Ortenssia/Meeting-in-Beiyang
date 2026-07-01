@@ -54,16 +54,42 @@ def _discover_project_root(explicit: Optional[str] = None) -> Path:
 
 
 def _android_writable_dir() -> Optional[Path]:
-    """Return a writable directory on Android, or None on other platforms."""
-    # Buildozer / p4a sets these environment variables.
-    for key in (
-        "BEIYANG_DATA_DIR",
-        "ANDROID_APP_PATH",
-        "EXTERNAL_STORAGE",
-    ):
+    """Return a writable directory on Android, or None on other platforms.
+    
+    Priority order:
+    1. BEIYANG_DATA_DIR env var (explicit override)
+    2. /storage/emulated/0/Download/Beiyang (public, user-accessible)
+    3. EXTERNAL_STORAGE env var
+    4. ANDROID_APP_PATH env var
+    5. HOME/beiyang_data fallback (private, last resort)
+    """
+    # Explicit override always wins
+    val = os.environ.get("BEIYANG_DATA_DIR")
+    if val:
+        return Path(val).expanduser()
+    
+    # Public Download directory — user can find files here
+    download_candidates = [
+        Path("/storage/emulated/0/Download/Beiyang"),
+        Path("/sdcard/Download/Beiyang"),
+    ]
+    for candidate in download_candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            # Verify it's actually writable
+            test = candidate / ".write_test"
+            test.write_text("ok")
+            test.unlink()
+            return candidate
+        except Exception:
+            continue
+    
+    # Buildozer / p4a environment variables
+    for key in ("ANDROID_APP_PATH", "EXTERNAL_STORAGE"):
         val = os.environ.get(key)
         if val:
             return Path(val).expanduser()
+    
     # Flet on Android: the app's private files dir at <home>/files
     home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
     if home:
