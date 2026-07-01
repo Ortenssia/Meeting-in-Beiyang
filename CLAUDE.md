@@ -72,12 +72,17 @@ ft.Switch(
 
 ### Buttons — Prefer standard buttons over GestureDetector in scrollable containers
 
+`ft.ElevatedButton` is **deprecated since Flet 0.80.0** (removed in 1.0). Use `ft.Button` — it is a drop-in replacement with the same constructor signature (`content`, `icon`, `bgcolor`, `color`, `on_click`, `style`, …).
+
 ```python
 # ✅ CORRECT — use standard buttons for click actions
-ft.ElevatedButton("保存", on_click=self._save, ...)
+ft.Button("保存", on_click=self._save, ...)
 ft.OutlinedButton("选择图片", on_click=browse, ...)
 ft.IconButton(icon=ft.Icons.ADD, on_click=self._add, ...)
 ft.TextButton("取消", on_click=close, ...)
+
+# ❌ WRONG — deprecated, will be removed in Flet 1.0
+ft.ElevatedButton("保存", on_click=self._save, ...)
 
 # ❌ AVOID — GestureDetector.on_tap is unreliable inside scrollable Columns
 ft.GestureDetector(
@@ -178,7 +183,7 @@ is_mobile = str(page.platform) in ("PagePlatform.ANDROID", "PagePlatform.IOS")
 | Layer | Path | Allowed to access |
 |---|---|---|
 | Frontend (Views) | `core/frontend/views/` | `app.*` public methods only |
-| App Controller | `core/frontend/app.py` | `runtime`, `friend_db`, `message_service` |
+| App Controller | `core/frontend/app.py` (+ `app_runtime` / `app_shell` / `app_service_facade`) | `runtime`, `friend_db`, `message_service` |
 | Runtime | `core/backend/services/social_runtime.py` | All backend services |
 | Services | `core/backend/services/` | `friend_db`, `shared/*`, `config/*` |
 | Shared | `core/backend/shared/` | Nothing else |
@@ -191,18 +196,72 @@ is_mobile = str(page.platform) in ("PagePlatform.ANDROID", "PagePlatform.IOS")
 
 ### File responsibilities
 
+The backend was split from a few monolithic files into focused repositories and services. Each original file now delegates to its sub-modules.
+
+#### Backend services (`core/backend/services/`)
+
 | File | Responsibility |
 |---|---|
-| `friend_db.py` | All SQLite operations (friends, profile, messages, settings) |
-| `connection_manager.py` | TCP connection pool, send/receive, heartbeat |
-| `udp_service.py` | UDP broadcast, device discovery, cleanup |
-| `message_service.py` | Message routing, file transfer, profile sync |
+| `friend_db.py` | Facade over the friend/profile/message repositories — SQLite schema, locks, connection; delegates CRUD to the `*_repository` modules |
+| `friend_repository.py` | CRUD for accepted friends |
+| `friend_category_repository.py` | Friend category (分组) records |
+| `friend_request_repository.py` | Friend request state persistence |
+| `social_repository.py` | Groups and moments persistence |
+| `message_repository.py` | Direct chat history and pending relay messages |
+| `notification_repository.py` | System notification rows |
+| `profile_repository.py` | Local profile and matching-condition persistence |
+| `message_service.py` | Message routing facade — delegates to relay/delivery/transfer sub-services |
+| `message_relay_service.py` | Heartbeat flood and RELAY_MESSAGE routing |
+| `chat_delivery_service.py` | Direct chat-message send/receive |
+| `pending_message_flusher.py` | Replay cached offline messages when a friend comes online |
+| `file_transfer_service.py` | File transfer control flow (send side) |
+| `file_receive_service.py` | Incoming file-offer and receive-side handling (chunking, hashing, disk write) |
+| `file_transfer_state.py` | Transfer lifecycle state (senders, receivers, pause/cancel) |
+| `file_store.py` | File-on-disk helpers (paths, integrity) |
+| `friend_request_service.py` | FRIEND_REQUEST / FRIEND_ACCEPT / FRIEND_DELETE protocol flow |
+| `profile_sync_service.py` | Profile sync notice/request/response protocol |
+| `social_sync_service.py` | Group chat and moments broadcast sync |
+| `connection_manager.py` | TCP connection pool, send/receive, heartbeat — delegates registry/maintenance |
+| `connection_registry.py` | Thread-safe endpoint→socket registry (alive-socket preference) |
+| `connection_maintenance.py` | Background heartbeat broadcast and local-IP-change notification |
+| `udp_service.py` | UDP broadcast, device discovery, cleanup — delegates state/router |
+| `udp_discovery_state.py` | Thread-safe discovery state (DeviceInfo) |
+| `udp_packet_router.py` | Parsed UDP packet → discovery state changes + callbacks |
 | `social_service.py` | Friend cards, chat list aggregation |
 | `social_runtime.py` | Lifecycle, callback wiring, orchestration |
-| `file_transfer_state.py` | Transfer lifecycle state (senders, receivers, pause/cancel) |
-| `file_message.py` | Encode/decode file message cards for chat |
+| `network_policy.py` | Network allow/deny policy |
+| `update_service.py` | App update checking |
+
+#### Shared (`core/backend/shared/`)
+
+| File | Responsibility |
+|---|---|
 | `protocol.py` | Wire protocol constants and message builders |
-| `paths.py` | Path resolution for DB, assets, receive dirs |
+| `file_message.py` | Encode/decode file message cards for chat |
+| `helpers.py` | Shared utility functions |
+
+#### Frontend (`core/frontend/`)
+
+| File | Responsibility |
+|---|---|
+| `app.py` | `BeiyangApp` controller — wires runtime, shell, and facade |
+| `app_runtime.py` | Build `SocialRuntime` and bind UI callbacks |
+| `app_shell.py` | Construct Flet page shell and view instances |
+| `app_service_facade.py` | Thin service/db methods exposed to views via `app.*` |
+| `views/chat.py` | `ChatView` — delegates rendering/layout/controllers to sub-modules |
+| `views/chat_bubble_renderer.py` | Build text/code/file message bubbles |
+| `views/chat_layout.py` | Chat tab and chat-window frame builder |
+| `views/chat_notifications.py` | System notification panel for chat |
+| `views/chat_group_controller.py` | Group info / create / settings dialogs |
+| `views/chat_file_offer_controller.py` | Inline file-offer widgets (queue, accept/decline) |
+| `views/chat_file_tools.py` | File-message codec and platform helpers |
+| `views/chat_transfer_controller.py` | Transfer UI state, speed, stuck-transfer refresh |
+| `views/profile.py` | `ProfileView` — delegates settings/tags/media/update to sub-modules |
+| `views/profile_settings.py` | Settings controls and layout |
+| `views/profile_settings_controller.py` | Network / receive-dir / privacy actions |
+| `views/profile_tags.py` | QQ-style tag input controls |
+| `views/profile_media_controller.py` | Avatar/background pick, crop, preview |
+| `views/profile_update_controller.py` | App update workflow |
 
 ### Paths — never hardcode
 
@@ -375,7 +434,11 @@ Run all tests:
 python -m pytest core/tests -q
 ```
 
-Tests that create temp directories (`tmp_path` fixture) may fail on Windows with `PermissionError` — this is an environment issue, not a code bug.
+Tests that create temp directories (`tmp_path` fixture) may error on Windows with `PermissionError: [WinError 5]` when the default basetemp (`%TEMP%\pytest-of-<user>`) is not writable. This is an environment issue, not a code bug. Redirect basetemp to a writable path to confirm:
+
+```powershell
+python -m pytest core/tests -q --basetemp="./pytest_basetemp"
+```
 
 ---
 

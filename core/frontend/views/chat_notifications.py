@@ -218,7 +218,7 @@ class ChatNotificationsPanel:
         return ft.Container(
             content=ft.Row(
                 [
-                    ft.ElevatedButton(
+                    ft.Button(
                         "同意并添加",
                         icon=ft.Icons.CHECK_ROUNDED,
                         on_click=self._accept_friend_request(sender_name, request, notification["id"]),
@@ -303,7 +303,7 @@ class ChatNotificationsPanel:
         return ft.Container(
             content=ft.Row(
                 [
-                    ft.ElevatedButton(
+                    ft.Button(
                         "同意并接收",
                         icon=ft.Icons.CHECK_ROUNDED,
                         on_click=self._accept_file_offer(file_id, notification["id"]),

@@ -159,7 +159,7 @@ class ChatGroupController:
             ),
             actions=[
                 ft.TextButton("取消", on_click=close_dialog),
-                ft.ElevatedButton(
+                ft.Button(
                     "创建",
                     on_click=do_create,
                     bgcolor=ft.Colors.DEEP_PURPLE_500,
@@ -294,7 +294,7 @@ class ChatGroupController:
             ),
             actions=[
                 ft.TextButton("取消", on_click=close_dialog),
-                ft.ElevatedButton(
+                ft.Button(
                     "保存",
                     on_click=do_save,
                     bgcolor=ft.Colors.DEEP_PURPLE_500,

@@ -1202,7 +1202,7 @@ class ProfileView:
 
         dlg.actions = [
             ft.TextButton("取消", on_click=lambda _e: self._close(dlg)),
-            ft.ElevatedButton(
+            ft.Button(
                 ok_text,
                 on_click=handle_ok,
                 bgcolor=ft.Colors.RED_600,

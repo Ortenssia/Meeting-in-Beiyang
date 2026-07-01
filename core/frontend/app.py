@@ -669,7 +669,7 @@ class BeiyangApp:
 
         # Build the "loading" state for the update button
         update_status = ft.Text("", size=11, color=ft.Colors.GREEN_400, weight=ft.FontWeight.BOLD)
-        update_btn = ft.ElevatedButton(
+        update_btn = ft.Button(
             "更新资料",
             icon=ft.Icons.REFRESH_ROUNDED,
             on_click=lambda e: self._on_update_profile_click(e, dlg, name, update_btn, update_status, actions_row),
@@ -687,7 +687,7 @@ class BeiyangApp:
             except Exception:
                 pass
 
-        space_btn = ft.ElevatedButton(
+        space_btn = ft.Button(
             "个人空间",
             on_click=lambda _e: (close_dlg(None), self.show_personal_moments(name)),
             bgcolor=ft.Colors.DEEP_PURPLE_500,

@@ -32,7 +32,7 @@ class MomentsView:
         self.media_row = ft.Row([self.media_btn, self.media_indicator], spacing=10)
         self.image_preview = ft.Image(src="placeholder", visible=False, height=100, fit=ft.BoxFit.FIT_HEIGHT)
 
-        self.publish_btn = ft.ElevatedButton(
+        self.publish_btn = ft.Button(
             "发布动态",
             icon=ft.Icons.SEND_ROUNDED,
             on_click=self._on_publish,
@@ -384,7 +384,7 @@ class MomentsView:
             content=ft.Text("此操作将永久从您的本地设备上删除该条空间动态。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda _e: self._close_dialog(dlg)),
-                ft.ElevatedButton("删除", on_click=confirm_delete, bgcolor=ft.Colors.RED_400, color=ft.Colors.WHITE),
+                ft.Button("删除", on_click=confirm_delete, bgcolor=ft.Colors.RED_400, color=ft.Colors.WHITE),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )

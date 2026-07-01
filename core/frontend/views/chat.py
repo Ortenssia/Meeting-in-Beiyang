@@ -656,7 +656,7 @@ class ChatView:
             content=ft.Text(f"确定清空与「{self.current_friend}」的所有聊天记录吗？此操作不可恢复。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda _e: self._close(dlg)),
-                ft.ElevatedButton("确认清空", on_click=do_clear, bgcolor=ft.Colors.RED_600, color=ft.Colors.WHITE),
+                ft.Button("确认清空", on_click=do_clear, bgcolor=ft.Colors.RED_600, color=ft.Colors.WHITE),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )

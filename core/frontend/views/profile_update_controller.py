@@ -117,7 +117,7 @@ class ProfileUpdateController:
             actions.insert(0, ft.TextButton("复制链接", on_click=copy_url))
             actions.insert(
                 1,
-                ft.ElevatedButton(
+                ft.Button(
                     "打开下载",
                     icon=ft.Icons.OPEN_IN_BROWSER_ROUNDED,
                     on_click=open_url,

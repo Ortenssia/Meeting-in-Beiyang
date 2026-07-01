@@ -96,7 +96,7 @@ class ProfileSettingsControls:
             expand=True,
         )
         owner.update_status = ft.Text("", size=T.FS_CAPTION)
-        owner.update_check_btn = ft.ElevatedButton(
+        owner.update_check_btn = ft.Button(
             "检查更新",
             icon=ft.Icons.SYSTEM_UPDATE_ROUNDED,
             on_click=owner._check_updates,
@@ -242,7 +242,7 @@ class ProfileSettingsPanel:
             self.setting_row("保存位置", owner.settings_receive_dir),
             ft.Row(
                 [
-                    ft.ElevatedButton(
+                    ft.Button(
                         "选择保存目录",
                         icon=ft.Icons.FOLDER_OPEN_ROUNDED,
                         on_click=owner._choose_receive_dir,

@@ -265,9 +265,9 @@ class DiscoverView:
                 "accepted": "已是好友", "rejected": "可重试",
             }.get(status, "添加好友")
 
-        # Use a standard ElevatedButton here. GestureDetector/abstract Button taps can be swallowed or fail on Android.
+        # Use a standard Button here. GestureDetector taps can be swallowed or fail on Android.
         is_disabled = status in ("pending_sent", "pending_received", "accepted")
-        btn = ft.ElevatedButton(
+        btn = ft.Button(
             status_label,
             icon=ft.Icons.PERSON_ADD_ROUNDED if not is_disabled else None,
             disabled=is_disabled,
@@ -479,7 +479,7 @@ class DiscoverView:
             ),
             actions=[
                 ft.TextButton("探测连接", on_click=on_probe),
-                ft.ElevatedButton("发送申请", on_click=on_send, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
+                ft.Button("发送申请", on_click=on_send, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
                 ft.TextButton("取消", on_click=lambda _e: self._close_dlg(dlg)),
             ],
             actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -553,7 +553,7 @@ class DiscoverView:
             ),
             actions=[
                 ft.OutlinedButton("忽略", on_click=on_ignore),
-                ft.ElevatedButton("同意并添加", on_click=on_accept, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
+                ft.Button("同意并添加", on_click=on_accept, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )

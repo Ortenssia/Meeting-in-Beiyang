@@ -396,7 +396,7 @@ class FriendsView:
             ),
             actions=[
                 ft.TextButton("取消", on_click=lambda _e: self._close(dlg)),
-                ft.ElevatedButton("保存", on_click=on_save, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
+                ft.Button("保存", on_click=on_save, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
@@ -416,7 +416,7 @@ class FriendsView:
             content=ft.Text(f"确定删除好友「{name}」吗？\n删除后连接将断开，但聊天历史记录仍保留。"),
             actions=[
                 ft.TextButton("取消", on_click=lambda _e: self._close(dlg)),
-                ft.ElevatedButton(
+                ft.Button(
                     "删除好友",
                     on_click=do_delete,
                     bgcolor=ft.Colors.RED_600,
@@ -500,7 +500,7 @@ class FriendsView:
             ),
             actions=[
                 ft.TextButton("取消", on_click=close_dialog),
-                ft.ElevatedButton("创建", on_click=do_create, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
+                ft.Button("创建", on_click=do_create, bgcolor=ft.Colors.DEEP_PURPLE_500, color=ft.Colors.WHITE),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
