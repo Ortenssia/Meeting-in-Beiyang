@@ -165,6 +165,22 @@ class FriendRequestService:
         if self.connection_manager.is_friend_online(target_name) and deliver_once():
             return True
 
+        # Try UDP in parallel with TCP — UDP is instant (no handshake),
+        # so it should win when the PC firewall blocks TCP. The winner
+        # delivers the friend request; the loser is ignored.
+        udp_started_event = threading.Event()
+        udp_result = [False]
+
+        def _try_udp():
+            udp_result[0] = deliver_udp_fallback()
+            udp_started_event.set()
+
+        udp_thread = threading.Thread(target=_try_udp, daemon=True)
+        udp_thread.start()
+        # Give UDP a tiny head start so the user sees sub-second response
+        # when the PC is reachable via UDP.
+        udp_started_event.wait(0.15)
+
         try:
             connect_ips = []
             seen_ips = set()
@@ -174,13 +190,16 @@ class FriendRequestService:
                     connect_ips.append(ip)
             connected = False
             for connect_ip in connect_ips:
+                if udp_result[0]:
+                    return True
                 if self.connection_manager.connect_to_friend(connect_ip, target_port, target_name):
                     connected = True
                     if connect_ip != target_ip:
                         target_ip = connect_ip
                     break
             if not connected:
-                return deliver_udp_fallback()
+                udp_thread.join(timeout=2.0)
+                return udp_result[0]
             deadline = time.time() + 2.0
             while time.time() < deadline:
                 if deliver_once():
