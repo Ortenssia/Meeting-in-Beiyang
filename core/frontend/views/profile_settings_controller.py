@@ -73,6 +73,9 @@ class ProfileSettingsController:
 
     async def choose_receive_dir_flet(self):
         owner = self.owner
+        platform_name = str(getattr(owner.page, "platform", "")) if owner.page else ""
+        is_android = platform_name.lower() in ("android", "pageplatform.android")
+
         picker = getattr(owner.app, "receive_dir_picker", None)
         if not picker:
             picker = ft.FilePicker()
@@ -85,6 +88,20 @@ class ProfileSettingsController:
                 page.update()
             except Exception:
                 pass
+
+        if is_android:
+            # Android's SAF directory picker is unreliable — fall back to
+            # manual path input with a suggested public path.
+            owner.receive_dir_input.value = "/storage/emulated/0/Download/Beiyang"
+            owner.settings_tcp_hint.value = (
+                "\uD83D\uDCA1 Android 目录选择器受限，请在上方输入框中直接输入保存路径后点「应用路径」。\n"
+                "推荐使用 /storage/emulated/0/Download/Beiyang（可在文件管理器中找到）"
+            )
+            owner.settings_tcp_hint.color = ft.Colors.ON_SURFACE_VARIANT
+            if owner.page:
+                owner.page.update()
+            return
+
         try:
             await picker.get_directory_path(
                 dialog_title="选择接收文件保存目录",

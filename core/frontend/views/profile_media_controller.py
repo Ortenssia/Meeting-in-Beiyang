@@ -59,7 +59,25 @@ class ProfileMediaController:
             allowed_extensions=["png", "jpg", "jpeg", "bmp"],
         )
         if files and files[0].path:
-            self.open_crop_editor(files[0].path, target)
+            source_path = files[0].path
+            # On Android the picker returns a content:// URI which PIL cannot
+            # open directly — copy to a local temp file first.
+            if source_path.startswith("content://"):
+                import shutil
+                from pathlib import Path
+                tmp_dir = Path(owner.app.paths.data_dir) / "temp_previews"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                local = tmp_dir / f"picker_{int(time.time_ns())}.jpg"
+                # content:// URIs are readable via standard file I/O on Android
+                # (the Flet runtime bridges them through the OS).
+                try:
+                    with open(source_path, "rb") as src:
+                        with open(local, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                    source_path = str(local)
+                except Exception:
+                    pass  # keep original path, try anyway
+            self.open_crop_editor(source_path, target)
 
     def open_crop_editor(self, source_path, target):
         """Open a draggable, zoomable crop viewport for avatar or cover media."""

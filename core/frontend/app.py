@@ -175,6 +175,21 @@ class BeiyangApp:
         idx = e.control.selected_index
         self.show_view(T.TABS[idx][1])
 
+    def _push_nav(self, key: str, **kwargs):
+        """Track navigation history so the back button can unwind it."""
+        if not hasattr(self, "_nav_history"):
+            self._nav_history = []
+        self._nav_history.append((key, kwargs))
+
+    def _pop_nav(self):
+        """Go back one step in navigation history. Returns True if handled."""
+        if not hasattr(self, "_nav_history") or len(self._nav_history) <= 1:
+            return False
+        self._nav_history.pop()  # discard current
+        prev_key, prev_kwargs = self._nav_history[-1]
+        self.show_view(prev_key, **prev_kwargs)
+        return True
+
     def show_view(self, key: str, **kwargs):
         if key not in self.views:
             return
@@ -198,6 +213,14 @@ class BeiyangApp:
             is_group = kwargs.get("is_group", False)
             group_id = kwargs.get("group_id", "")
             view.open_chat(kwargs["friend"], is_group=is_group, group_id=group_id)
+
+        # Track navigation history for back-button support (Android).
+        # Only push when navigating to a different view, not on tab re-tap.
+        nav_key = (key, kwargs.get("friend", ""))
+        if (not hasattr(self, "_nav_history") or not self._nav_history
+                or self._nav_history[-1][0] != key
+                or self._nav_history[-1][1].get("friend") != kwargs.get("friend")):
+            self._push_nav(key, **kwargs)
 
         self._stack.controls = [view.build()]
         self.page.update()

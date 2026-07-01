@@ -148,6 +148,17 @@ class AppShellBuilder:
             "moments": MomentsView(app),
             "profile": ProfileView(app),
         }
+
+        # Intercept Android system back button and convert it to app-level
+        # navigation back. Without this, the back button closes the app
+        # immediately instead of returning to the previous view.
+        if is_mobile:
+            def _on_keyboard(e: ft.KeyboardEvent):
+                if e.key in ("Back", "Escape", "GoBack"):
+                    if app._pop_nav():
+                        page.update()
+            page.on_keyboard_event = _on_keyboard
+
         app.nav = self.nav_class(tabs=T.TABS, on_change=app._on_nav_change)
         app._stack = ft.Stack(expand=True)
         app.root_bg = ft.Image(
