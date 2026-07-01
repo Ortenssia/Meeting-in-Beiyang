@@ -310,6 +310,16 @@ class ChatView:
                 ts = msg.get("timestamp", "")
                 if len(ts) >= 19:
                     ts = ts[11:19]
+                # Skip file messages whose transfer is still active —
+                # _render_active_transfers_for() will create a live progress
+                # bubble instead, avoiding a duplicate from DB + state.
+                if self._is_file_message_content(content) and not self.is_group:
+                    info = self._file_info_from_content(content)
+                    transfer_id = info.get("transfer_id", "")
+                    if transfer_id:
+                        state = self._transfer_states.get(transfer_id)
+                        if state and not state.get("final"):
+                            continue
                 self._append_bubble(
                     from_name,
                     content,
